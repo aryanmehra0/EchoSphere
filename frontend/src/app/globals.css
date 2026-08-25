@@ -1,26 +1,285 @@
 @import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ============================================================================
+   ECHO — MISSION CONTROL DESIGN SYSTEM
+   ----------------------------------------------------------------------------
+   Design thesis: this is an operations console, not a product landing page.
+   It borrows from Bloomberg Terminal, air-traffic control and IBM Carbon —
+   dense, hairline-ruled, achromatic. Saturated colour is reserved ENTIRELY for
+   signal (incident status, agent state). Nothing is coloured for decoration.
+   Every token below is semantic; components never reach for a raw hex.
+   ========================================================================== */
+
+@theme {
+  /* --- Surfaces -----------------------------------------------------------
+     A cool graphite ramp rather than pure black. Pure #000 crushes the
+     hairlines and makes projectors bloom on the status colours.             */
+  --color-void:     #07080a;
+  --color-base:     #0b0d11;
+  --color-sunken:   #090a0e;
+  --color-raised:   #111419;
+  --color-overlay:  #171b22;
+  --color-hover:    #1c212a;
+
+  /* --- Hairlines ----------------------------------------------------------
+     Three weights only. Depth is communicated by rules + inset highlights,
+     never by drop shadows or backdrop blur.                                 */
+  --color-line-faint:  oklch(1 0 0 / 5%);
+  --color-line:        oklch(1 0 0 / 9%);
+  --color-line-strong: oklch(1 0 0 / 16%);
+
+  /* --- Ink ----------------------------------------------------------------
+     A four-stop ramp. If a fifth stop feels necessary, the hierarchy is
+     wrong — fix the layout instead.                                         */
+  --color-ink:    #e9ebee;
+  --color-ink-2:  #a1a7b2;
+  --color-ink-3:  #6b7280;
+  --color-ink-4:  #454b55;
+
+  /* --- Signal -------------------------------------------------------------
+     The only chroma in the interface. Each maps to exactly one meaning.     */
+  --color-critical: #ff5f4d;  /* confirmed failure                           */
+  --color-warning:  #f2a73b;  /* contradiction / unverified / at-risk        */
+  --color-stable:   #3ecf8e;  /* healthy, resolved, confirmed fact           */
+  --color-live:     #4ac9e8;  /* Echo the agent, and live-streaming data     */
+
+  /* --- Type ---------------------------------------------------------------
+     IBM Plex: drawn for technical and enterprise systems, which is exactly
+     what this is. The scale runs tighter than a marketing site — operators
+     read this at a glance, at density, often projected.                     */
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, Menlo, monospace;
+
+  --text-2xs: 0.625rem;      --text-2xs--line-height: 1rem;
+  --text-xs: 0.6875rem;      --text-xs--line-height: 1.05rem;
+  --text-sm: 0.78125rem;     --text-sm--line-height: 1.15rem;
+  --text-base: 0.84375rem;   --text-base--line-height: 1.3rem;
+  --text-md: 0.9375rem;      --text-md--line-height: 1.4rem;
+  --text-lg: 1.125rem;       --text-lg--line-height: 1.6rem;
+  --text-xl: 1.375rem;       --text-xl--line-height: 1.8rem;
+
+  /* --- Radii --------------------------------------------------------------
+     Deliberately small. Large radii read as consumer software and cost
+     horizontal space at this density.                                       */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* --- Motion -------------------------------------------------------------
+     One easing curve for the whole system. Movement only ever confirms a
+     state change; nothing moves to attract attention.                       */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* ============================================================================
+   BASE
+   ========================================================================== */
+
+* {
+  border-color: var(--color-line);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  color-scheme: dark;
+  /* Ops consoles are fixed-frame: the app owns the viewport, never the page. */
+  overscroll-behavior: none;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--color-base);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Numerals must never reflow. Timers, counts and metrics all tick in place. */
+.tnum,
+code,
+kbd {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A single, consistent focus treatment. Visible on every interactive element,
+   keyboard-only so pointer users never see a stray ring.                     */
+:focus-visible {
+  outline: 2px solid var(--color-live);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+::selection {
+  background: color-mix(in oklch, var(--color-live) 30%, transparent);
+  color: var(--color-ink);
+}
+
+/* ============================================================================
+   SCROLLBARS
+   Thin, self-effacing, visible only against the track they belong to.
+   ========================================================================== */
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+.scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: oklch(1 0 0 / 26%);
+  background-clip: content-box;
+}
+
+/* ============================================================================
+   SURFACE PRIMITIVES
+   The replacement for glassmorphism: a raised fill, one hairline, and a 1px
+   inset highlight along the top edge that mimics how a physical bezel catches
+   light. Reads as depth without paying for a backdrop-filter repaint.
+   ========================================================================== */
+
+.surface {
+  background-color: var(--color-raised);
+  border: 1px solid var(--color-line);
+  box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 4%);
+}
+
+.surface-sunken {
+  background-color: var(--color-sunken);
+  border: 1px solid var(--color-line-faint);
+  box-shadow: inset 0 1px 2px 0 oklch(0 0 0 / 30%);
+}
+
+/* Section eyebrow: the small tracked caps label that titles every panel. */
+.eyebrow {
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--color-ink-3);
+}
+
+/* ============================================================================
+   GRAPH CANVAS — React Flow overrides
+   The library ships light-mode, consumer-shaped defaults; every visible
+   surface is re-skinned onto our tokens.
+   ========================================================================== */
+
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-edge-stroke-default: var(--color-ink-4);
+  --xy-edge-stroke-width-default: 1.5;
+  --xy-edge-label-background-color-default: var(--color-overlay);
+  --xy-edge-label-color-default: var(--color-ink-2);
+}
+
+.react-flow__attribution { display: none; }
+
+.react-flow__handle {
+  width: 5px;
+  height: 5px;
+  min-width: 5px;
+  min-height: 5px;
+  background: var(--color-ink-4);
+  border: none;
+  opacity: 0;
+  transition: opacity 160ms var(--ease-out);
+}
+.react-flow__node:hover .react-flow__handle { opacity: 1; }
+
+.react-flow__node { cursor: default; }
+
+.react-flow__node.selected .node-shell {
+  border-color: var(--color-live);
+  box-shadow: 0 0 0 1px var(--color-live), 0 0 24px -4px var(--color-live);
+}
+
+.react-flow__edge-path { transition: stroke 200ms var(--ease-out); }
+
+.react-flow__edge-text {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  fill: var(--color-ink-2);
+}
+.react-flow__edge-textbg { fill: var(--color-base); }
+
+/* Suspected causal links draw as a travelling dashed line. The dash motion is
+   the only ambient animation on the canvas and it encodes meaning: this link
+   is a hypothesis, not a confirmed fact. */
+.edge-suspected .react-flow__edge-path {
+  stroke-dasharray: 4 4;
+  animation: edge-flow 700ms linear infinite;
+}
+
+@keyframes edge-flow {
+  to { stroke-dashoffset: -8; }
+}
+
+/* ============================================================================
+   ANIMATION
+   Every keyframe here is tied to a state change. See reduced-motion below.
+   ========================================================================== */
+
+@keyframes enter-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+.enter-up { animation: enter-up 220ms var(--ease-out) both; }
+
+@keyframes beacon {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+.beacon { animation: beacon 1.8s var(--ease-in-out) infinite; }
+
+/* The expanding ring behind a live status dot. */
+@keyframes halo {
+  0%   { transform: scale(1);   opacity: 0.5; }
+  70%  { transform: scale(2.6); opacity: 0; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+.halo { animation: halo 2s var(--ease-out) infinite; }
+
+/* Indeterminate progress, used only while connecting. */
+@keyframes sweep {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(300%); }
+}
+.sweep { animation: sweep 1.4s var(--ease-in-out) infinite; }
+
+/* ============================================================================
+   ACCESSIBILITY
+   Anything that moves for emphasis is decoration and must be removable.
+   Meaning is always carried by colour + text + shape, never motion alone.
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Screen-reader-only, for the live regions that announce agent state. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
 }
