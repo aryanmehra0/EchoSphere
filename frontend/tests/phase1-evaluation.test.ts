@@ -260,8 +260,25 @@ describe("§10.1 Stranger Test — governance properties Phase 1 owns", () => {
 });
 
 /* ========================================================================== */
-describe("§10.2 Blast Radius — frontend holds no execution credentials", () => {
+describe("§10.2 Blast Radius — trust-zone boundary (v6 §10.1)", () => {
   /* ======================================================================== */
+
+  /**
+   * The zones, as v6 §10.1 defines them:
+   *
+   *   Zone 1  browser  — short-TTL Agora tokens ONLY
+   *   Zone 2  Next.js  — Agora app credentials
+   *   Zone 3  Python   — LLM / STT / Jira / Slack keys
+   *
+   * Phase 1 asserted a blanket "no secrets, no egress anywhere in src/". That
+   * was right while src/ was 100% client code. Now that S1 has added route
+   * handlers, a blanket ban would be wrong in BOTH directions — it would fail
+   * on legitimate server code, and if relaxed globally it would stop catching
+   * the leak it exists to catch.
+   *
+   * So the rule is now a boundary rather than a ban, which is what §10.1
+   * actually specifies.
+   */
 
   const SRC = fileURLToPath(new URL("../src", import.meta.url));
 
@@ -274,48 +291,91 @@ describe("§10.2 Blast Radius — frontend holds no execution credentials", () =
     return out;
   }
 
-  const files = walk(SRC);
-  const sources = files.map((f) => ({ f, text: readFileSync(f, "utf8") }));
+  const norm = (p: string) => p.replace(/\\/g, "/");
+  const isServer = (p: string) =>
+    /\/src\/lib\/server\//.test(norm(p)) || /\/src\/app\/api\//.test(norm(p));
 
-  test("the source tree is non-empty (guards against a vacuous pass)", () => {
-    assert.ok(files.length > 10, `only found ${files.length} source files`);
+  const all = walk(SRC).map((f) => ({ f, text: readFileSync(f, "utf8") }));
+  const client = all.filter((s) => !isServer(s.f));
+  const server = all.filter((s) => isServer(s.f));
+
+  const SECRETS = [
+    "AGORA_APP_CERTIFICATE",
+    "AGORA_CUSTOMER_SECRET",
+    "OPENAI_API_KEY",
+    "ASSEMBLYAI_API_KEY",
+    "PINECONE_API_KEY",
+  ];
+
+  test("both zones are non-empty (guards against a vacuous pass)", () => {
+    assert.ok(client.length > 15, `client zone has only ${client.length} files`);
+    assert.ok(server.length > 3, `server zone has only ${server.length} files`);
   });
 
-  test("no server-side secret is referenced anywhere in the client tree", () => {
-    // "Frontend has no execution credentials — credentials isolated in the
-    // Python backend." These names must never appear in code that ships to a
-    // browser. NEXT_PUBLIC_* is deliberately permitted.
-    const FORBIDDEN = [
-      "AGORA_APP_CERTIFICATE",
-      "OPENAI_API_KEY",
-      "ASSEMBLYAI_API_KEY",
-      "PINECONE_API_KEY",
-      "AGORA_CUSTOMER_SECRET",
-    ];
-
-    for (const { f, text } of sources) {
-      for (const secret of FORBIDDEN) {
+  test("Zone 1: no server secret is referenced in the client tree", () => {
+    for (const { f, text } of client) {
+      for (const secret of SECRETS) {
         assert.ok(
           !text.includes(secret),
-          `${secret} referenced in ${f} — credentials must stay server-side`,
+          `${secret} referenced in CLIENT file ${f} — it would ship to the browser`,
         );
       }
     }
   });
 
-  test("Phase 1 opens no outbound network connection", () => {
+  test("Zone 1: the client tree opens no outbound connection", () => {
+    // The browser talks to our own API routes and to Agora's SDK. Any raw
+    // fetch/WebSocket in client code is an unreviewed egress path. When the
+    // Phase 3 delta socket lands it will live behind a named module and this
+    // test will be narrowed to permit exactly that one.
     const EGRESS = /\b(fetch\(|new WebSocket\(|XMLHttpRequest|navigator\.sendBeacon)/;
 
-    for (const { f, text } of sources) {
+    for (const { f, text } of client) {
+      assert.ok(!EGRESS.test(text), `outbound call in CLIENT file ${f}`);
+    }
+  });
+
+  test("Zone 1 cannot import Zone 2 — the boundary is enforced, not observed", () => {
+    // This is the test that actually holds the line. A single stray
+    // `import { serverEnv } from "@/lib/server/env"` in a component would pull
+    // the app certificate into the browser bundle.
+    //
+    // `server-only` makes that a build error too; this asserts it at review
+    // speed and names the offending file directly.
+    for (const { f, text } of client) {
       assert.ok(
-        !EGRESS.test(text),
-        `outbound call found in ${f} — Phase 1 must not reach the network`,
+        !/from\s+["']@\/lib\/server\//.test(text),
+        `CLIENT file ${f} imports from @/lib/server — that crosses the zone boundary`,
       );
     }
   });
 
+  test("Zone 2: every module touching a secret is marked server-only", () => {
+    for (const { f, text } of server) {
+      const touchesSecret = SECRETS.some((s) => text.includes(s));
+      if (!touchesSecret) continue;
+
+      assert.ok(
+        /import\s+["']server-only["']/.test(text),
+        `${f} reads a secret but is not marked "server-only"`,
+      );
+    }
+  });
+
+  test("Zone 3 keys never appear in this repo at all", () => {
+    // Jira / Slack / PagerDuty credentials belong behind the Proxy Action
+    // Layer. If one shows up in Next.js, a compromise stops being "can talk on
+    // one bridge" and becomes "can page a human at 3am".
+    const ZONE_3 = ["JIRA_API_TOKEN", "SLACK_WEBHOOK_URL", "PAGERDUTY_TOKEN"];
+    for (const { f, text } of all) {
+      for (const key of ZONE_3) {
+        assert.ok(!text.includes(key), `${key} in ${f} — belongs in Zone 3`);
+      }
+    }
+  });
+
   test("no dangerouslySetInnerHTML anywhere (XSS surface)", () => {
-    for (const { f, text } of sources) {
+    for (const { f, text } of all) {
       assert.ok(
         !text.includes("dangerouslySetInnerHTML"),
         `${f} injects raw HTML — transcripts are untrusted voice input`,
@@ -326,8 +386,7 @@ describe("§10.2 Blast Radius — frontend holds no execution credentials", () =
   test("the view never computes RTI (v6 §4.6)", () => {
     // RTI is a server-side heuristic with EWMA and hysteresis. A client-side
     // approximation would disagree with the value driving Echo's interventions.
-    const components = sources.filter((s) => s.f.includes("components"));
-    for (const { f, text } of components) {
+    for (const { f, text } of client.filter((s) => s.f.includes("components"))) {
       assert.ok(
         !/rti\s*=\s*[^=]/i.test(text.replace(/state\.rti/g, "")),
         `${f} appears to derive RTI — the view may only render it`,

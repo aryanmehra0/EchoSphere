@@ -6,19 +6,22 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "spike": "node scripts/s0-bridge-spike.mjs",
     "lint": "eslint src tests --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/incident-reducer.test.ts tests/phase1-evaluation.test.ts",
+    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/incident-reducer.test.ts tests/phase1-evaluation.test.ts tests/s1-identity.test.ts",
     "verify": "npm run typecheck && npm run lint && npm run test && npm run build"
   },
   "dependencies": {
     "@xyflow/react": "^12.11.3",
     "agora-rtc-sdk-ng": "^4.24.7",
     "agora-rtm-sdk": "^2.3.0",
+    "agora-token": "^2.0.5",
     "lucide-react": "^1.34.0",
     "next": "16.3.2",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "server-only": "^0.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

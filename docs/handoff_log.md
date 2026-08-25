@@ -3,7 +3,7 @@
 
 > **Last Updated:** August 25, 2026  
 > **Architecture Version:** Golden Master **v6** (`echosphere_architecture_v6.md`)  
-> **Current Phase:** Phase 1 COMPLETE & v6-ALIGNED → S0 Bridge Spike NEXT  
+> **Current Phase:** Phase 1 done · S1 server side done · **BLOCKED on `.env.local`**  
 > **Repository:** https://github.com/aryanmehra0/EchoSphere.git  
 > **Git Identity:** `aryanmehra0` (local config only)
 
@@ -49,6 +49,14 @@ echosphere-incident-commander/
         ├── hooks/
         │   ├── useClock.ts            # Single 1Hz store via useSyncExternalStore
         │   └── useVoiceEnvelope.ts    # Web Audio → DOM (bypasses React)
+        ├── app/api/                   # ZONE 2 — token, invite-agent,
+        │                              #          agent-events, health
+        ├── lib/server/                # ZONE 2 — secrets live here ONLY,
+        │   │                          #   every module is `server-only`
+        │   ├── env.ts                 # credential access + status
+        │   ├── roster.ts              # write-before-token invariant (G3)
+        │   ├── agora-tokens.ts        # minting
+        │   └── agent-config.ts        # §14.1 prompt, tools, VAD
         ├── lib/
         │   ├── types.ts               # ← THE DATA CONTRACT (v6 §9.4)
         │   ├── incident-reducer.ts    # ← ALL state logic, incl. RTM dedup
@@ -150,7 +158,7 @@ npm run verify     # typecheck → lint → tests → production build
 npm run test       # Rehearsal Rig Tier 1
 ```
 
-Phase 1 status: **47/47 passing.** `node:test` with Node's native TypeScript
+Status: **72/72 passing.** `node:test` with Node's native TypeScript
 stripping — no test-runner dependency was added. This suite IS Tier 1 of the
 Rehearsal Rig (v6 §15): recorded fixtures driving the pure reducer, in CI on
 every commit.
@@ -168,6 +176,24 @@ independently determine the root cause"*. Three rules, all enforced in Tier 1:
 | 1 — attribution mandatory | Every Echo utterance reporting a finding must name a source |
 | 2 — causation interrogative | A causal-indicative regex tripwire runs over all Echo output. **Note the negative lookahead** on `root cause is` — the close-out is *required* to say "root cause is not established" |
 | 3 — `INFERRED` never spoken | No inferred claim's text may appear in any Echo turn |
+
+### The trust-zone boundary (v6 §10.1)
+
+S1 added server code, so the old blanket "no secrets anywhere in src/" became
+wrong in both directions. It is now a **boundary**, enforced twice:
+
+| Layer | Mechanism | Speed |
+|---|---|---|
+| Build | `import "server-only"` in every Zone 2 module | fails the build |
+| Test | `Zone 1 cannot import Zone 2` scans the client tree | names the file in ms |
+
+Both were verified by deliberately importing `serverEnv` into a client
+component: the test failed instantly and the build refused to compile.
+
+**Zone 2 holds Agora credentials only.** Jira / Slack / PagerDuty keys belong
+in Zone 3 behind the Proxy Action Layer — a test fails if one appears here,
+because it would change a Next.js compromise from "can talk on one bridge"
+into "can page a human at 3am".
 
 > [!WARNING]
 > The v5 demo script had Echo say *"That points to a network partition… rather

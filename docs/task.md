@@ -26,13 +26,20 @@
 - `[x]` Contradiction alert with human adjudication gate
 - `[x]` Rehearsal Rig **Tier 1** — 47 tests, all green
 
-## S1 — Fast Loop + Roster · Aug 29 — NOT STARTED
+## S1 — Fast Loop + Roster · Aug 29 — 🟡 CODE COMPLETE, LIVE-GATED
 
-- `[ ]` `/api/token`, `/api/invite-agent`, `/api/agent-events`
-- `[ ]` **Roster Service** with write-before-token ordering *(closes G3)*
-- `[ ]` Event `104` renewal — agent **and** observer
+Server side is built and unit-tested. Everything remaining needs credentials.
+
+- `[x]` `/api/token` — write-before-token ordering *(closes G3)*
+- `[x]` `/api/invite-agent` — §14.1 prompt, agora_vad 300ms, 5 tools
+- `[x]` `/api/agent-events` — event 104 renewal, signature-verified
+- `[x]` `/api/health` — credential preflight
+- `[x]` Roster Service (in-process; Python takes over in S2)
+- `[x]` Trust-zone boundary enforced by `server-only` + a test
+- `[ ]` **BLOCKED:** create `frontend/.env.local` from `.env.local.example`
 - `[ ]` Replace the replay driver with live Agora RTC join + RTM subscribe
 - `[ ]` Feed the real remote track into `useVoiceEnvelope`
+- `[ ]` Observer self-renewal on its own T-minus-300s timer (Python, S2)
 - `[ ]` **Gate:** two humans + Echo in a channel; every UID resolves to a role
 
 ## S2 — Observer + source separation · Aug 30 — NOT STARTED
@@ -72,10 +79,16 @@
 - `[ ]` Degradation ladder
 - `[ ]` **Gate:** demo runs clean three times consecutively
 
-## S0 — Bridge Spike · Aug 26–28 · **DO THIS FIRST** *(closes G9)*
+## S0 — Bridge Spike · Aug 26–28 · **RUN THIS FIRST** *(closes G9)*
 
+Script is written and ready: `npm run spike -- --channel inc-spike`.
+Blocked only on credentials.
+
+- `[x]` Spike script written, syntax-checked, fails cleanly without creds
+- `[ ]` **BLOCKED:** `.env.local`
 - `[ ]` Launch agent with trivial prompt
 - `[ ]` Inject hardcoded instruction; confirm it speaks; measure latency
+- `[ ]` Confirm `on_speaking_action: interrupt` cuts off mid-sentence
 - `[ ]` Define one tool, call it from voice, confirm webhook round-trip
 - `[ ]` **Exit:** injection < 500ms, `interrupt` genuinely interrupts, tool < 400ms
 - `[ ]` **If it fails:** fall back to the RTM text path and rescope — with six days left, not one
@@ -139,5 +152,14 @@
 ```bash
 cd frontend
 npm run verify     # typecheck → lint → tests → production build
-npm run test       # Rehearsal Rig Tier 1 (47 tests)
+npm run test       # Rehearsal Rig Tier 1 (72 tests)
+npm run spike      # S0 Bridge Spike — needs .env.local
+curl localhost:3000/api/health   # which credentials are configured
 ```
+
+## The one blocker
+
+`frontend/.env.local` does not exist. Until it does, S0 cannot run and no API
+route can reach Agora. Copy `.env.local.example` and fill in five values —
+note that `AGORA_CUSTOMER_ID`/`SECRET` are a **different credential** from
+`AGORA_APP_CERTIFICATE`; conflating them is the most common setup failure.

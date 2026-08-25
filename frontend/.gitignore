@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...but the TEMPLATE must be committed: it holds no secrets and it is the
+# file that tells the next person which five credentials to obtain.
+!.env.local.example
 
 # vercel
 .vercel
@@ -39,3 +42,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# S0 bridge spike output
+s0-spike-report.json
