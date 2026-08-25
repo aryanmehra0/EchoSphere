@@ -1,0 +1,21 @@
+# EchoSphere Hackathon Execution Tasks
+
+- `[/]` **Phase 1: Next.js Foundation & UI**
+  - `[x]` Scaffold Next.js application (frontend)
+  - `[x]` Install dependencies (TailwindCSS, React Flow, Agora SDKs)
+  - `[x]` Scaffold main React Flow dashboard UI
+  - `[/]` Implement RTM transcript deduplication logic
+  - `[/]` Implement Web Audio API visualization
+- `[ ]` **Phase 2: The Fast Loop & Token Management**
+  - `[ ]` Implement `/api/token` route for RTC/RTM tokens
+  - `[ ]` Implement `/api/invite-agent` route (OpenAI Realtime MLLM)
+  - `[ ]` Implement `104 agent expire` event listener & token renewal
+- `[ ]` **Phase 3: The Slow Loop (Python Backend)**
+  - `[ ]` Scaffold Python FastAPI backend
+  - `[ ]` Setup Agora Python Server SDK worker
+  - `[ ]` Implement `on_playback_audio_frame_before_mixing` and `vad_result_bytearray` streaming
+  - `[ ]` Implement Server-Side RTI calculation
+  - `[ ]` Setup Vector DB for Semantic Contradiction engine
+- `[ ]` **Phase 4: The Bridge**
+  - `[ ]` Connect Python backend to v2.6 Custom Instruction Injection API
+  - `[ ]` End-to-end testing (Stranger Test, Blast Radius, Iteration consistency)
