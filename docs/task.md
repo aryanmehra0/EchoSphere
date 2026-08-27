@@ -1,5 +1,7 @@
 # EchoSphere Hackathon Execution Tasks
 
+> **Cross-session memory:** `session_log.md` — read it before starting work.
+>
 > **Governing architecture:** `echosphere_architecture_v6.md` (Golden Master v6).
 > It supersedes `echosphere_master_context.md` (v5), which stays in the repo as
 > the record of what v6's depth analysis was performed against.

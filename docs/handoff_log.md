@@ -4,6 +4,10 @@
 > **Last Updated:** August 25, 2026  
 > **Architecture Version:** Golden Master **v6** (`echosphere_architecture_v6.md`)  
 > **Current Phase:** Phase 1 done · S1 server side done · **BLOCKED on `.env.local`**  
+> **⚠️ START HERE:** read `docs/session_log.md` first — it carries the
+> cross-session memory (decisions, dead ends, corrections) that this file and
+> the git history do not.
+>
 > **Repository:** https://github.com/aryanmehra0/EchoSphere.git  
 > **Git Identity:** `aryanmehra0` (local config only)
 
@@ -310,6 +314,7 @@ the master-doc §11 demo. `M` toggles mute.
 
 | Document | Purpose |
 |---|---|
+| `docs/session_log.md` | **Cross-session memory.** Decisions, corrections, environment notes, what NOT to do. Read first. |
 | `docs/echosphere_architecture_v6.md` | **THE GOVERNING ARCHITECTURE.** Nine gaps, bidirectional Bridge, epistemic ledger, ten workflows, Rehearsal Rig, risk-ordered plan |
 | `docs/echosphere_master_context.md` | v5 — superseded. Kept as the record of what v6 §2 analysed |
 | `docs/implementation_plan.md` | v5 EDD — superseded |
@@ -318,8 +323,8 @@ the master-doc §11 demo. `M` toggles mute.
 | `frontend/src/lib/types.ts` | The Slow-Loop data contract |
 
 > [!CAUTION]
-> **For any agent continuing this work:** read
-> `docs/echosphere_architecture_v6.md` first — especially §6 (epistemic
+> **For any agent continuing this work:** read `docs/session_log.md`, then
+> `docs/echosphere_architecture_v6.md` — especially §6 (epistemic
 > discipline) and §17 (why the Bridge spike comes first). Then
 > `frontend/src/app/globals.css` and `frontend/src/lib/types.ts`. Do not deviate from that architecture, or
 > from the design system, without explicit user approval. Run `npm run verify`
