@@ -25,11 +25,24 @@ record of what v6's analysis was performed against. Do not follow it.
 
 ## Current state
 
-- **Phase 1** (console UI) — done, v6-aligned
+- **Phase 1** (console UI) — done, v6-aligned. Run and screenshotted end to end
+  Aug 27: full replay, 0 console errors.
 - **S1** (identity layer: tokens, Roster, agent lifecycle) — code done, never run live
-- **S0** (Bridge Spike) — script ready, **not yet run**
-- **Blocker:** `frontend/.env.local` is empty. Check with
-  `curl localhost:3000/api/health` → want `ready: true`.
+- **S0** (Bridge Spike) — script **fixed** Aug 27 (two runtime bugs, neither
+  credential-related — see `session_log.md` §5), dry-runs clean, **not yet run live**
+- **Fast Loop is CASCADED, not audio-to-audio.** No OpenAI key was obtainable,
+  so it is Agora ASR → **Groq** (`openai/gpt-oss-120b`) → TTS vendor. Groq is
+  verified against live Agora. Two consequences: §12.1's latency budget no
+  longer applies, and whether `on_speaking_action: "interrupt"` still interrupts
+  is now the top unknown — S0 must answer it. See `session_log.md`.
+- **Blocker:** one **TTS key** — `ELEVENLABS_API_KEY` (default) or
+  `SARVAM_API_KEY` with `TTS_VENDOR=sarvam`. Everything else is in and proven:
+  `/api/invite-agent` returns a live agent once a TTS key exists.
+  Check with `curl localhost:3000/api/health` → want `ready: true`.
+- ⚠️ **Agora does not validate `tts.params`.** A wrong param name still returns
+  `200 RUNNING`, and Echo then joins and never speaks, with no error anywhere.
+  ElevenLabs reads `key`; Sarvam reads `api_subscription_key`. If Echo is
+  silent, suspect that first.
 
 ---
 

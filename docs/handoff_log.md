@@ -241,10 +241,13 @@ Required agent config:
 ```
 
 > [!WARNING]
-> **BLOCKING for Phase 2:** `frontend/.env.local` does not exist yet. The user
-> must create it (see §7). Keep `AGORA_APP_CERTIFICATE` and `OPENAI_API_KEY`
-> server-side only — a Phase 1 test fails the build if either name appears
-> anywhere under `src/`.
+> **BLOCKING for Phase 2:** `frontend/.env.local` EXISTS but every value in it
+> is blank (verified Aug 27 via `/api/health` on a freshly booted server). The
+> user must fill in the five values (see §7). Note that `next build` printing
+> `Environments: .env.local` only means the file was found, not that it is set.
+>
+> Keep `AGORA_APP_CERTIFICATE` and `OPENAI_API_KEY` server-side only — a Phase 1
+> test fails the build if either name appears anywhere under `src/`.
 
 ---
 
@@ -303,7 +306,7 @@ the master-doc §11 demo. `M` toggles mute.
 
 | Issue | Severity | Details |
 |---|---|---|
-| No `.env.local` | BLOCKING for Phase 2 | See §7 |
+| `.env.local` present but all values blank | BLOCKING for Phase 2 | Verify with `/api/health`, never by reading the file. See §7 |
 | `allowImportingTsExtensions` in tsconfig | INFO | Node's type-stripping requires `.ts` in test imports; safe because tsc never emits here |
 | Dev server may already be running | INFO | Next refuses a second dev server on the same dir; reuse the running one |
 | Git is local-scoped | INFO | Verify `git config user.email` before committing |
