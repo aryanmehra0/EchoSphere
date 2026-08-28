@@ -69,7 +69,9 @@ export function TimelinePanel() {
       />
 
       {state.timeline.map((e) => {
-        const meta = KIND[e.kind];
+        // Same hazard as EntityNode: an unknown kind yields undefined and
+        // `meta.icon` throws, blanking the whole console.
+        const meta = KIND[e.kind] ?? KIND.signal;
         const Icon = meta.icon;
 
         return (
@@ -78,7 +80,7 @@ export function TimelinePanel() {
               aria-hidden
               className={cn(
                 "relative z-10 mt-px flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border",
-                MARKER[meta.tone],
+                MARKER[meta.tone] ?? MARKER.neutral,
               )}
             >
               <Icon size={9} strokeWidth={2.4} />

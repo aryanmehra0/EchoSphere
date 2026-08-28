@@ -302,6 +302,16 @@ describe("§10.2 Blast Radius — trust-zone boundary (v6 §10.1)", () => {
   const SECRETS = [
     "AGORA_APP_CERTIFICATE",
     "AGORA_CUSTOMER_SECRET",
+    // Fast Loop vendor keys. These sit in Zone 2 rather than Zone 3 for the
+    // same reason OPENAI_API_KEY did: Agora requires them INSIDE the
+    // create-agent payload, so Next.js has to hold them. They can generate
+    // text and speech and nothing else — they cannot change the world, which
+    // is what keeps them out of the Zone 3 category.
+    "GROQ_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "SARVAM_API_KEY",
+    // Kept even though unused today: if an OpenAI key ever arrives, the Fast
+    // Loop reverts to realtime and this must still never reach the browser.
     "OPENAI_API_KEY",
     "ASSEMBLYAI_API_KEY",
     "PINECONE_API_KEY",
@@ -323,15 +333,38 @@ describe("§10.2 Blast Radius — trust-zone boundary (v6 §10.1)", () => {
     }
   });
 
-  test("Zone 1: the client tree opens no outbound connection", () => {
+  test("Zone 1: egress is confined to the one named module", () => {
     // The browser talks to our own API routes and to Agora's SDK. Any raw
-    // fetch/WebSocket in client code is an unreviewed egress path. When the
-    // Phase 3 delta socket lands it will live behind a named module and this
-    // test will be narrowed to permit exactly that one.
+    // fetch/WebSocket elsewhere in client code is an unreviewed egress path.
+    //
+    // The delta socket has now landed, and — exactly as this test's earlier
+    // comment promised — the rule is narrowed rather than relaxed: precisely
+    // ONE module may open a connection. Adding a second allowed file here
+    // should require the same argument this one did.
     const EGRESS = /\b(fetch\(|new WebSocket\(|XMLHttpRequest|navigator\.sendBeacon)/;
+    const ALLOWED = ["/src/lib/delta-socket.ts"];
+
+    const permitted = (p: string) => ALLOWED.some((a) => norm(p).endsWith(a));
 
     for (const { f, text } of client) {
+      if (permitted(f)) continue;
       assert.ok(!EGRESS.test(text), `outbound call in CLIENT file ${f}`);
+    }
+  });
+
+  test("the permitted egress module exists and talks only to the Slow Loop", () => {
+    // Guards against the allow-list above silently protecting nothing, and
+    // against that one module quietly growing a second destination.
+    const socket = client.find((s) => norm(s.f).endsWith("/src/lib/delta-socket.ts"));
+    assert.ok(socket, "delta-socket.ts is missing — the allow-list is now vacuous");
+
+    const hosts = socket.text.match(/wss?:\/\/[^"'`\s]+/g) ?? [];
+    for (const host of hosts) {
+      assert.match(
+        host,
+        /127\.0\.0\.1:8000|localhost:8000/,
+        `delta-socket reaches ${host}, which is not the Slow Loop`,
+      );
     }
   });
 
