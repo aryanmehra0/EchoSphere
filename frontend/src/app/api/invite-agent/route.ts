@@ -56,11 +56,23 @@ export async function POST(request: Request) {
     // Echo publishes (it speaks) and subscribes (it listens).
     const agentTokens = mintTokens(channel, AGENT_UID, { publisher: true });
 
+    const vendor = serverEnv.ttsVendor;
+
     const payload = buildAgentPayload({
       channel,
       agentUid: AGENT_UID,
       agentRtcToken: agentTokens.rtcToken,
-      openAiApiKey: serverEnv.openAiApiKey,
+      groqApiKey: serverEnv.groqApiKey,
+      tts: {
+        vendor,
+        apiKey: serverEnv.ttsApiKey,
+        ...(vendor === "elevenlabs"
+          ? { voiceId: serverEnv.elevenLabsVoiceId }
+          : {
+              speaker: serverEnv.sarvamSpeaker,
+              language: serverEnv.sarvamLanguage,
+            }),
+      },
       toolWebhookUrl: body.toolWebhookUrl,
     });
 
