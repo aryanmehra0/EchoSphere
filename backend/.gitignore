@@ -1,0 +1,26 @@
+# Zone 3 — never commit any of this.
+
+# The virtualenv. Hundreds of MB, machine-specific, and reproducible from
+# requirements.txt in one command.
+.venv/
+.venv312/
+venv/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Zone 3 credentials: the analytical LLM key, and eventually Jira / Slack /
+# PagerDuty. These are the keys that can change the world (v6 §10.1), so this
+# line matters more than any other in the file.
+.env
+.env.*
+!.env.example
+
+# Session-scoped artefacts. §10.4 requires transcripts and derived state to be
+# purged, not retained — so they must certainly not be committed.
+*.log
+snapshots/
