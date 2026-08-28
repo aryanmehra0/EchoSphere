@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>S0 Listener — EchoSphere</title>
+
+<!--
+  ============================================================================
+  THROWAWAY. DELETE AFTER S0.
+  ============================================================================
+
+  S0 (v6 §17) has three exit criteria and two of them can only be judged by a
+  human ear: does the injected instruction actually get SPOKEN, and does
+  `on_speaking_action: "interrupt"` genuinely cut Echo off mid-sentence. The
+  spike script prompts for both — but nothing in this repo could join a channel
+  to listen, because `agora-rtc-sdk-ng` is installed and never imported: the
+  console's "Join incident bridge" runs the scripted replay only.
+
+  This page is the missing ear. It joins the channel, publishes a microphone so
+  you can talk to Echo (needed for the tool-webhook check), plays remote audio,
+  and shows a live volume bar per participant so you can SEE the interrupt land
+  as well as hear it.
+
+  It is deliberately not part of the console:
+    - plain HTML in public/, no React, no reducer, no design system
+    - the SDK is vendored at /vendor/, so no CDN and no version drift
+    - nothing under src/ imports it, so the trust-zone tests are unaffected
+
+  When S1 replaces the replay in `openBridge()` with a real RTC join, this file
+  and public/vendor/ should both be deleted.
+-->
+
+<script src="/vendor/AgoraRTC_N-production.js"></script>
+<style>
+  :root {
+    --base:#0b0d11; --raised:#111419; --sunken:#090a0e; --line:rgba(255,255,255,.09);
+    --ink:#e9ebee; --ink2:#a1a7b2; --ink3:#6b7280; --ink4:#454b55;
+    --live:#4ac9e8; --stable:#3ecf8e; --warning:#f2a73b; --critical:#ff5f4d;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--base); color:var(--ink);
+    font:13.5px/1.5 "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:760px; margin:0 auto; padding:28px 20px 60px; }
+  h1 { font-size:16px; margin:0 0 2px; letter-spacing:-.01em; }
+  .sub { color:var(--ink3); font-size:11px; margin:0 0 20px; }
+  .warn {
+    border:1px solid rgba(242,167,59,.35); background:rgba(242,167,59,.08);
+    color:var(--warning); border-radius:6px; padding:8px 11px;
+    font-size:11px; margin-bottom:18px;
+  }
+  fieldset { border:1px solid var(--line); border-radius:6px; padding:14px; margin:0 0 14px; }
+  legend {
+    font-size:10px; text-transform:uppercase; letter-spacing:.09em;
+    color:var(--ink3); padding:0 6px;
+  }
+  label { display:block; font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--ink3); margin-bottom:5px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  .row > div { flex:1; min-width:170px; }
+  input, select {
+    width:100%; background:var(--sunken); color:var(--ink);
+    border:1px solid var(--line); border-radius:4px; padding:7px 9px;
+    font:inherit; font-size:12px;
+  }
+  input:focus, select:focus { outline:2px solid var(--live); outline-offset:1px; }
+  .actions { display:flex; gap:8px; margin-top:12px; }
+  button {
+    font:inherit; font-size:12px; font-weight:500; border-radius:4px;
+    padding:8px 14px; cursor:pointer; border:1px solid var(--line);
+    background:var(--raised); color:var(--ink);
+  }
+  button:hover:not(:disabled) { background:#1c212a; }
+  button.primary { background:var(--ink); color:#07080a; border-color:var(--ink); font-weight:600; }
+  button.danger { background:rgba(255,95,77,.1); color:var(--critical); border-color:rgba(255,95,77,.3); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  #status { font-size:11px; color:var(--ink3); margin:10px 0 0; }
+  #status b { color:var(--ink); font-weight:600; }
+  .peer {
+    display:flex; align-items:center; gap:10px;
+    padding:8px 10px; border:1px solid var(--line); border-radius:5px;
+    background:var(--raised); margin-bottom:6px;
+  }
+  .peer .who { font-size:12px; font-weight:600; min-width:130px; }
+  .peer .tag {
+    font-size:9px; text-transform:uppercase; letter-spacing:.07em;
+    padding:1px 5px; border-radius:3px; border:1px solid var(--line); color:var(--ink3);
+  }
+  .peer.echo .who { color:var(--live); }
+  .peer.echo .tag { color:var(--live); border-color:rgba(74,201,232,.35); }
+  .bar { flex:1; height:6px; background:var(--sunken); border-radius:3px; overflow:hidden; }
+  .bar > i { display:block; height:100%; width:0%; background:var(--stable); transition:width .1s linear; }
+  .peer.echo .bar > i { background:var(--live); }
+  #log {
+    font-family:"IBM Plex Mono", ui-monospace, Menlo, monospace; font-size:10.5px;
+    background:var(--sunken); border:1px solid var(--line); border-radius:5px;
+    padding:10px; height:230px; overflow:auto; white-space:pre-wrap; color:var(--ink2);
+  }
+  #log .t { color:var(--ink4); }
+  #log .ok { color:var(--stable); }
+  #log .er { color:var(--critical); }
+  #log .hi { color:var(--live); }
+  .hint { font-size:10.5px; color:var(--ink4); margin-top:14px; line-height:1.6; }
+  .hint code { color:var(--ink2); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>S0 Listener</h1>
+  <p class="sub">Throwaway ear for the Bridge Spike. Not part of the console — delete after S0.</p>
+
+  <div class="warn">
+    Use headsets. Speakers on an open mic will feed Echo its own voice back,
+    which is exactly the failure (G2) the architecture exists to prevent.
+  </div>
+
+  <fieldset>
+    <legend>Join</legend>
+    <div class="row">
+      <div>
+        <label for="channel">Channel</label>
+        <input id="channel" value="inc-spike" autocomplete="off" />
+      </div>
+      <div>
+        <label for="role">Role</label>
+        <select id="role">
+          <option>DevOps Lead</option>
+          <option>Support Engineer</option>
+          <option>Database Admin</option>
+        </select>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="join" class="primary">Join channel</button>
+      <button id="mute" disabled>Mute mic</button>
+      <button id="leave" class="danger" disabled>Leave</button>
+    </div>
+    <p id="status">Idle.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>On the channel</legend>
+    <div id="peers"><p style="color:var(--ink4);font-size:11px;margin:0">Nobody yet.</p></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Event log</legend>
+    <div id="log"></div>
+  </fieldset>
+
+  <p class="hint">
+    Echo joins as <code>uid 9000</code>. Watch its bar move when it speaks — that
+    is how you judge whether <code>on_speaking_action: "interrupt"</code> really
+    cut it off mid-sentence, rather than queueing and finishing the line.<br />
+    Run the spike in a second terminal: <code>npm run spike -- --channel inc-spike</code>
+  </p>
+</div>
+
+<script>
+const AGENT_UID = 9000;      // v6 §4.2 pins Echo here
+const OBSERVER_UID = 9001;   // and the Observer here
+
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+
+function log(msg, cls) {
+  const t = new Date().toTimeString().slice(0, 8);
+  const line = document.createElement("div");
+  line.innerHTML = `<span class="t">${t}</span>  <span class="${cls || ""}">${msg}</span>`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(html) { $("status").innerHTML = html; }
+
+let client = null;
+let micTrack = null;
+let joined = false;
+const peers = new Map();   // uid -> { el, bar }
+
+function labelFor(uid) {
+  if (uid === AGENT_UID) return { name: "Echo", tag: "agent", echo: true };
+  if (uid === OBSERVER_UID) return { name: "Observer", tag: "observer", echo: false };
+  return { name: "uid " + uid, tag: "human", echo: false };
+}
+
+function addPeer(uid, suffix) {
+  if (peers.has(uid)) return;
+  if (peers.size === 0) $("peers").innerHTML = "";
+  const meta = labelFor(uid);
+  const el = document.createElement("div");
+  el.className = "peer" + (meta.echo ? " echo" : "");
+  el.innerHTML =
+    `<span class="who">${meta.name}${suffix || ""}</span>` +
+    `<span class="tag">${meta.tag}</span>` +
+    `<span class="bar"><i></i></span>`;
+  $("peers").appendChild(el);
+  peers.set(uid, { el, bar: el.querySelector("i") });
+}
+
+function removePeer(uid) {
+  const p = peers.get(uid);
+  if (!p) return;
+  p.el.remove();
+  peers.delete(uid);
+  if (peers.size === 0) {
+    $("peers").innerHTML = '<p style="color:var(--ink4);font-size:11px;margin:0">Nobody yet.</p>';
+  }
+}
+
+async function join() {
+  const channel = $("channel").value.trim();
+  const role = $("role").value;
+  if (!channel) return alert("Channel is required.");
+
+  $("join").disabled = true;
+  setStatus("Requesting token…");
+  log("POST /api/token  channel=" + channel + "  role=" + role);
+
+  let cred;
+  try {
+    const res = await fetch("/api/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, role }),
+    });
+    cred = await res.json();
+    if (!res.ok) throw new Error(cred.error || ("HTTP " + res.status));
+  } catch (err) {
+    log("token request failed: " + err.message, "er");
+    setStatus("Token request failed. Is <b>/api/health</b> ready?");
+    $("join").disabled = false;
+    return;
+  }
+
+  // The roster write is acked BEFORE this response exists (v6 §4.2), so by the
+  // time we hold a token our uid already resolves to a role server-side.
+  log("token ok  uid=" + cred.uid + "  authorized=" + cred.authorized, "ok");
+
+  try {
+    AgoraRTC.setLogLevel(2); // warnings and errors only
+    client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+
+    client.on("user-joined", (user) => {
+      log("user-joined  uid=" + user.uid, user.uid === AGENT_UID ? "hi" : "");
+      addPeer(user.uid);
+    });
+
+    client.on("user-left", (user) => {
+      log("user-left  uid=" + user.uid);
+      removePeer(user.uid);
+    });
+
+    client.on("user-published", async (user, mediaType) => {
+      log("user-published  uid=" + user.uid + "  " + mediaType,
+          user.uid === AGENT_UID ? "hi" : "");
+      if (mediaType !== "audio") return;
+      await client.subscribe(user, "audio");
+      user.audioTrack.play();
+      addPeer(user.uid);
+      if (user.uid === AGENT_UID) log("▶ Echo audio is playing — you should hear it", "ok");
+    });
+
+    client.on("user-unpublished", (user, mediaType) => {
+      log("user-unpublished  uid=" + user.uid + "  " + mediaType);
+    });
+
+    client.on("connection-state-change", (cur, prev) => {
+      log("connection " + prev + " → " + cur);
+    });
+
+    // Drives the per-participant bars. 200ms matches the RTI monitor's cadence
+    // in v6 §8, so what you see here is roughly what the Observer will sample.
+    client.enableAudioVolumeIndicator();
+    client.on("volume-indicator", (volumes) => {
+      for (const v of volumes) {
+        const p = peers.get(v.uid) || (v.uid === cred.uid ? peers.get("me") : null);
+        if (p) p.bar.style.width = Math.min(100, v.level) + "%";
+      }
+    });
+
+    setStatus("Joining <b>" + channel + "</b>…");
+    await client.join(cred.appId, channel, cred.rtcToken, cred.uid);
+    log("joined channel " + channel + " as uid " + cred.uid, "ok");
+
+    micTrack = await AgoraRTC.createMicrophoneAudioTrack();
+    await client.publish([micTrack]);
+    log("microphone published — Echo can hear you", "ok");
+
+    // Show ourselves too, so the volume bar confirms the mic is actually live.
+    if (peers.size === 0) $("peers").innerHTML = "";
+    const meEl = document.createElement("div");
+    meEl.className = "peer";
+    meEl.innerHTML =
+      `<span class="who">${role} (you)</span><span class="tag">self</span>` +
+      `<span class="bar"><i></i></span>`;
+    $("peers").prepend(meEl);
+    peers.set("me", { el: meEl, bar: meEl.querySelector("i") });
+    peers.set(cred.uid, peers.get("me"));
+
+    joined = true;
+    $("leave").disabled = false;
+    $("mute").disabled = false;
+    setStatus("Live on <b>" + channel + "</b> as uid <b>" + cred.uid +
+              "</b> (" + role + "). Waiting for Echo (uid 9000)…");
+  } catch (err) {
+    log("join failed: " + (err && err.message ? err.message : err), "er");
+    setStatus("Join failed — see the log.");
+    $("join").disabled = false;
+  }
+}
+
+async function leave() {
+  try {
+    if (micTrack) { micTrack.stop(); micTrack.close(); micTrack = null; }
+    if (client) { await client.leave(); }
+    log("left the channel", "ok");
+  } catch (err) {
+    log("leave error: " + err.message, "er");
+  }
+  joined = false;
+  peers.clear();
+  $("peers").innerHTML = '<p style="color:var(--ink4);font-size:11px;margin:0">Nobody yet.</p>';
+  $("join").disabled = false;
+  $("leave").disabled = true;
+  $("mute").disabled = true;
+  $("mute").textContent = "Mute mic";
+  setStatus("Left the channel.");
+}
+
+$("join").addEventListener("click", join);
+$("leave").addEventListener("click", leave);
+$("mute").addEventListener("click", async () => {
+  if (!micTrack) return;
+  const nowMuted = micTrack.muted;
+  await micTrack.setMuted(!nowMuted);
+  $("mute").textContent = micTrack.muted ? "Unmute mic" : "Mute mic";
+  log(micTrack.muted ? "mic MUTED" : "mic open");
+});
+
+window.addEventListener("beforeunload", () => { if (joined) leave(); });
+
+log("SDK " + AgoraRTC.VERSION + " loaded. Ready.", "ok");
+</script>
+</body>
+</html>
