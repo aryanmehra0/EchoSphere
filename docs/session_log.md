@@ -219,6 +219,66 @@ four-label NLI task, which is where a fast open model is at its most reliable.
 > prompt-enforced. The Tier 1 tripwires and the S6 Tier 2 LLM-judge exist for
 > this; do not relax them. Rule 3 is structural and unaffected.
 
+### Aug 29 — S4/S5/S6 built, and the Rig turned tuning into measurement
+
+**Everything remaining was built:** Rehearsal Rig Tier 2 (§15, closes G8),
+`rti.py` (§8, closes G5), `authorization.py` + `proxy.py` (§10.2, §4.5, closes
+G7), and the dashboard's approval modal. **111 backend + 85 frontend tests.**
+
+#### Tier 2 paid for itself immediately
+
+Contradiction detection had been ~2-in-3 and every attempt to fix it was
+guesswork. The Rig localised the fault in ONE run: entity convergence was 20%,
+with the same note every time — `'40 percent' -> None`. Extraction splits one
+spoken sentence into several claims and only the FIRST carries the subject, so
+text matching could never resolve the rest.
+
+Four fixes, each measured rather than assumed:
+
+| Fix | Detection | Entity convergence |
+|---|---|---|
+| baseline | 20% | 20% |
+| claims inherit the window's entity | 60% | 75% |
+| prompt: entity ids are stable, reuse them | 83% | **100%** |
+| adjudication gate 0.75 → 0.60 | **100%** | 100% |
+
+Precision stayed at **100%** on both negative scenarios throughout, which is
+the only reason lowering the gate was defensible.
+
+#### Then the 4-line scenario found what the 2-line one could not
+
+- **A false positive.** It fired on "tickets are flooding in" vs "500s spike" —
+  two symptoms that AGREE. Fixed two ways: INDEPENDENT now needs 0.85 while
+  OPPOSED needs 0.60 (OPPOSED is unambiguous; INDEPENDENT is also the correct
+  label for two unrelated observations), and the adjudication prompt now
+  carries worked examples of symptom pairs that are NOT opposed.
+- **Multi-entity claims.** "cache read timeouts on the checkout path" names two
+  systems. Longest-alias-first picked `checkout` and split it from the Redis
+  claims. Now EARLIEST mention wins — a claim is about the first thing it
+  names; the rest is context.
+- **Synonyms.** "the cache" IS the Redis entity, and nothing said so. The
+  extraction prompt now asks for `aliases` per entity and they are threaded
+  through resolution, so a later sentence saying only "the cache" resolves
+  correctly.
+
+#### ⚠️ Groq's limits are TOKENS PER DAY, and they are per model
+
+A day of measurement exhausted `openai/gpt-oss-120b` outright — 200,000 TPD,
+used 197,903. Every call then 429'd with "try again in 21m", which against a
+DAILY budget is not a wait, it is a wall. Retrying cannot clear it.
+
+Because the quota is scoped per model, `analysis_models()` is now a chain
+(`gpt-oss-120b` → `gpt-oss-20b` → `qwen3.8-27b`) and a daily-cap 429 falls
+through immediately instead of sleeping. Verified: the pipeline kept running on
+the fallback with all six quality metrics at 100%.
+
+> **Known limitation, stated plainly.** The fallback models are smaller and
+> visibly worse at the adjudication: on `gpt-oss-20b` the symptom-pair false
+> positive returns in ~2 of 3 runs. So the S6 gate is met on the PRIMARY model
+> and not on the fallbacks. Before the finale, either upgrade the Groq tier or
+> budget the daily tokens — a full demo run costs roughly 15–20k, so 200k/day
+> is about ten rehearsals, and today's tuning consumed all of it.
+
 ### 🟡 Slow Loop pipeline built — works, but the headline feature is ~2-in-3 (Aug 28)
 
 `extraction.py`, `redaction.py`, `contradiction.py` landed and are wired into

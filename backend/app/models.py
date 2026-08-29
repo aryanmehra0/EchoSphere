@@ -143,6 +143,9 @@ class Entity:
     detail: str | None = None
     metric: str | None = None
     position: dict[str, float] | None = None
+    # Other words the room uses for this same system ("the cache" for Redis).
+    # Carried on the entity so the alias table survives across windows.
+    aliases: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # The graph renders `GLYPH[kind]`; an unknown kind blanks the dashboard.

@@ -216,6 +216,26 @@ export interface Transcript {
   at: number;
 }
 
+/**
+ * A CRITICAL action waiting on a human — v6 §10.2.
+ *
+ * Voice is an intent signal; THIS is the authorization. The nonce is single
+ * use, expires in 120s, and is bound to `args` by a hash, so an approval for
+ * one action cannot be redeemed for another.
+ */
+export interface ApprovalRequest {
+  nonce: string;
+  actionId: string;
+  action: string;
+  args: Record<string, unknown>;
+  requiredRole: ParticipantRole | string;
+  issuedAt: number;
+  expiresAt: number;
+  /** The claims justifying it. A human approves against the record, not
+   *  against Echo's summary of the record. */
+  evidence?: Claim[];
+}
+
 /** Connection lifecycle of the local RTC client. */
 export type BridgeState = "idle" | "connecting" | "live" | "closing";
 
@@ -260,6 +280,9 @@ export interface IncidentState {
   contradictions: Contradiction[];
   timeline: TimelineEvent[];
   transcripts: Transcript[];
+
+  /** The pending CRITICAL action, if one is awaiting a human. */
+  approval: ApprovalRequest | null;
 }
 
 /* -------------------------------------------------------------------------- */

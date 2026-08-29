@@ -6,6 +6,7 @@ import type {
   IncidentState,
   TaskStatus,
   Transcript,
+  ApprovalRequest,
 } from "./types";
 
 /**
@@ -41,6 +42,10 @@ export type IncidentAction =
   | { type: "RTI"; value: number }
   | { type: "TASK_STATUS"; id: string; status: TaskStatus }
   | { type: "RESOLVE_CONTRADICTION"; id: string }
+  /** A CRITICAL action needs a human (v6 §10.2). */
+  | { type: "APPROVAL_REQUEST"; payload: ApprovalRequest }
+  /** Approved, denied or expired — the modal comes down either way. */
+  | { type: "APPROVAL_RESOLVED" }
   | { type: "RESET" };
 
 /* -------------------------------------------------------------------------- */
@@ -64,6 +69,7 @@ export const initialIncidentState: IncidentState = {
   contradictions: [],
   timeline: [],
   transcripts: [],
+  approval: null,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -214,6 +220,12 @@ export function incidentReducer(
           t.id === action.id ? { ...t, status: action.status } : t,
         ),
       };
+
+    case "APPROVAL_REQUEST":
+      return { ...state, approval: action.payload };
+
+    case "APPROVAL_RESOLVED":
+      return { ...state, approval: null };
 
     case "RESOLVE_CONTRADICTION":
       return {

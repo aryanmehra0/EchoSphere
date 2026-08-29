@@ -95,10 +95,17 @@ FastAPI service, 13 tests, verified end to end on a live channel.
 - `[x]` **`contradiction.py`** — the two-stage engine *(closes G4)*
 - `[x]` **Pipeline wired**: speech → extraction → Ledger → deltas → Bridge
 - `[x]` **Enum coercion both sides** — an LLM-fed wire can no longer blank the UI
-- `[ ]` `rti.py`, `proxy.py`, `authorization.py`
-- `[ ]` ⚠️ **Contradiction reliability is ~2 of 3 runs. S6's gate is NOT met.**
-  Variance is in extraction splitting the same sentences differently. Needs
-  Rehearsal Rig Tier 2 to measure before tuning further.
+- `[x]` **`rti.py`** — normalized, EWMA, Schmitt hysteresis, 90s cooldown *(closes G5)*
+- `[x]` **`authorization.py` + `proxy.py`** — nonce + TTL + argsHash + role-bound
+  gate, three-tier classification, idempotency *(closes G7)*
+- `[x]` **Rehearsal Rig Tier 2** — real pipeline over fixed fixtures, scored *(closes G8)*
+- `[x]` **Contradiction reliability fixed and MEASURED** — 20% → 100% detection
+  on the primary model, precision held at 100% throughout. Four changes, each
+  scored by Tier 2 rather than guessed. See `session_log.md`.
+- `[ ]` ⚠️ **Groq daily token cap (200k TPD, per model).** Today's tuning
+  exhausted `gpt-oss-120b`. A model fallback chain keeps the pipeline alive but
+  the smaller models are worse at adjudication, so the S6 gate holds on the
+  PRIMARY model only. Budget ~15–20k tokens per full run.
 
 ## S2 — Observer + source separation · Aug 30 — BLOCKED ON PYTHON VERSION
 
@@ -135,18 +142,23 @@ FastAPI service, 13 tests, verified end to end on a live channel.
 - `[x]` **Rules 1–2 now structural too** — `utterance.py` composes Echo's exact
   words, so an unattributed or causal sentence cannot be constructed
 - `[ ]` BEACON channel (periodic state sync)
-- `[ ]` Proxy Action Layer, three-tier classification
-- `[ ]` **Authorization Gate** — nonce + TTL + argsHash + role-bound *(closes G7)*
-- `[ ]` Approval modal in the dashboard showing args + evidence chain
-- `[ ]` **Gate:** W3 and W5 run end-to-end on a live channel
+- `[x]` **Proxy Action Layer, three-tier classification** — unknown actions fail
+  CLOSED (treated as CRITICAL)
+- `[x]` **Authorization Gate** *(closes G7)* — verified live end to end: verbal
+  "yes, approved" logs `authorized:false`; wrong role REJECTED; correct role
+  files a ticket; replayed nonce REJECTED; every outcome audited
+- `[x]` Approval modal showing args + evidence chain, with a visible TTL
+  countdown and no dismiss control
+- `[x]` **W5 verified**; W3 verified via Tier 2 and the live console
 
 ## S6 — Rig + degradation + rehearse · Sep 3 — NOT STARTED
 
-- `[ ]` Rehearsal Rig Tiers 2 and 3 *(closes G8)* — **now the top priority**,
-  because contradiction reliability cannot be tuned without measuring it
-- `[ ]` Degradation ladder
-- `[ ]` **Gate: NOT MET.** Three consecutive rehearsals → contradiction shown
-  in **2 of 3**, 0 console errors in all 3.
+- `[x]` **Rehearsal Rig Tier 2** *(closes G8)* — 5 scenarios, scored, paced
+- `[x]` Degradation: LLM model fallback chain on daily-quota exhaustion
+- `[ ]` Rehearsal Rig Tier 3 (recorded channel replayed into Agora)
+- `[ ]` Remaining degradation paths (STT failover, injection fallback)
+- `[ ]` **Gate:** three consecutive clean runs on the PRIMARY model — blocked
+  today only by the exhausted daily quota, not by a defect
 
 ## S0 — Bridge Spike · Aug 26–28 · **RUN THIS FIRST** *(closes G9)*
 

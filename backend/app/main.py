@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -25,6 +26,8 @@ from .bridge import BridgeController
 from .contradiction import ContradictionEngine
 from .deltas import DeltaHub, encode
 from .extraction import TurnWindow, compact, entity_aliases, extract
+from .proxy import ProxyActionLayer
+from .rti import ParticipantFrame, RTIMonitor
 from .ledger import Ledger
 from .models import (
     Claim,
@@ -37,7 +40,12 @@ from .models import (
     Unchecked,
     now_ms,
 )
-from .utterance import EpistemicViolation, close_out, contradiction_intervention
+from .utterance import (
+    EpistemicViolation,
+    close_out,
+    contradiction_intervention,
+    tension_intervention,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(name)-14s %(message)s")
 log = logging.getLogger("echo.main")
@@ -53,6 +61,8 @@ _http: httpx.AsyncClient | None = None
 
 window = TurnWindow()
 engine = ContradictionEngine()
+rti = RTIMonitor()
+proxy = ProxyActionLayer(channel="inc-4417")
 _pipeline_lock = asyncio.Lock()
 
 
@@ -203,6 +213,7 @@ async def run_pipeline_if_ready() -> dict[str, Any] | None:
             return Entity(
                 id=canonical or proposed,
                 label=label or proposed,
+                aliases=[str(a) for a in (r.get("aliases") or [])],
                 kind=r.get("kind", "service"),
                 status=r.get("status", "UNKNOWN"),
                 detail=r.get("detail"),
@@ -318,6 +329,9 @@ async def reset_incident() -> dict[str, Any]:
     # the new incident, and a stale cooldown would silence a genuine conflict.
     window.drain()
     engine._cooldown.clear()  # noqa: SLF001 — same-module reset seam
+    rti.reset()
+    global proxy
+    proxy = ProxyActionLayer(channel=proxy.channel)
 
     # Tell every connected dashboard to drop what it is holding. The reducer's
     # SNAPSHOT case replaces rather than merges, so this genuinely clears them
@@ -526,6 +540,212 @@ async def bridge_contradiction(body: dict[str, Any]) -> dict[str, Any]:
         "text": line,
         "latencyMs": result.latency_ms if result else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Proxy Action Layer + Authorization Gate — v6 §4.5, §10.2
+# ---------------------------------------------------------------------------
+
+@app.post("/tools/invoke")
+async def invoke_tool(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    Every tool call Echo makes lands here, whatever asked for it.
+
+    Classification is a property of the ACTION, never of the request, so a
+    prompt injection that talks Echo into execute_runbook_script still meets
+    the Authorization Gate (§14.4).
+    """
+    action = (body.get("action") or "").strip()
+    args = body.get("args") or {}
+    if not action:
+        return {"error": "action is required"}
+
+    result = proxy.invoke(
+        action, args, task=body.get("task", ""), evidence=body.get("evidence"),
+    )
+
+    if result.status == "PENDING_APPROVAL" and result.approval:
+        # The dashboard raises the modal. It shows the full arguments AND the
+        # evidence chain, so a human approves against the record rather than
+        # against Echo's summary of it.
+        await hub.broadcast({
+            "kind": "APPROVAL_REQUEST",
+            "at": now_ms(),
+            "approval": {
+                **result.approval,
+                "evidence": [
+                    c.to_wire() for c in (
+                        ledger.claims.get(cid) for cid in (body.get("evidence") or [])
+                    ) if c
+                ],
+            },
+        })
+
+        # Echo says the sentence that makes the constraint audible.
+        br = await _bridge()
+        if br is not None:
+            line = (
+                f"DevOps, I have prepared {action.replace('_', ' ')}. "
+                "It is a critical action — it needs your approval on the dashboard. "
+                "I cannot authorise it from voice alone."
+            )
+            async with br:
+                await br.speak(line, priority="high")
+
+    return {
+        "status": result.status,
+        "action": result.action,
+        "tier": result.tier,
+        "detail": result.detail,
+        "ref": result.ref,
+        "approval": result.approval,
+    }
+
+
+@app.post("/approval/verbal")
+async def verbal_intent(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    A human said "yes, approved" out loud.
+
+    This endpoint exists to make the security claim legible: it logs, and it
+    authorizes nothing. There is no path from here to a redemption.
+    """
+    proxy.gate.record_verbal_intent(
+        int(body.get("uid", 0)), str(body.get("phrase", "")),
+    )
+    event = ledger.add_timeline(TimelineEvent(
+        id=f"tl-{now_ms()}", kind="signal",
+        text="Verbal assent logged as intent. Awaiting dashboard approval.",
+        actor="Echo",
+    ))
+    await hub.publish({"timeline": [event.to_wire()]})
+    return {"logged": True, "authorized": False}
+
+
+@app.post("/approval/redeem")
+async def redeem_approval(body: dict[str, Any]) -> dict[str, Any]:
+    """A click in the dashboard, from an authenticated session."""
+    uid = int(body.get("uid", 0))
+    role = str(body.get("role", ""))
+    entry = await get_entry_for(uid)
+
+    result = proxy.redeem(
+        str(body.get("nonce", "")), uid, role,
+        # Authority comes from the ROSTER, not from what the browser claims.
+        authorized=bool(entry and entry.get("authorized")),
+        args=body.get("args"),
+        evidence=body.get("evidence"),
+    )
+
+    if result.status == "PENDING_APPROVAL":
+        task = ledger.upsert_task(Task(
+            id=f"task-{now_ms()}", assignee_role=role,
+            description=f"{result.action} — filed as {result.ref}",
+            status="DONE", evidence=body.get("evidence") or [], ref=result.ref,
+        ))
+        event = ledger.add_timeline(TimelineEvent(
+            id=f"tl-{now_ms()}", kind="decision",
+            text=f"{result.action} approved on dashboard by {role} (UID {uid}).",
+            actor=role,
+        ))
+        await hub.publish({"tasks": [task.to_wire()], "timeline": [event.to_wire()]})
+
+        br = await _bridge()
+        if br is not None:
+            async with br:
+                await br.speak(
+                    f"Filed as {result.ref}, approved by {role}. "
+                    "No infrastructure was changed by me — a human executes it.",
+                    priority="high",
+                )
+
+    return {"status": result.status, "detail": result.detail, "ref": result.ref}
+
+
+@app.post("/approval/deny")
+async def deny_approval(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    A human said no. §W5: acknowledge once, do not re-ask.
+
+    The approval is marked redeemed, so 'do not re-ask' is structural — there
+    is no token left to redeem even if Echo tried.
+    """
+    result = proxy.deny(str(body.get("nonce", "")), int(body.get("uid", 0)))
+    return {"status": result.status, "detail": result.detail}
+
+
+@app.get("/audit")
+async def audit_trail() -> dict[str, Any]:
+    """
+    §10.3 — governance evidence, replay input, and post-mortem source.
+
+    Records denials and failed redemptions as loudly as successes: a log
+    containing only successes is evidence of nothing.
+    """
+    return {"entries": proxy.audit, "filed": proxy.filed}
+
+
+async def get_entry_for(uid: int) -> dict[str, Any] | None:
+    """
+    Roster lookup for the redeeming session.
+
+    Zone 2 owns the Roster today, so this trusts the uid range until the
+    Python Roster lands (S2). Recorded rather than hidden: this is the weakest
+    link in the gate right now, and it is the next thing to harden.
+    """
+    if uid == 1001:
+        return {"uid": uid, "role": "DevOps Lead", "authorized": True}
+    return {"uid": uid, "role": "unknown", "authorized": False}
+
+
+# ---------------------------------------------------------------------------
+# RTI — v6 §8
+# ---------------------------------------------------------------------------
+
+@app.post("/rti/observe")
+async def rti_observe(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    One slice of per-participant audio metrics from the Observer.
+
+    The metrics fork sits UPSTREAM of STT (§4.3): tension is a property of HOW
+    people are speaking, not what they said, so it never blocks on
+    transcription.
+    """
+    frames = [
+        ParticipantFrame(
+            uid=int(f.get("uid", 0)), rms=float(f.get("rms", 0.0)),
+            f0=float(f["f0"]) if f.get("f0") else None,
+            speaking=bool(f.get("speaking")),
+        )
+        for f in body.get("frames", [])
+    ]
+    now = time.monotonic()
+    value = rti.observe(frames, now)
+
+    await hub.publish({"rti": round(value, 3)})
+
+    spoken = None
+    if rti.should_intervene(now):
+        established = BridgeController.strip_inferred(ledger.established())
+        if established:
+            try:
+                line = tension_intervention(
+                    established, next(iter(ledger.open_unchecked()), None)
+                )
+            except (EpistemicViolation, ValueError):
+                line = None
+
+            if line:
+                rti.mark_intervened(now)
+                br = await _bridge()
+                if br is not None:
+                    async with br:
+                        # NORMAL priority: a de-escalation that interrupts
+                        # someone mid-sentence ADDS tension (§W6).
+                        result = await br.speak(line, priority="normal")
+                        spoken = bool(result and result.ok)
+
+    return {"rti": round(value, 3), "state": rti.state, "spoke": spoken}
 
 
 @app.post("/bridge/close-out")

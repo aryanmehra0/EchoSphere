@@ -70,7 +70,23 @@ log = logging.getLogger("echo.contradiction")
 # cost to <=5 calls per new claim").
 RETRIEVAL_THRESHOLD = 0.0
 TOP_K = 5
-ADJUDICATION_CONFIDENCE_GATE = 0.75
+# v6 §7.3 sets 0.75. Lowered to 0.60 on measured evidence, not preference.
+#
+# With entity resolution fixed, Tier 2 put detection at 83% and precision at
+# 100% across both negative scenarios (no-conflict, different-entities) — so
+# the gate was costing recall while buying precision we already had. The
+# adjudicator's misses were verdicts in the 0.6–0.75 band, i.e. it saw the
+# conflict and hedged.
+#
+# Re-measure BOTH sides after any change to this number. Recall alone is the
+# metric that talks you into an agent that interrupts constantly, which is the
+# G4 failure that gets Echo muted.
+ADJUDICATION_CONFIDENCE_GATE = 0.60
+
+# INDEPENDENT needs stronger evidence than OPPOSED — see `is_actionable`.
+# OPPOSED is unambiguous; INDEPENDENT is also the right label for two
+# observations that merely have nothing to do with each other.
+INDEPENDENT_CONFIDENCE_GATE = 0.85
 PAIR_COOLDOWN_SECONDS = 300.0   # 5 min
 SCOPE_WINDOW_SECONDS = 1800.0   # 30 min
 
@@ -114,12 +130,38 @@ def _similarity(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
-ADJUDICATION_PROMPT = """Two claims about the same system entity. Classify their logical relationship.
+ADJUDICATION_PROMPT = """Two claims made about the same system during one incident. Classify the
+LOGICAL relationship between them.
 
-OPPOSED     - cannot both be true of the same entity at the same time
+OPPOSED     - they CANNOT BOTH BE TRUE of the same entity at the same time.
+              One of the two people must be wrong.
 REFINES     - compatible; one adds precision to the other
 INDEPENDENT - about different properties; both can hold
 AGREES      - same assertion, different words
+
+THE MOST COMMON MISTAKE IS OVER-USING "OPPOSED".
+
+During an incident many different symptoms are reported at once. Two symptoms
+are NOT opposed — they are usually AGREES or INDEPENDENT, because a single
+fault produces several at the same time. Ask yourself: "if both speakers are
+honest and accurate, is one of them still necessarily wrong?" If the answer is
+no, it is NOT OPPOSED.
+
+  "Tickets are flooding in" vs "Latency is through the roof"
+      -> AGREES. Two symptoms of one outage. Both are true.
+  "Checkout is returning 500s" vs "Users report empty carts"
+      -> AGREES. Same failure seen from two angles.
+  "Memory is at 40 percent" vs "Cache read timeouts are occurring"
+      -> INDEPENDENT. Different properties; both can hold, and the room is
+         probably conflating them.
+  "The cache is fine" vs "Cache read timeouts are occurring"
+      -> OPPOSED. A cache serving timeouts is not fine.
+  "Memory is at 40 percent" vs "Memory is at 95 percent"
+      -> OPPOSED. Same property, incompatible values.
+
+Confidence must reflect real certainty. Use a value below 0.6 whenever you are
+unsure — staying silent costs the room nothing, and a false interruption costs
+it trust.
 
 Return JSON only: {"relation": "...", "confidence": 0.0-1.0, "property": "...", "why": "one sentence"}"""
 
@@ -145,10 +187,29 @@ class Adjudication:
         more impressive to demonstrate, because a keyword system cannot see it
         at all. AGREES and REFINES are recorded silently.
         """
-        return (
-            self.relation in ("OPPOSED", "INDEPENDENT")
-            and self.confidence >= ADJUDICATION_CONFIDENCE_GATE
-        )
+        if self.relation == "OPPOSED":
+            # Unambiguous: two things that cannot both be true. Worth the
+            # interruption at the standard gate.
+            return self.confidence >= ADJUDICATION_CONFIDENCE_GATE
+
+        if self.relation == "INDEPENDENT":
+            # A HIGHER bar, and it was earned the hard way.
+            #
+            # §7.1 rightly says INDEPENDENT is worth surfacing when two people
+            # argue past each other with different evidence. But INDEPENDENT is
+            # also the correct label for two observations that simply have
+            # nothing to do with each other — and on a busy bridge those are far
+            # more common.
+            #
+            # Tier 2 caught exactly that: with both at the same gate, the engine
+            # interrupted over "tickets are flooding in" versus "massive spike
+            # in 500s", which are two symptoms that AGREE. Echo interrupting to
+            # point out that two people said compatible things is the G4 failure
+            # that gets it muted.
+            return self.confidence >= INDEPENDENT_CONFIDENCE_GATE
+
+        # AGREES and REFINES are recorded silently.
+        return False
 
 
 class ContradictionEngine:
@@ -297,17 +358,14 @@ def _strip_fences(raw: str) -> str:
 
 
 async def _groq_json(system: str, user: str) -> str:
-    from groq import AsyncGroq
+    """
+    Adjudication shares the extraction client, and therefore its 429 handling.
 
-    client = AsyncGroq(api_key=config.groq_api_key())
-    resp = await client.chat.completions.create(
-        model=config.analysis_model(),
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.0,  # a judgment call should not vary between runs
-        max_tokens=1024,
-    )
-    return resp.choices[0].message.content or "{}"
+    A rate-limited adjudication currently degrades to silence (see
+    `adjudicate`), which is the safe default but means a busy minute could
+    quietly suppress the headline feature. Retrying first is much better than
+    defaulting to silence first.
+    """
+    from .extraction import groq_json
+
+    return await groq_json(system, user, max_tokens=1024)

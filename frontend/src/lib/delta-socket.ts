@@ -1,7 +1,7 @@
 "use client";
 
 import type { IncidentAction } from "./incident-reducer";
-import type { IncidentDelta, Transcript } from "./types";
+import type { ApprovalRequest, IncidentDelta, Transcript } from "./types";
 
 /**
  * The dashboard's half of the reconnect protocol — v6 §9.3, closing G6.
@@ -126,11 +126,20 @@ export function openDeltaSocket({
         seq?: number;
         payload?: WirePayload;
         state?: WirePayload;
+        approval?: ApprovalRequest;
       };
       try {
         msg = JSON.parse(event.data as string);
       } catch {
         return; // a malformed frame must never take the dashboard down
+      }
+
+      if (msg.kind === "APPROVAL_REQUEST" && msg.approval) {
+        // Out-of-band control traffic: deliberately carries no `seq`, because
+        // giving it one would make a reconnecting client think it had missed
+        // a delta.
+        dispatch({ type: "APPROVAL_REQUEST", payload: msg.approval });
+        return;
       }
 
       if (msg.kind === "SNAPSHOT") {
