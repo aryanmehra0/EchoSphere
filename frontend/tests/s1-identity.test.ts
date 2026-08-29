@@ -16,9 +16,12 @@ import {
 import {
   AGENT_TOOLS,
   CRITICAL_TOOLS,
+  FAST_LOOP_MODEL,
   FAST_LOOP_SYSTEM_PROMPT,
+  GROQ_CHAT_COMPLETIONS_URL,
   TURN_DETECTION,
   buildAgentPayload,
+  buildTtsConfig,
 } from "../src/lib/server/agent-config.ts";
 
 /**
@@ -263,18 +266,23 @@ describe("Agent configuration", () => {
     }
   });
 
-  test("the payload carries the prompt, the tools and the VAD config", () => {
-    const payload = buildAgentPayload({
-      channel: "inc-4417",
+  /** The cascaded Fast Loop config, as `/api/invite-agent` builds it. */
+  const samplePayload = (channel = "inc-4417") =>
+    buildAgentPayload({
+      channel,
       agentUid: AGENT_UID,
       agentRtcToken: "fake-token",
-      openAiApiKey: "sk-test",
+      groqApiKey: "gsk-test",
+      tts: { vendor: "elevenlabs", apiKey: "el-test" },
     });
+
+  test("the payload carries the prompt, the tools and the VAD config", () => {
+    const payload = samplePayload();
 
     assert.equal(payload.properties.channel, "inc-4417");
     assert.equal(payload.properties.agent_rtc_uid, String(AGENT_UID));
-    assert.equal(payload.properties.llm.vendor, "openai");
-    assert.equal(payload.properties.llm.model, "gpt-4o-realtime-preview");
+    assert.equal(payload.properties.llm.url, GROQ_CHAT_COMPLETIONS_URL);
+    assert.equal(payload.properties.llm.model, FAST_LOOP_MODEL);
     assert.equal(payload.properties.turn_detection.interrupt_duration_ms, 300);
     assert.equal(payload.properties.llm.tools.length, AGENT_TOOLS.length);
     assert.match(
@@ -284,25 +292,124 @@ describe("Agent configuration", () => {
   });
 
   test("the agent has no greeting — silence is the default state", () => {
-    const payload = buildAgentPayload({
-      channel: "c", agentUid: AGENT_UID, agentRtcToken: "t", openAiApiKey: "k",
-    });
     assert.equal(
-      payload.properties.llm.greeting_message,
+      samplePayload("c").properties.llm.greeting_message,
       "",
       "a greeting would contradict the WHEN TO SPEAK section",
     );
   });
 
   test("ASR keyword biasing covers the demo's technical vocabulary", () => {
-    const payload = buildAgentPayload({
-      channel: "c", agentUid: AGENT_UID, agentRtcToken: "t", openAiApiKey: "k",
-    });
+    const payload = samplePayload("c");
     const kw = payload.properties.asr.keywords;
     // "Redis" reliably transcribes as "read us" without biasing, and the
     // extraction model then invents an entity nobody mentioned.
     for (const term of ["Redis", "VPC", "us-east-1a", "failover"]) {
       assert.ok(kw.includes(term), `ASR biasing is missing "${term}"`);
     }
+  });
+});
+
+/* ========================================================================== */
+describe("TTS config — the one thing Agora will NOT catch for us", () => {
+  /* ======================================================================== */
+
+  /**
+   * These tests exist because of a measured fact, not a hypothetical.
+   *
+   * A control probe sent Agora `tts: { vendor: "elevenlabs", params: {
+   * totally_wrong_param_name: "x" } }` and Agora returned HTTP 200, RUNNING.
+   * It validates only that `vendor` is one it recognises; `params` is forwarded
+   * to the vendor adapter unchecked.
+   *
+   * So a typo in a param name does not fail at create time. It produces an
+   * agent that joins, reports healthy, and never makes a sound — with no error
+   * on any surface. These assertions are the only automated defence.
+   */
+
+  test("a tts block is always emitted — without one the agent is rejected", () => {
+    // Agora's error for a missing block is `properties: tts.addon not found`,
+    // which is the one TTS failure that IS loud. Keep it impossible.
+    const payload = buildAgentPayload({
+      channel: "c",
+      agentUid: AGENT_UID,
+      agentRtcToken: "t",
+      groqApiKey: "gsk-test",
+      tts: { vendor: "elevenlabs", apiKey: "el-test" },
+    });
+    assert.ok(payload.properties.tts, "no tts block — the agent cannot start");
+    assert.ok(payload.properties.tts.vendor, "tts block has no vendor");
+  });
+
+  test("ElevenLabs reads `key`", () => {
+    const tts = buildTtsConfig({ vendor: "elevenlabs", apiKey: "el-secret" });
+    assert.equal(tts.vendor, "elevenlabs");
+    assert.equal(
+      (tts.params as Record<string, unknown>).key,
+      "el-secret",
+      "ElevenLabs' adapter reads `key`; anything else yields a silent agent",
+    );
+  });
+
+  test("Sarvam reads `api_subscription_key`, NOT `key`", () => {
+    // This asymmetry is the single easiest way to end up with a mute Echo.
+    const tts = buildTtsConfig({ vendor: "sarvam", apiKey: "sv-secret" });
+    const params = tts.params as Record<string, unknown>;
+
+    assert.equal(tts.vendor, "sarvam");
+    assert.equal(params.api_subscription_key, "sv-secret");
+    assert.equal(
+      params.key,
+      undefined,
+      "Sarvam ignores `key` — sending it instead of api_subscription_key is silent failure",
+    );
+  });
+
+  test("the key is never dropped, whichever vendor is selected", () => {
+    for (const vendor of ["elevenlabs", "sarvam"] as const) {
+      const params = buildTtsConfig({ vendor, apiKey: "THE-KEY" }).params;
+      assert.ok(
+        Object.values(params).includes("THE-KEY"),
+        `${vendor}: the api key did not reach params at all`,
+      );
+    }
+  });
+
+  test("ElevenLabs uses a low-latency model", () => {
+    // We already spent §12.1's budget on the cascade; a slow TTS model on top
+    // pushes mouth-to-ear somewhere a conversation stops feeling live.
+    const params = buildTtsConfig({ vendor: "elevenlabs", apiKey: "k" })
+      .params as Record<string, unknown>;
+    assert.match(String(params.model_id), /flash/i);
+  });
+
+  test("Sarvam carries a speaker and a language", () => {
+    const params = buildTtsConfig({ vendor: "sarvam", apiKey: "k" })
+      .params as Record<string, unknown>;
+    assert.ok(params.speaker, "Sarvam requires a speaker");
+    assert.ok(params.target_language_code, "Sarvam requires a language code");
+  });
+
+  test("Sarvam pins an explicit model — never Agora's default", () => {
+    // This is a scar, not a preference. Agora's Sarvam adapter defaulted to
+    // `bulbul:v2`; Sarvam deprecated v2 mid-session and every agent went
+    // silent — RUNNING, healthy, mute, no error anywhere. Pinning the model
+    // turns a future deprecation into a loud 400 on our own probe.
+    const params = buildTtsConfig({ vendor: "sarvam", apiKey: "k" })
+      .params as Record<string, unknown>;
+    assert.ok(params.model, "no model pinned — an upstream default can go silent on us");
+    assert.match(String(params.model), /^bulbul:v[3-9]/, "v2 is deprecated");
+  });
+
+  test("the default Sarvam speaker is compatible with the pinned model", () => {
+    // Speakers are model-scoped. v2 voices (anushka, abhilash, …) are rejected
+    // outright by v3, and the rejection surfaces only as silence in the agent.
+    const params = buildTtsConfig({ vendor: "sarvam", apiKey: "k" })
+      .params as Record<string, unknown>;
+    const V2_ONLY = ["anushka", "abhilash", "manisha", "vidya", "arya", "karun", "hitesh"];
+    assert.ok(
+      !V2_ONLY.includes(String(params.speaker)),
+      `"${params.speaker}" is a bulbul:v2 voice and is rejected by v3`,
+    );
   });
 });

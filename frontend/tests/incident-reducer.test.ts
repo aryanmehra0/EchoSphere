@@ -207,6 +207,102 @@ describe("Delta merge integrity", () => {
 });
 
 /* ========================================================================== */
+describe("SNAPSHOT — the reconnect handshake (v6 §9.3)", () => {
+  /* ======================================================================== */
+
+  const seeded = apply([
+    {
+      type: "DELTA",
+      payload: {
+        entities: [
+          { id: "stale", label: "Stale", kind: "service", status: "OK" },
+        ],
+        claims: [
+          {
+            id: "gone",
+            text: "a claim the server has since dropped",
+            epistemicStatus: "OBSERVED",
+            speakerRole: "DevOps Lead",
+            confidence: 0.9,
+            at: 1,
+          },
+        ],
+      },
+    },
+  ]);
+
+  test("a snapshot REPLACES server-owned collections rather than merging", () => {
+    // This is the whole reason SNAPSHOT is not just another DELTA. Merging
+    // would leave `stale`/`gone` on screen after the server had removed them,
+    // and a reconnecting dashboard showing claims that no longer exist is
+    // worse than one showing nothing.
+    const s = incidentReducer(seeded, {
+      type: "SNAPSHOT",
+      payload: {
+        entities: [{ id: "fresh", label: "Fresh", kind: "service", status: "OK" }],
+        claims: [],
+      },
+    });
+
+    assert.deepEqual(s.entities.map((e) => e.id), ["fresh"]);
+    assert.equal(s.claims.length, 0, "the dropped claim survived the snapshot");
+  });
+
+  test("a snapshot preserves state the CLIENT owns", () => {
+    // The server has no opinion about whether this browser is connected, and
+    // applying a snapshot must never drop the operator's scrollback or restart
+    // the incident clock.
+    const live = apply(
+      [
+        { type: "BRIDGE", state: "live", at: 5000 },
+        { type: "TRANSCRIPT", payload: frame({ text: "said aloud", isFinal: true }) },
+      ],
+      seeded,
+    );
+
+    const s = incidentReducer(live, { type: "SNAPSHOT", payload: { entities: [] } });
+
+    assert.equal(s.bridge, "live", "snapshot dropped the transport state");
+    assert.equal(s.startedAt, 5000, "snapshot restarted the incident clock");
+    assert.equal(s.transcripts.length, 1, "snapshot wiped the transcript feed");
+  });
+
+  test("a snapshot keeps the timeline chronological", () => {
+    const s = incidentReducer(seeded, {
+      type: "SNAPSHOT",
+      payload: {
+        timeline: [
+          { id: "b", at: 2000, kind: "action", text: "second", actor: "Echo" },
+          { id: "a", at: 1000, kind: "signal", text: "first", actor: "Echo" },
+        ],
+      },
+    });
+
+    assert.deepEqual(s.timeline.map((e) => e.id), ["a", "b"]);
+  });
+
+  test("replaying deltas after a snapshot is idempotent", () => {
+    // The server chooses REPLAY or SNAPSHOT freely; the client must survive
+    // either, and survive the same delta arriving twice.
+    const delta: IncidentAction = {
+      type: "DELTA",
+      payload: {
+        entities: [{ id: "n1", label: "N1", kind: "service", status: "OK" }],
+      },
+    };
+
+    const once = apply([{ type: "SNAPSHOT", payload: { entities: [] } }, delta]);
+    const twice = apply([
+      { type: "SNAPSHOT", payload: { entities: [] } },
+      delta,
+      delta,
+    ]);
+
+    assert.deepEqual(twice, once);
+  });
+});
+
+/* ========================================================================== */
 describe("State invariants", () => {
   /* ======================================================================== */
 

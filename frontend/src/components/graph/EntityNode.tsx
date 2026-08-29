@@ -79,7 +79,24 @@ const METRIC: Record<EntityStatus, string> = {
 };
 
 function EntityNodeImpl({ data }: NodeProps<EntityNodeType>) {
-  const Glyph = GLYPH[data.kind];
+  /*
+    Defence in depth against an enum outside the union.
+
+    These lookups return `undefined` for an unknown kind, and rendering
+    `<undefined />` throws — React then unmounts the tree and the operator gets
+    a BLANK CONSOLE while the backend sits there perfectly healthy. That is not
+    hypothetical: it happened the moment an LLM started feeding this wire.
+
+    The backend coerces enums too (models.coerce). Both layers do it on
+    purpose: the server keeps the data clean, and the client refuses to die
+    over a cosmetic mismatch. A node with the wrong glyph is a small error; a
+    disappeared dashboard is not.
+  */
+  const Glyph = GLYPH[data.kind] ?? Server;
+  const kindLabel = KIND_LABEL[data.kind] ?? "Entity";
+  const shell = SHELL[data.status] ?? SHELL.UNKNOWN;
+  const stripe = STRIPE[data.status] ?? STRIPE.UNKNOWN;
+  const metricTone = METRIC[data.status] ?? METRIC.UNKNOWN;
   const critical = data.status === "CRITICAL";
 
   return (
@@ -88,14 +105,14 @@ function EntityNodeImpl({ data }: NodeProps<EntityNodeType>) {
         "node-shell relative w-[184px] overflow-hidden rounded-md border bg-raised",
         "shadow-[inset_0_1px_0_0_oklch(1_0_0/5%),0_1px_2px_0_oklch(0_0_0/40%)]",
         "transition-[border-color,box-shadow] duration-300 ease-[var(--ease-out)]",
-        SHELL[data.status],
+        shell,
         // The only glow in the system, reserved for confirmed failure.
         critical && "shadow-[0_0_0_1px_var(--color-critical)/20,0_0_28px_-10px_var(--color-critical)]",
       )}
       // The node is a summary; the accessible name states everything the
       // visual encoding does, in order of importance.
       role="group"
-      aria-label={`${data.label}, ${KIND_LABEL[data.kind]}, status ${data.status}${
+      aria-label={`${data.label}, ${kindLabel}, status ${data.status}${
         data.metric ? `, ${data.metric}` : ""
       }`}
     >
@@ -104,7 +121,7 @@ function EntityNodeImpl({ data }: NodeProps<EntityNodeType>) {
         aria-hidden
         className={cn(
           "absolute inset-y-0 left-0 w-[3px] transition-colors duration-300",
-          STRIPE[data.status],
+          stripe,
         )}
       />
 
@@ -122,7 +139,7 @@ function EntityNodeImpl({ data }: NodeProps<EntityNodeType>) {
               {data.label}
             </p>
             <Dot
-              tone={statusTone[data.status]}
+              tone={statusTone[data.status] ?? "neutral"}
               pulse={critical}
               className="ml-auto"
               label={`Status ${data.status.toLowerCase()}`}
@@ -130,7 +147,7 @@ function EntityNodeImpl({ data }: NodeProps<EntityNodeType>) {
           </div>
 
           <p className="mt-0.5 truncate font-mono text-[9px] tracking-tight text-ink-4">
-            {data.detail ?? KIND_LABEL[data.kind]}
+            {data.detail ?? kindLabel}
           </p>
         </div>
       </div>
@@ -140,12 +157,12 @@ function EntityNodeImpl({ data }: NodeProps<EntityNodeType>) {
       {data.metric ? (
         <div className="flex items-center justify-between border-t border-line-faint bg-sunken/60 py-1 pr-2 pl-3">
           <span className="text-[9px] tracking-[0.08em] text-ink-4 uppercase">
-            {KIND_LABEL[data.kind]}
+            {kindLabel}
           </span>
           <span
             className={cn(
               "tnum font-mono text-[9px] font-medium",
-              METRIC[data.status],
+              metricTone,
             )}
           >
             {data.metric}

@@ -57,10 +57,10 @@ function Row({ task }: { task: Task }) {
           dispatch({
             type: "TASK_STATUS",
             id: task.id,
-            status: NEXT_STATUS[task.status],
+            status: NEXT_STATUS[task.status] ?? "OPEN",
           })
         }
-        aria-label={`${task.description} — currently ${STATUS_LABEL[task.status]}. Advance status.`}
+        aria-label={`${task.description} — currently ${STATUS_LABEL[task.status] ?? task.status}. Advance status.`}
         className={cn(
           "mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border transition-colors duration-150",
           done
@@ -116,8 +116,8 @@ function Row({ task }: { task: Task }) {
             </span>
           ) : null}
 
-          <Badge tone={taskTone[task.status]} variant="outline" className="ml-auto">
-            {STATUS_LABEL[task.status]}
+          <Badge tone={taskTone[task.status] ?? "neutral"} variant="outline" className="ml-auto">
+            {STATUS_LABEL[task.status] ?? task.status}
           </Badge>
 
           <span className="tnum font-mono text-[9px] text-ink-4">

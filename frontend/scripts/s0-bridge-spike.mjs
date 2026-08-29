@@ -159,7 +159,15 @@ async function main() {
 
   // Token minting reuses the same library the app does, so a mismatch here is
   // a real signal rather than a script artefact.
-  const { RtcTokenBuilder, RtcRole } = await import("agora-token");
+  //
+  // The `.default` is load-bearing. `agora-token` is CommonJS, and Node's
+  // cjs-module-lexer only detects `ApaasTokenBuilder` as a named export — every
+  // builder we actually want is reachable only through the default object. The
+  // app's `import { RtcTokenBuilder } from "agora-token"` works because the
+  // bundler performs the interop; this script runs under plain Node, which does
+  // not. Destructuring the namespace directly yields `undefined` and dies at the
+  // first `.buildTokenWithUid`, before any credential check can report itself.
+  const { RtcTokenBuilder, RtcRole } = (await import("agora-token")).default;
   const now = Math.floor(Date.now() / 1000);
   const token = RtcTokenBuilder.buildTokenWithUid(
     APP_ID(),
@@ -174,7 +182,11 @@ async function main() {
   /* ── 1. Launch a trivial agent ─────────────────────────────────────────── */
   header("1 · Launch agent");
 
-  const join = await agora(
+  // NOT named `join`: that would shadow the `join` imported from node:path for
+  // the whole of main(), and the report write at the end of this function would
+  // then throw "join is not a function" — after every operator prompt has been
+  // answered and before the verdict prints, losing the entire run.
+  const launch = await agora(
     `/api/conversational-ai-agent/v2/projects/${APP_ID()}/join`,
     {
       body: {
@@ -192,11 +204,14 @@ async function main() {
             silence_duration_ms: 640,
             threshold: 0.5,
           },
+          // CASCADED, not audio-to-audio: Agora ASR → Groq → TTS vendor.
+          // No `vendor` field — omitting it is what selects Agora's custom-LLM
+          // path, which requires an OpenAI-chat-completions compatible endpoint
+          // with SSE. Groq qualifies; verified against the live API.
           llm: {
-            vendor: "openai",
-            url: "wss://api.openai.com/v1/realtime",
-            api_key: need("OPENAI_API_KEY"),
-            model: "gpt-4o-realtime-preview",
+            url: "https://api.groq.com/openai/v1/chat/completions",
+            api_key: need("GROQ_API_KEY"),
+            model: "openai/gpt-oss-120b",
             system_messages: [
               {
                 role: "system",
@@ -223,14 +238,45 @@ async function main() {
             ],
             greeting_message: "",
           },
+          // MANDATORY. Without a tts block Agora rejects the agent outright:
+          // `properties: tts.addon not found`.
+          //
+          // ⚠️ Agora does NOT validate what is inside `params` — a bogus param
+          // name still returns 200 RUNNING, and the agent then joins and stays
+          // SILENT with no error anywhere. If step 2 below fails with "the
+          // agent never spoke", check these names before suspecting the Bridge.
+          // ElevenLabs reads `key`; Sarvam reads `api_subscription_key`.
+          tts:
+            (process.env.TTS_VENDOR?.trim() || "elevenlabs") === "sarvam"
+              ? {
+                  vendor: "sarvam",
+                  params: {
+                    api_subscription_key: need("SARVAM_API_KEY"),
+                    speaker: process.env.SARVAM_SPEAKER?.trim() || "anushka",
+                    target_language_code:
+                      process.env.SARVAM_LANGUAGE?.trim() || "en-IN",
+                    sample_rate: 24000,
+                  },
+                }
+              : {
+                  vendor: "elevenlabs",
+                  params: {
+                    key: need("ELEVENLABS_API_KEY"),
+                    model_id: "eleven_flash_v2_5",
+                    voice_id:
+                      process.env.ELEVENLABS_VOICE_ID?.trim() ||
+                      "pNInz6obpgDQGcFmaJgB",
+                    sample_rate: 24000,
+                  },
+                },
         },
       },
     },
   );
 
-  if (!join.ok) {
-    record("agent launch", false, `HTTP ${join.status}`, "");
-    console.error(C.red("\n  Agora rejected the agent:\n"), join.json);
+  if (!launch.ok) {
+    record("agent launch", false, `HTTP ${launch.status}`, "");
+    console.error(C.red("\n  Agora rejected the agent:\n"), launch.json);
     console.error(
       C.amber(
         "\n  Common causes: Conversational AI not enabled on the project, " +
@@ -240,8 +286,8 @@ async function main() {
     process.exit(1);
   }
 
-  const agentId = join.json.agent_id ?? join.json.agentId;
-  record("agent launch", true, `${join.ms.toFixed(0)}ms · id ${agentId}`, "");
+  const agentId = launch.json.agent_id ?? launch.json.agentId;
+  record("agent launch", true, `${launch.ms.toFixed(0)}ms · id ${agentId}`, "");
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const ask = async (q) => (await rl.question(C.cyan(`  ${q} `))).trim().toLowerCase();

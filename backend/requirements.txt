@@ -1,0 +1,36 @@
+# EchoSphere — Zone 3 (the privileged process, v6 §10.1)
+#
+# This is where every key that can change the world lives: the analytical LLM,
+# STT, and eventually Jira / Slack / PagerDuty. Next.js (Zone 2) holds Agora
+# credentials only. That split is what makes the Blast Radius claim in §10.2
+# true by construction rather than by convention.
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+numpy>=1.26
+python-dotenv>=1.0
+websockets>=12.0
+
+# Groq drives both Slow Loop jobs: extraction (§14.2) and contradiction
+# adjudication (§7.1). Same key as the Fast Loop.
+groq>=0.11
+
+# ── NOT INSTALLED, and deliberately so ──────────────────────────────────────
+# agora-python-server-sdk
+#
+# S2's Observer needs it for `on_playback_audio_frame_before_mixing` — the
+# per-UID unmixed audio that makes attribution structural rather than a
+# diarization guess (v6 §4.3).
+#
+# It has NO wheel for Python 3.14 and fails to build from source; 3.14 is the
+# only interpreter on this machine. Rather than block the entire Slow Loop on
+# that, the Observer is a pluggable adapter (see app/observer/). The HTTP
+# ingress implementation runs today; the Agora one drops in unchanged once a
+# 3.11/3.12 interpreter exists.
+#
+# To enable the real Observer:
+#   1. install Python 3.12
+#   2. py -3.12 -m venv .venv312
+#   3. .venv312/Scripts/pip install -r requirements.txt agora-python-server-sdk
+#   4. set OBSERVER_MODE=agora

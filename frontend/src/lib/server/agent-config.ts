@@ -192,6 +192,129 @@ export const CRITICAL_TOOLS = AGENT_TOOLS.filter(
   (t) => t.tier === "CRITICAL",
 ).map((t) => t.name);
 
+/* -------------------------------------------------------------------------- */
+/* The Fast Loop is CASCADED, not audio-to-audio                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ── WHY THIS DEVIATES FROM v6 §3 ────────────────────────────────────────────
+ *
+ * v6 binds the Cloud Agent to OpenAI Realtime — one model, audio in, audio out.
+ * No OpenAI key was obtainable, so the Fast Loop is now a CASCADE:
+ *
+ *     Agora ASR  →  Groq (chat completions)  →  TTS vendor
+ *
+ * Groq was verified against the live Agora API before this was written: Agora
+ * accepts it as a custom LLM because the API is OpenAI-compatible with SSE.
+ * Groq has no TTS and is not on Agora's vendor list, so the voice comes from
+ * ElevenLabs or Sarvam.
+ *
+ * TWO CONSEQUENCES, BOTH REAL:
+ *
+ * 1. **§12.1's latency budget no longer applies.** The ≤800 ms mouth-to-ear
+ *    figure explicitly assumed "no ASR→LLM→TTS cascade". We have reintroduced
+ *    exactly that. Groq is the fastest inference available and ElevenLabs Flash
+ *    is a low-latency model, so this may still land near ~1.5 s — but it must be
+ *    MEASURED in S0, not assumed.
+ *
+ * 2. **`on_speaking_action: "interrupt"` is now an open question.** The whole
+ *    Bridge (§5) depends on Echo being cut off mid-sentence. That behaviour was
+ *    documented against the realtime path; here Echo is mid-TTS-playback, which
+ *    is a different mechanism. This is the highest-risk unknown in the project
+ *    and S0 exists to answer it.
+ *
+ * To go back to realtime the moment an OpenAI key appears, replace the `llm`
+ * block below with `{ vendor: "openai", url: "wss://api.openai.com/v1/realtime",
+ * model: "gpt-4o-realtime-preview", ... }` and drop `tts` entirely. Nothing
+ * else in this file changes — the prompt, the tools and the VAD config are
+ * identical either way.
+ * ────────────────────────────────────────────────────────────────────────────
+ */
+export const GROQ_CHAT_COMPLETIONS_URL =
+  "https://api.groq.com/openai/v1/chat/completions";
+
+/**
+ * `gpt-oss-120b` over the smaller models: this prompt is long and the epistemic
+ * rules are subtle, and §6 Rules 1–2 are PROMPT-enforced. A weaker model is
+ * likelier to slip into diagnosing, which is the one failure the brief cannot
+ * tolerate. The Tier 1 tripwires catch it in fixtures; on a live bridge only
+ * the model's own discipline holds.
+ */
+export const FAST_LOOP_MODEL = "openai/gpt-oss-120b";
+
+export type TtsVendor = "elevenlabs" | "sarvam";
+
+export interface TtsSettings {
+  vendor: TtsVendor;
+  apiKey: string;
+  /** ElevenLabs only. */
+  voiceId?: string;
+  /** Sarvam only. */
+  speaker?: string;
+  language?: string;
+}
+
+/**
+ * Build the `tts` block.
+ *
+ * ⚠️ **Agora does not validate these parameter names.** A control probe against
+ * the live API sent `{ totally_wrong_param_name: "x" }` and still got
+ * `HTTP 200, RUNNING`. Agora checks only that `vendor` is one it knows; the
+ * contents of `params` are forwarded to the vendor adapter unchecked.
+ *
+ * So a typo here does not fail loudly — it produces an agent that joins, looks
+ * healthy, and is **silent forever**. If Echo ever goes quiet, suspect this
+ * function before anything else.
+ *
+ * Note the asymmetry that makes that easy to trip over: ElevenLabs reads `key`,
+ * Sarvam reads `api_subscription_key`.
+ */
+export function buildTtsConfig(tts: TtsSettings) {
+  if (tts.vendor === "elevenlabs") {
+    return {
+      vendor: "elevenlabs",
+      params: {
+        key: tts.apiKey,
+        // Flash over multilingual_v2: quality is a little lower, but we just
+        // spent our latency budget on the cascade and cannot afford more.
+        model_id: "eleven_flash_v2_5",
+        voice_id: tts.voiceId ?? "pNInz6obpgDQGcFmaJgB",
+        sample_rate: 24000,
+      },
+    };
+  }
+
+  return {
+    vendor: "sarvam",
+    params: {
+      // NOT `key`. Sarvam's adapter reads `api_subscription_key`, and getting
+      // this wrong yields a silent agent with no error anywhere. Proven: an
+      // agent configured with `key` reached RUNNING and never made a sound,
+      // while the same config with `api_subscription_key` spoke at 83%.
+      api_subscription_key: tts.apiKey,
+
+      // PIN THE MODEL. Do not rely on Agora's default.
+      //
+      // This bit us live: Agora's Sarvam adapter defaulted to `bulbul:v2`, and
+      // Sarvam deprecated v2 mid-session. Agents that had been speaking went
+      // silent — RUNNING, healthy, mute, no error on any surface. Sarvam only
+      // says "Model 'bulbul:v2' has been deprecated" if you call it directly.
+      //
+      // An explicit model means a future deprecation shows up as a loud 400 on
+      // our own probe rather than as a mysteriously silent demo.
+      model: "bulbul:v3",
+
+      // Speakers are model-scoped: v2 voices (anushka, abhilash…) are REJECTED
+      // by v3. If you change the model, re-check the speaker — Sarvam returns
+      // the compatible list in the error, which is how this one was found.
+      speaker: tts.speaker ?? "anand",
+      target_language_code: tts.language ?? "en-IN",
+      pace: 1.0,
+      sample_rate: 24000,
+    },
+  };
+}
+
 /**
  * Build the Conversational AI Engine create-agent payload.
  *
@@ -203,7 +326,8 @@ export function buildAgentPayload(params: {
   channel: string;
   agentUid: number;
   agentRtcToken: string;
-  openAiApiKey: string;
+  groqApiKey: string;
+  tts: TtsSettings;
   toolWebhookUrl?: string;
 }) {
   return {
@@ -223,10 +347,12 @@ export function buildAgentPayload(params: {
       },
       turn_detection: TURN_DETECTION,
       llm: {
-        vendor: "openai",
-        url: "wss://api.openai.com/v1/realtime",
-        api_key: params.openAiApiKey,
-        model: "gpt-4o-realtime-preview",
+        // No `vendor` field: this is Agora's CUSTOM LLM path, which is selected
+        // by giving a URL it does not recognise as a first-party vendor. The
+        // endpoint must be OpenAI-chat-completions compatible and support SSE.
+        url: GROQ_CHAT_COMPLETIONS_URL,
+        api_key: params.groqApiKey,
+        model: FAST_LOOP_MODEL,
         system_messages: [
           { role: "system", content: FAST_LOOP_SYSTEM_PROMPT },
         ],
@@ -239,6 +365,10 @@ export function buildAgentPayload(params: {
         max_history: 32,
         greeting_message: "",
       },
+      // Echo's voice. MANDATORY in cascaded mode — an agent without a `tts`
+      // block is rejected outright with `properties: tts.addon not found`.
+      // (Verified, not assumed: see session_log.md.)
+      tts: buildTtsConfig(params.tts),
       asr: {
         language: "en-US",
         // Biasing the recogniser toward the vocabulary of this incident.

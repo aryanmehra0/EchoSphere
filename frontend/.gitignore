@@ -45,3 +45,15 @@ next-env.d.ts
 
 # S0 bridge spike output
 s0-spike-report.json
+
+# Vendored Agora Web SDK for the throwaway S0 listener (public/listen.html).
+#
+# It is a byte-for-byte copy of an installed dependency — 1.5 MB of minified
+# JS that git would store as an opaque blob and re-store on every SDK bump.
+# Regenerate with:
+#
+#   cp node_modules/agora-rtc-sdk-ng/AgoraRTC_N-production.js public/vendor/
+#
+# Vendored rather than loaded from a CDN so the listener has no network
+# dependency and can never drift from the version in package.json.
+public/vendor/

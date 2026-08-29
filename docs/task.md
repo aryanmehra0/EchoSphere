@@ -38,38 +38,103 @@ Server side is built and unit-tested. Everything remaining needs credentials.
 - `[x]` `/api/health` — credential preflight
 - `[x]` Roster Service (in-process; Python takes over in S2)
 - `[x]` Trust-zone boundary enforced by `server-only` + a test
-- `[ ]` **BLOCKED:** create `frontend/.env.local` from `.env.local.example`
+- `[x]` **Agora credentials in and preflighted** (Aug 27) — token mints, customer
+  pair authenticates, app id belongs to the account, Conversational AI enabled
+- `[x]` **`/api/token` verified LIVE** (Aug 27) — real certificate, uid 1002,
+  `authorized:true`, valid RTC + RTM tokens, sequential roster allocation held
+- `[x]` **Real SD-RTN join verified** via `public/listen.html` — a throwaway
+  listener built because nothing in `src/` could join a channel. **Delete it
+  when the line below lands.**
+- `[x]` **Fast Loop re-platformed to Groq** (Aug 27) — cascaded ASR → LLM → TTS,
+  since no OpenAI key was obtainable. `agent-config.ts`, `env.ts`,
+  `/api/invite-agent`, the spike and `.env.local.example` all updated;
+  **78 tests pass**, six of them new and covering the TTS param names Agora
+  refuses to validate
+- `[x]` **`/api/invite-agent` verified end to end** — `HTTP 200`, live agent
+  launched and stopped (placeholder TTS key held in memory, never written to disk)
+- `[x]` **TTS key in and verified** (Aug 28) — ElevenLabs. `/api/health` returns
+  `ready:true`; Echo measured speaking at 80–87% peak on a live channel.
+  (Sarvam also wired but **broken upstream** — Agora's adapter is pinned to the
+  deprecated `bulbul:v2`; see `session_log.md`.)
 - `[ ]` Replace the replay driver with live Agora RTC join + RTM subscribe
 - `[ ]` Feed the real remote track into `useVoiceEnvelope`
 - `[ ]` Observer self-renewal on its own T-minus-300s timer (Python, S2)
 - `[ ]` **Gate:** two humans + Echo in a channel; every UID resolves to a role
 
-## S2 — Observer + source separation · Aug 30 — NOT STARTED
+## Zone 3 scaffolded · Aug 28 — `backend/` NOW EXISTS
 
-- `[ ]` Observer worker, `on_playback_audio_frame_before_mixing`
-- `[ ]` **Agent-UID exclusion** *(closes G2 — Echo transcribing itself)*
-- `[ ]` `vad_result_bytearray` → STT, role-tagged transcripts
+FastAPI service, 13 tests, verified end to end on a live channel.
+
+- `[x]` `backend/` created — venv, requirements, README, 13 passing tests
+- `[x]` **`utterance.py` — Rules 1–2 enforced IN CODE.** `/speak` sends our exact
+  sentence, so a claim without a source or a causal indicative **cannot be
+  constructed**. §6.2's admitted weakness ("prompt-enforced, could be violated
+  by a creative model") no longer applies to Echo's proactive speech
+- `[x]` `bridge.py` — Bridge Controller on `/speak` + `/interrupt`, INFERRED
+  filter (Rule 3), 12s interruption floor, coalescing window
+- `[x]` `ledger.py` — one claim table, four statuses, frontend-mirroring selectors
+- `[x]` `deltas.py` — `seq` + HELLO / SNAPSHOT / REPLAY *(closes G6 server-side)*
+- `[x]` `main.py` — observer ingress with **uid 9000 exclusion (G2)**, ledger
+  writes, `query_incident_state` tool webhook *(closes G1 server-side)*, WS socket
+- `[x]` **FULL STACK VERIFIED:** browser → Next.js → Python → Agora → Groq →
+  ElevenLabs. Composed intervention spoken at **87% peak**, 485ms Bridge
+  latency, inferred claim correctly absent, close-out states root cause not
+  established
+- `[x]` **Client half done: dashboard connects to `/ws/deltas`** — `delta-socket.ts`
+  with HELLO / SNAPSHOT / REPLAY, backoff, and gap detection while connected;
+  `SNAPSHOT` reducer action that REPLACES rather than merges
+- `[x]` **G6 VERIFIED END TO END** — reload mid-incident restored the ledger
+  from SNAPSHOT in a real browser
+- `[x]` Scripted replay retained as the automatic fallback (§17), with the
+  status bar showing **LIVE DATA** vs **REHEARSAL** so a replay can never pass
+  as a live incident
+- `[x]` `POST /incident/reset` — clean state between the three S6 rehearsals
+- `[x]` **`redaction.py`** — PII stripped BEFORE the LLM and before any index (§10.4)
+- `[x]` **`extraction.py`** — Turn Window, §14.2 prompt, schema validation + repair
+  retry, compaction with pinned obligations, **entity resolution done in code**
+- `[x]` **`contradiction.py`** — the two-stage engine *(closes G4)*
+- `[x]` **Pipeline wired**: speech → extraction → Ledger → deltas → Bridge
+- `[x]` **Enum coercion both sides** — an LLM-fed wire can no longer blank the UI
+- `[ ]` `rti.py`, `proxy.py`, `authorization.py`
+- `[ ]` ⚠️ **Contradiction reliability is ~2 of 3 runs. S6's gate is NOT met.**
+  Variance is in extraction splitting the same sentences differently. Needs
+  Rehearsal Rig Tier 2 to measure before tuning further.
+
+## S2 — Observer + source separation · Aug 30 — BLOCKED ON PYTHON VERSION
+
+- `[x]` **Agent-UID exclusion implemented** at the observer seam *(closes G2)*
+- `[x]` Observer built as a pluggable adapter; HTTP ingress works today
+- `[ ]` ⚠️ `agora-python-server-sdk` has **no wheel for Python 3.14** and fails
+  to build. 3.14 is the only interpreter installed. Real per-UID audio needs a
+  3.12 venv — see `backend/README.md`
+- `[ ]` `vad_result_bytearray` → STT once a 3.12 interpreter exists
 - `[ ]` **Gate:** 60s of Echo speech produces **zero** claims from uid 9000
 
-## S3 — Ledger + extraction + deltas · Aug 31 — NOT STARTED
+## S3 — Ledger + extraction + deltas · Aug 31 — 🟡 HALF DONE
 
-- `[ ]` Turn Window, PII redaction, extraction LLM
-- `[ ]` Claim table with `epistemicStatus`; emit `IncidentDelta`
-- `[ ]` Delta Hub: `seq` + HELLO / SNAPSHOT / REPLAY *(closes G6)*
-- `[ ]` Client half of the reconnect protocol
-- `[ ]` **Gate:** speak a sentence → node on the graph in < 4s; reload → graph survives
+- `[x]` Claim table with `epistemicStatus`; emits `IncidentDelta` — `ledger.py`
+- `[x]` Delta Hub: `seq` + HELLO / SNAPSHOT / REPLAY *(closes G6)*
+- `[x]` Client half of the reconnect protocol — `delta-socket.ts`
+- `[x]` **Half the gate met:** reload → graph survives ✅ (verified in a browser)
+- `[x]` Turn Window, PII redaction, extraction LLM — **done**
+- `[x]` **Gate met:** a spoken sentence becomes a graph node automatically;
+  reload → graph survives. Verified live with 0 console errors.
 
 ## S4 — Contradiction + RTI · Sep 1 — NOT STARTED
 
-- `[ ]` Embedder, in-process ANN index
-- `[ ]` **Two-stage** scope → retrieve → cooldown → adjudicate *(closes G4)*
+- `[x]` **Two-stage** scope → retrieve → cooldown → adjudicate *(closes G4)*
+- `[ ]` Embedder — lexical overlap stands in; no embedding vendor is configured
 - `[ ]` RTI: normalized, EWMA, hysteresis *(closes G5)*
 - `[ ]` **Gate:** contradiction fires exactly once; ≤ 2 RTI interventions in 3 min
 
 ## S5 — Bridge integration + gate · Sep 2 — NOT STARTED
 
-- `[ ]` Bridge Controller — PUSH / QUERY / BEACON, single-slot pre-emptive queue
-- `[ ]` **`INFERRED` filter in the Bridge Controller** — the structural half of Rule 3
+- `[x]` **Bridge Controller built early** — `/speak` + `/interrupt`, priority
+  discipline, 12s interruption floor, coalescing window (`backend/app/bridge.py`)
+- `[x]` **`INFERRED` filter in the Bridge Controller** — the structural half of Rule 3
+- `[x]` **Rules 1–2 now structural too** — `utterance.py` composes Echo's exact
+  words, so an unattributed or causal sentence cannot be constructed
+- `[ ]` BEACON channel (periodic state sync)
 - `[ ]` Proxy Action Layer, three-tier classification
 - `[ ]` **Authorization Gate** — nonce + TTL + argsHash + role-bound *(closes G7)*
 - `[ ]` Approval modal in the dashboard showing args + evidence chain
@@ -77,16 +142,23 @@ Server side is built and unit-tested. Everything remaining needs credentials.
 
 ## S6 — Rig + degradation + rehearse · Sep 3 — NOT STARTED
 
-- `[ ]` Rehearsal Rig Tiers 2 and 3 *(closes G8)*
+- `[ ]` Rehearsal Rig Tiers 2 and 3 *(closes G8)* — **now the top priority**,
+  because contradiction reliability cannot be tuned without measuring it
 - `[ ]` Degradation ladder
-- `[ ]` **Gate:** demo runs clean three times consecutively
+- `[ ]` **Gate: NOT MET.** Three consecutive rehearsals → contradiction shown
+  in **2 of 3**, 0 console errors in all 3.
 
 ## S0 — Bridge Spike · Aug 26–28 · **RUN THIS FIRST** *(closes G9)*
 
-Script is written and ready: `npm run spike -- --channel inc-spike`.
-Blocked only on credentials.
+**Exit criteria MET (Aug 28)** — though not by the mechanism v6 specified.
+Instruction injection never produced speech; `/speak` and `/interrupt` do.
+Measured: 80–87% peak audio, interrupt acknowledged in 433ms.
 
 - `[x]` Spike script written, syntax-checked, fails cleanly without creds
+- `[x]` **Two runtime bugs found and fixed (Aug 27)** — `join` shadowing killed
+  the report write at the very end of a live run, and `agora-token` needs
+  `.default` under plain Node. Neither was credential-related; the script could
+  not have completed on any machine. See `session_log.md` §5.
 - `[ ]` **BLOCKED:** `.env.local`
 - `[ ]` Launch agent with trivial prompt
 - `[ ]` Inject hardcoded instruction; confirm it speaks; measure latency
@@ -140,7 +212,7 @@ Blocked only on credentials.
 |---|---|---|
 | Deterministic state (replay ×8 identical) | 1 | ✅ |
 | Duplicate delta delivery idempotent | 1 | ✅ |
-| Reconnect at seq 51 deep-equals uninterrupted | 1 | ⬜ S3 |
+| Reconnect at seq 51 deep-equals uninterrupted | 1 | ✅ SNAPSHOT replace + idempotent replay asserted |
 | Ask DB status ×8 → identical payloads | 2 | ⬜ S4 |
 | Agent self-transcription (uid 9000) | 2 | ⬜ S2 |
 | No unattributed causal assertion | 2 | ⬜ S4 (Tier 1 covers the fixture) |
@@ -161,7 +233,11 @@ curl localhost:3000/api/health   # which credentials are configured
 
 ## The one blocker
 
-`frontend/.env.local` does not exist. Until it does, S0 cannot run and no API
-route can reach Agora. Copy `.env.local.example` and fill in five values —
+`frontend/.env.local` **exists but every value is blank** (measured Aug 27: 5,032
+bytes, all of it comments; `/api/health` on a freshly booted server returns
+`ready:false` with all five `false`). The file being present is why `next build`
+prints `Environments: .env.local` — that log line is *not* evidence the
+credentials are set. Until the five values are filled in, S0 cannot run and no
+API route can reach Agora. Fill them in —
 note that `AGORA_CUSTOMER_ID`/`SECRET` are a **different credential** from
 `AGORA_APP_CERTIFICATE`; conflating them is the most common setup failure.

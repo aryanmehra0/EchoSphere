@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { MissingEnvError } from "@/lib/server/env";
+import { MissingEnvError, serverEnv } from "@/lib/server/env";
 import {
   mintTokens,
   TOKEN_TTL_SECONDS,
@@ -107,6 +107,12 @@ export async function POST(request: Request) {
 
     // ── Step 4. Only now. ─────────────────────────────────────────────────
     return NextResponse.json({
+      // The App ID is NOT a secret — it ships inside every Agora client bundle,
+      // and `.env.local.example` says so explicitly: the CERTIFICATE is the
+      // secret. Returning it here means one call gives a joiner everything it
+      // needs, which is what lets a plain static page (or the S1 client wiring)
+      // join without reading env at build time.
+      appId: serverEnv.agoraAppId,
       rtcToken: tokens.rtcToken,
       rtmToken: tokens.rtmToken,
       uid,

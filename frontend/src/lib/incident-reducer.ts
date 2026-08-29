@@ -25,6 +25,15 @@ import type {
 export type IncidentAction =
   /** A JSON delta from the Slow Loop analytics WebSocket. */
   | { type: "DELTA"; payload: IncidentDelta }
+  /**
+   * The server's authoritative full state, from a HELLO handshake (v6 §9.3).
+   *
+   * Distinct from DELTA because a snapshot must REPLACE the collections rather
+   * than merge into them. Merging would silently preserve rows the server has
+   * since dropped — a reconnecting dashboard would show claims that no longer
+   * exist, which is worse than showing nothing.
+   */
+  | { type: "SNAPSHOT"; payload: IncidentDelta }
   /** One RTM transcript frame, partial or final. */
   | { type: "TRANSCRIPT"; payload: Transcript }
   | { type: "BRIDGE"; state: BridgeState; at?: number }
@@ -109,6 +118,31 @@ export function incidentReducer(
         // The timeline is the one collection that stays strictly chronological,
         // because an operator reads it as a narrative rather than a set.
         timeline: upsert(state.timeline, d.timeline).sort((a, b) => a.at - b.at),
+        rti: d.rti ?? state.rti,
+        phase: d.phase ?? state.phase,
+        agent: d.agent ?? state.agent,
+      };
+    }
+
+    /**
+     * Full state from the server (v6 §9.3).
+     *
+     * Replaces every server-owned collection and preserves everything the
+     * CLIENT owns: the transport state, the incident clock, and the transcript
+     * feed. The server's snapshot has no opinion about whether this browser is
+     * connected, and applying one must never drop the operator's scrollback.
+     */
+    case "SNAPSHOT": {
+      const d = action.payload;
+      return {
+        ...state,
+        entities: d.entities ?? [],
+        links: d.links ?? [],
+        claims: d.claims ?? [],
+        unchecked: d.unchecked ?? [],
+        tasks: d.tasks ?? [],
+        contradictions: d.contradictions ?? [],
+        timeline: [...(d.timeline ?? [])].sort((a, b) => a.at - b.at),
         rti: d.rti ?? state.rti,
         phase: d.phase ?? state.phase,
         agent: d.agent ?? state.agent,
