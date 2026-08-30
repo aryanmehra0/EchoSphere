@@ -32,6 +32,7 @@
 -->
 
 <script src="/vendor/AgoraRTC_N-production.js"></script>
+<script src="/vendor/agora-rtm.js"></script>
 <style>
   :root {
     --base:#0b0d11; --raised:#111419; --sunken:#090a0e; --line:rgba(255,255,255,.09);
@@ -143,6 +144,15 @@
   <fieldset>
     <legend>On the channel</legend>
     <div id="peers"><p style="color:var(--ink4);font-size:11px;margin:0">Nobody yet.</p></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Transcript forwarding &rarr; Slow Loop</legend>
+    <p id="fwd" style="margin:0;font-size:11px;color:var(--ink3)">
+      Not connected. Joining subscribes to Agora ASR over RTM and forwards each
+      final utterance to the Slow Loop, which is what makes the dashboard fill
+      itself from real speech.
+    </p>
   </fieldset>
 
   <fieldset>
@@ -300,6 +310,15 @@ async function join() {
     peers.set("me", { el: meEl, bar: meEl.querySelector("i") });
     peers.set(cred.uid, peers.get("me"));
 
+    // ── The live transcript path ──────────────────────────────────────────
+    // Without this the Slow Loop never hears anything: Agora's ASR result goes
+    // to the Fast Loop, and the analytics side is fed by HTTP. Subscribing to
+    // RTM and forwarding each final utterance is what closes the loop, so the
+    // dashboard fills itself from speech rather than from curl.
+    startForwarding(cred, channel).catch((err) =>
+      log("RTM forwarding unavailable: " + err.message, "er"),
+    );
+
     joined = true;
     $("leave").disabled = false;
     $("mute").disabled = false;
@@ -316,6 +335,8 @@ async function leave() {
   try {
     if (micTrack) { micTrack.stop(); micTrack.close(); micTrack = null; }
     if (client) { await client.leave(); }
+    if (rtm) { try { await rtm.logout(); } catch {} rtm = null; }
+    forwarded = 0;
     log("left the channel", "ok");
   } catch (err) {
     log("leave error: " + err.message, "er");
@@ -339,6 +360,103 @@ $("mute").addEventListener("click", async () => {
   $("mute").textContent = micTrack.muted ? "Unmute mic" : "Mute mic";
   log(micTrack.muted ? "mic MUTED" : "mic open");
 });
+
+
+/* ---------------------------------------------------------------------------
+   Agora ASR -> RTM -> Slow Loop
+   --------------------------------------------------------------------------- */
+
+const SLOW_LOOP = "http://127.0.0.1:8000";
+let rtm = null;
+let forwarded = 0;
+
+/**
+ * Agora publishes transcription over RTM when advanced_features.enable_rtm is
+ * set on the agent (it is — see agent-config.ts).
+ *
+ * The payload shape is not something to assume: different Conversational AI
+ * versions have used `object`, `text`, `is_final`, `stream_id`, `turn_id` and
+ * `user_id` in varying combinations. So this parses DEFENSIVELY and logs
+ * anything it cannot read, rather than silently dropping speech — a transcript
+ * that vanishes is indistinguishable from one nobody spoke.
+ */
+function parseTranscript(raw) {
+  let msg = raw;
+  if (typeof raw === "string") {
+    try { msg = JSON.parse(raw); } catch { return null; }
+  }
+  if (!msg || typeof msg !== "object") return null;
+
+  const text = msg.text ?? msg.transcript ?? msg.content ?? "";
+  if (!text || !String(text).trim()) return null;
+
+  const uid = Number(
+    msg.stream_id ?? msg.streamId ?? msg.uid ?? msg.user_id ?? msg.userId ?? 0,
+  );
+
+  // `is_final` absent is treated as FINAL. A partial wrongly forwarded is
+  // deduped downstream by messageId; a final wrongly dropped is lost forever.
+  const isFinal = msg.is_final ?? msg.isFinal ?? msg.final ?? true;
+
+  return {
+    uid,
+    text: String(text).trim(),
+    isFinal: Boolean(isFinal),
+    messageId: String(msg.message_id ?? msg.turn_id ?? `${uid}-${Date.now()}`),
+    object: msg.object ?? "",
+  };
+}
+
+async function startForwarding(cred, channel) {
+  if (typeof AgoraRTM === "undefined") throw new Error("RTM SDK not loaded");
+
+  const RTM = AgoraRTM.RTM ?? AgoraRTM.default?.RTM ?? AgoraRTM;
+  rtm = new RTM(cred.appId, String(cred.uid), { token: cred.rtmToken });
+
+  rtm.addEventListener("message", async (event) => {
+    const parsed = parseTranscript(event.message);
+    if (!parsed) {
+      log("RTM message (unparsed): " + String(event.message).slice(0, 90));
+      return;
+    }
+
+    // G2 — never forward Echo's own speech. The backend drops uid 9000 too,
+    // but a request not made is cheaper than one refused, and this keeps the
+    // forwarded count honest.
+    const isAgent = parsed.uid === AGENT_UID || /assistant/i.test(parsed.object);
+    if (isAgent) {
+      log("Echo said: " + parsed.text.slice(0, 70), "hi");
+      return;
+    }
+    if (!parsed.isFinal) return;
+
+    const role = roleFor(parsed.uid);
+    try {
+      await fetch(SLOW_LOOP + "/observer/transcript", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...parsed, role }),
+      });
+      forwarded += 1;
+      $("fwd").innerHTML =
+        "Forwarded <b>" + forwarded + "</b> utterances to the Slow Loop.";
+      log("-> Slow Loop [" + role + "] " + parsed.text.slice(0, 60), "ok");
+    } catch (err) {
+      log("forward failed: " + err.message, "er");
+    }
+  });
+
+  await rtm.login();
+  await rtm.subscribe(channel, { withMessage: true });
+  $("fwd").innerHTML = "Subscribed to Agora ASR. Speak and it reaches the dashboard.";
+  log("RTM subscribed — transcripts will be forwarded", "ok");
+}
+
+/** The Roster owns this mapping; until the browser reads it, derive from uid. */
+function roleFor(uid) {
+  const chosen = $("role").value;
+  return uid === 0 || uid === undefined ? chosen : chosen;
+}
 
 window.addEventListener("beforeunload", () => { if (joined) leave(); });
 

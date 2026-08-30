@@ -219,6 +219,120 @@ four-label NLI task, which is where a fast open model is at its most reliable.
 > prompt-enforced. The Tier 1 tripwires and the S6 Tier 2 LLM-judge exist for
 > this; do not relax them. Rule 3 is structural and unaffected.
 
+### Aug 30 (2) — reviewed another session's RTM work; two bugs that only appear on two machines
+
+A parallel session moved RTM transcript forwarding into the console —
+`agora-bridge.ts`, `agora-transcript.ts` and a test file. Good work: the parser
+is typed, pure and unit-tested, forwarding is routed through `delta-socket.ts`
+so the single-egress boundary holds, and `AgentPresence` finally receives the
+REAL Echo track instead of a synthesised envelope.
+
+Review found three problems. All three were invisible on one laptop.
+
+**1. Every transcript was attributed to whoever's browser received it.**
+`credentials.role` is the LOCAL user's role, but RTM broadcasts to every
+subscriber — so on the two-machine setup §18 makes a hard requirement, DevOps's
+console received Support's utterance and forwarded it labelled "DevOps Lead".
+
+A MIS-sourced claim is worse than an unsourced one: §6.2 Rule 1 catches the
+second and nothing downstream can catch the first. The contradiction engine
+would then compare two people's claims believing them to be one person's.
+
+Fixed with `forwardDecision()` — each participant forwards ONLY their own
+speech, because a browser knows exactly one role for certain. Pure and exported
+so it can be tested without two machines on a channel, which is precisely the
+configuration it exists for and the one that cannot be exercised on a laptop.
+Six tests pin it.
+
+**2. The same utterance was forwarded by every browser.** Same root cause, and
+it doubled extraction. Fixed client-side by (1), plus a backstop:
+`TurnWindow.add()` now dedupes by `message_id` and returns whether the frame was
+taken. RTM does not guarantee once-only delivery and a reconnecting browser can
+replay, so this is worth having regardless of what the client does.
+
+> Dedup is by message id, NOT by text. Two engineers independently reporting
+> "the cache is fine" is a real signal, and collapsing them would erase one
+> person's contribution to the record. The test helper had been deriving ids
+> from text alone, which made that case look broken — the helper was wrong.
+
+**3. The dashboard was made to depend on the microphone.** `openBridge` joined
+Agora BEFORE opening the delta socket and returned early on failure, so a denied
+mic permission or a stale token took the LIVE DASHBOARD down with it — while the
+Slow Loop was healthy and everyone else's speech was still being analysed.
+
+§17's standing rule is explicit: *never let a change make the dashboard depend on
+the Fast Loop*. Order inverted — socket first, microphone second. A failed join
+now costs only this operator's voice and raises the ANALYTICS-ONLY rung of §13's
+ladder with a banner saying so.
+
+**Verified after:** 222 tests (127 backend + 95 frontend), live run LIVE DATA
+with 0 console errors, contradiction fired in the backend.
+
+> **Harness note:** `final-demo.mjs` now checks the DOM too early. Extraction
+> takes 20–60 s per window on the primary model, and the script allows 6.5 s
+> between lines — so a run can report "contradiction not shown" while the
+> backend has one. Widen the waits before trusting that line again.
+
+### Aug 29 — S4/S5/S6 built, and the Rig turned tuning into measurement
+
+**Everything remaining was built:** Rehearsal Rig Tier 2 (§15, closes G8),
+`rti.py` (§8, closes G5), `authorization.py` + `proxy.py` (§10.2, §4.5, closes
+G7), and the dashboard's approval modal. **111 backend + 85 frontend tests.**
+
+#### Tier 2 paid for itself immediately
+
+Contradiction detection had been ~2-in-3 and every attempt to fix it was
+guesswork. The Rig localised the fault in ONE run: entity convergence was 20%,
+with the same note every time — `'40 percent' -> None`. Extraction splits one
+spoken sentence into several claims and only the FIRST carries the subject, so
+text matching could never resolve the rest.
+
+Four fixes, each measured rather than assumed:
+
+| Fix | Detection | Entity convergence |
+|---|---|---|
+| baseline | 20% | 20% |
+| claims inherit the window's entity | 60% | 75% |
+| prompt: entity ids are stable, reuse them | 83% | **100%** |
+| adjudication gate 0.75 → 0.60 | **100%** | 100% |
+
+Precision stayed at **100%** on both negative scenarios throughout, which is
+the only reason lowering the gate was defensible.
+
+#### Then the 4-line scenario found what the 2-line one could not
+
+- **A false positive.** It fired on "tickets are flooding in" vs "500s spike" —
+  two symptoms that AGREE. Fixed two ways: INDEPENDENT now needs 0.85 while
+  OPPOSED needs 0.60 (OPPOSED is unambiguous; INDEPENDENT is also the correct
+  label for two unrelated observations), and the adjudication prompt now
+  carries worked examples of symptom pairs that are NOT opposed.
+- **Multi-entity claims.** "cache read timeouts on the checkout path" names two
+  systems. Longest-alias-first picked `checkout` and split it from the Redis
+  claims. Now EARLIEST mention wins — a claim is about the first thing it
+  names; the rest is context.
+- **Synonyms.** "the cache" IS the Redis entity, and nothing said so. The
+  extraction prompt now asks for `aliases` per entity and they are threaded
+  through resolution, so a later sentence saying only "the cache" resolves
+  correctly.
+
+#### ⚠️ Groq's limits are TOKENS PER DAY, and they are per model
+
+A day of measurement exhausted `openai/gpt-oss-120b` outright — 200,000 TPD,
+used 197,903. Every call then 429'd with "try again in 21m", which against a
+DAILY budget is not a wait, it is a wall. Retrying cannot clear it.
+
+Because the quota is scoped per model, `analysis_models()` is now a chain
+(`gpt-oss-120b` → `gpt-oss-20b` → `qwen3.8-27b`) and a daily-cap 429 falls
+through immediately instead of sleeping. Verified: the pipeline kept running on
+the fallback with all six quality metrics at 100%.
+
+> **Known limitation, stated plainly.** The fallback models are smaller and
+> visibly worse at the adjudication: on `gpt-oss-20b` the symptom-pair false
+> positive returns in ~2 of 3 runs. So the S6 gate is met on the PRIMARY model
+> and not on the fallbacks. Before the finale, either upgrade the Groq tier or
+> budget the daily tokens — a full demo run costs roughly 15–20k, so 200k/day
+> is about ten rehearsals, and today's tuning consumed all of it.
+
 ### 🟡 Slow Loop pipeline built — works, but the headline feature is ~2-in-3 (Aug 28)
 
 `extraction.py`, `redaction.py`, `contradiction.py` landed and are wired into

@@ -54,13 +54,16 @@ const AGENT_COPY: Record<
 const BARS = 9;
 
 export function AgentPresence() {
-  const { state } = useIncident();
+  const { state, agentTrack } = useIncident();
   const agent = state.agent;
   const copy = AGENT_COPY[agent];
 
   const speaking = agent === "speaking";
-  // Phase 2: pass the subscribed remote track here.
-  const { registerBar } = useVoiceEnvelope({ track: null, active: speaking, bars: BARS });
+  const { registerBar } = useVoiceEnvelope({
+    track: agentTrack?.getMediaStreamTrack() ?? null,
+    active: speaking,
+    bars: BARS,
+  });
 
   return (
     <div

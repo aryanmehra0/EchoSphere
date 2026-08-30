@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Mic, MicOff, PhoneOff, Radio } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
 import { Button, Kbd } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
+import type { ParticipantRole } from "@/lib/types";
 
 /**
  * Bridge transport controls.
@@ -24,6 +25,8 @@ import { cn } from "@/lib/cn";
  */
 export function BridgeControls() {
   const { state, openBridge, closeBridge, micOn, toggleMic } = useIncident();
+  const [channel, setChannel] = useState("inc-4417");
+  const [role, setRole] = useState<ParticipantRole>("DevOps Lead");
 
   const idle = state.bridge === "idle";
   const connecting = state.bridge === "connecting";
@@ -50,7 +53,7 @@ export function BridgeControls() {
       const key = e.key.toLowerCase();
       if (key === "j") {
         e.preventDefault();
-        if (idle) openBridge();
+        if (idle && channel.trim()) void openBridge({ channel, role });
         else if (state.bridge === "live") closeBridge();
       }
       if (key === "m" && state.bridge === "live") {
@@ -61,24 +64,49 @@ export function BridgeControls() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [idle, state.bridge, openBridge, closeBridge, toggleMic]);
+  }, [idle, state.bridge, openBridge, closeBridge, toggleMic, channel, role]);
 
   if (idle || connecting) {
     return (
-      <Button
-        variant="primary"
-        onClick={openBridge}
-        disabled={connecting}
-        className="h-9 w-full justify-between px-3"
-        icon={
-          <span className="flex items-center gap-2">
-            <Radio size={14} strokeWidth={2.2} />
-            {connecting ? "Connecting to bridge" : "Join incident bridge"}
-          </span>
-        }
-      >
-        {!connecting ? <Kbd>J</Kbd> : null}
-      </Button>
+      <div className="flex flex-col gap-1.5">
+        <div className="grid grid-cols-[1fr_9.5rem] gap-1.5">
+          <label className="sr-only" htmlFor="bridge-channel">Incident channel</label>
+          <input
+            id="bridge-channel"
+            value={channel}
+            onChange={(event) => setChannel(event.target.value)}
+            disabled={connecting}
+            className="h-8 min-w-0 rounded-sm border border-line bg-sunken px-2 font-mono text-2xs text-ink outline-none placeholder:text-ink-4 focus:border-live"
+            placeholder="incident channel"
+          />
+          <label className="sr-only" htmlFor="bridge-role">Your incident role</label>
+          <select
+            id="bridge-role"
+            value={role}
+            onChange={(event) => setRole(event.target.value as ParticipantRole)}
+            disabled={connecting}
+            className="h-8 rounded-sm border border-line bg-sunken px-2 text-2xs text-ink outline-none focus:border-live"
+          >
+            <option>DevOps Lead</option>
+            <option>Support Engineer</option>
+            <option>Database Admin</option>
+          </select>
+        </div>
+        <Button
+          variant="primary"
+          onClick={() => void openBridge({ channel, role })}
+          disabled={connecting || !channel.trim()}
+          className="h-9 w-full justify-between px-3"
+          icon={
+            <span className="flex items-center gap-2">
+              <Radio size={14} strokeWidth={2.2} />
+              {connecting ? "Connecting to bridge" : "Join incident bridge"}
+            </span>
+          }
+        >
+          {!connecting ? <Kbd>J</Kbd> : null}
+        </Button>
+      </div>
     );
   }
 

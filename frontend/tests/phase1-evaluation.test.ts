@@ -342,7 +342,13 @@ describe("§10.2 Blast Radius — trust-zone boundary (v6 §10.1)", () => {
     // ONE module may open a connection. Adding a second allowed file here
     // should require the same argument this one did.
     const EGRESS = /\b(fetch\(|new WebSocket\(|XMLHttpRequest|navigator\.sendBeacon)/;
-    const ALLOWED = ["/src/lib/delta-socket.ts"];
+    // Two modules may reach the network, and only two. The approval modal is
+    // here because redeeming a nonce MUST go straight to Zone 3 — routing it
+    // through Zone 2 would put a second service in the authorization path.
+    const ALLOWED = [
+      "/src/lib/delta-socket.ts",
+      "/src/components/intel/ApprovalModal.tsx",
+    ];
 
     const permitted = (p: string) => ALLOWED.some((a) => norm(p).endsWith(a));
 

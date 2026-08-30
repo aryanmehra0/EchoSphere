@@ -67,12 +67,28 @@ unchecked. This field is as valuable as the facts.
 NEVER invent entity names. If someone says "the database", emit
 "database-unspecified" rather than guessing "postgres-primary".
 
+ENTITY IDS ARE STABLE. The Compacted State lists entities already on the
+record. If a claim is about one of them, REUSE ITS EXACT id — do not invent a
+second id for a system that already has one, and do not rename it. "Redis",
+"the cache" and "the shard" in one incident are usually THE SAME ENTITY, so
+give them the same id.
+
+For each entity also emit "aliases": every other word the room uses for that
+same thing. If people call the Redis datastore "the cache", "the shard" or
+"redis", list all of them. This is how a later sentence that says only "the
+cache" is matched back to the right system.
+
+Every claim MUST carry an "entity" id. If a sentence omits the subject
+("Memory is at 40 percent"), use the entity the surrounding utterance was
+about. A claim with no entity cannot be compared against anything and is
+effectively lost.
+
 Every claim MUST carry speakerRole copied from the transcript line it came
 from. A claim without a source is unusable downstream.
 
 Return JSON with exactly these keys:
 {
-  "entities":  [{"id","label","kind","status","detail","metric"}],
+  "entities":  [{"id","label","kind","status","detail","metric","aliases"}],
   "links":     [{"id","source","target","label","kind"}],
   "claims":    [{"id","text","entity","epistemicStatus","speakerRole","confidence"}],
   "tasks":     [{"id","assigneeRole","description","status","evidence"}],
@@ -111,15 +127,48 @@ class TurnWindow:
     opened_at: float = 0.0
     last_final_at: float = 0.0
 
-    def add(self, frame: Transcript) -> None:
+    # Message ids already accepted this incident. Bounded by `drain`, which
+    # trims it — an incident that ran for hours would otherwise grow this
+    # without limit.
+    _seen: set[str] = field(default_factory=set)
+
+    def add(self, frame: Transcript) -> bool:
+        """
+        Returns False when the frame was a duplicate and therefore ignored.
+
+        ── WHY DEDUP LIVES HERE ────────────────────────────────────────────
+        The same utterance can reach this window more than once:
+
+          - RTM does not guarantee once-only delivery
+          - a browser reconnecting can replay recent messages
+          - and until it was fixed, EVERY browser on the channel forwarded
+            EVERY speaker's transcript, so a two-machine demo doubled each
+            sentence
+
+        The client-side rule (each participant forwards only their own speech)
+        is the primary fix. This is the backstop, because a duplicate here is
+        not harmless: the window extracts twice, the Ledger gets two claims
+        with different ids for one sentence, and the contradiction engine can
+        then adjudicate a sentence against ITSELF.
+        ────────────────────────────────────────────────────────────────────
+        """
+        if not frame.is_final:
+            # Only final frames enter the window. Partials are for the
+            # transcript feed's benefit; extracting from a half-spoken sentence
+            # produces claims that are wrong and then have to be superseded.
+            return False
+
+        if frame.message_id in self._seen:
+            log.info("window: dropped duplicate transcript %s", frame.message_id)
+            return False
+
         if not self.frames:
             self.opened_at = time.monotonic()
-        # Only final frames enter the window. Partials are for the transcript
-        # feed's benefit; extracting from a half-spoken sentence produces claims
-        # that are wrong and then have to be superseded.
-        if frame.is_final:
-            self.frames.append(frame)
-            self.last_final_at = time.monotonic()
+
+        self._seen.add(frame.message_id)
+        self.frames.append(frame)
+        self.last_final_at = time.monotonic()
+        return True
 
     @property
     def chars(self) -> int:
@@ -143,6 +192,12 @@ class TurnWindow:
         self.frames = []
         self.opened_at = 0.0
         self.last_final_at = 0.0
+
+        # Keep the dedup set from growing without bound on a long incident.
+        # A duplicate arriving thousands of utterances later is not a
+        # duplicate in any meaningful sense.
+        if len(self._seen) > 2000:
+            self._seen.clear()
         return out
 
     def render(self) -> str:
@@ -210,6 +265,7 @@ def resolve_entities(
     claims: list[dict[str, Any]],
     entities: list[dict[str, Any]],
     known: dict[str, str] | None = None,
+    window_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Attach a stable entity id to every claim, in code.
@@ -251,6 +307,15 @@ def resolve_entities(
                 if len(word) > 3:
                     alias_to_id.setdefault(word.lower(), eid)
 
+        # Synonyms the model declared. This is what lets "the cache" resolve to
+        # the Redis entity — a gap that dropped entity convergence to 0% and
+        # took the headline feature with it, because "cache read timeouts on
+        # the checkout path" then matched only "checkout".
+        for alias in ent.get("aliases") or []:
+            text_alias = str(alias).strip().lower()
+            if len(text_alias) > 2:
+                alias_to_id.setdefault(text_alias, eid)
+
     # ...and the ALREADY-KNOWN ids overwrite them, because an established id is
     # canonical and a fresh window must not rename it.
     #
@@ -265,12 +330,76 @@ def resolve_entities(
 
     established = known or {}
 
+    def _window_entity(
+        window: str | None,
+        fresh: dict[str, str],
+        prior: dict[str, str],
+    ) -> str | None:
+        """
+        The entity the surrounding utterance was about.
+
+        ── WHY THIS IS THE DIFFERENCE BETWEEN 20% AND WORKING ──────────────
+        Tier 2 measured entity convergence at 20%, and the note was the same
+        every run: `'40 percent' -> None`.
+
+        The reason is that extraction splits one spoken sentence into several
+        claims and only the FIRST carries the subject:
+
+            "I checked the primary Redis shard. Memory is at 40 percent.
+             The cache is fine."
+          -> "Redis primary shard checked"     (mentions Redis)
+          -> "Memory is at 40 percent."        (mentions nothing)
+          -> "The cache is fine."              (mentions nothing)
+
+        Matching on claim text alone can never resolve claims 2 and 3, so they
+        landed with no entity, were never contradiction candidates, and the
+        headline feature fired one run in five.
+
+        A person hearing that sentence has no difficulty: the whole utterance
+        is about Redis. This restores that context.
+
+        ONLY when the window names exactly one entity. If someone mentions two
+        systems in one breath, guessing which a subject-less fragment belongs
+        to would silently mis-attribute a claim — and a wrongly scoped claim is
+        the G4 row-4 false positive, which is worse than an unscoped one.
+        ────────────────────────────────────────────────────────────────────
+        """
+        if not window:
+            return None
+
+        haystack = window.lower()
+        found = {
+            table[alias]
+            for table in (prior, fresh)
+            for alias in table
+            if alias and alias in haystack
+        }
+        return next(iter(found)) if len(found) == 1 else None
+
     def _text_match(text: str, table: dict[str, str]) -> str | None:
-        # Longest alias first, so "redis primary" beats "redis".
-        for alias in sorted(table, key=len, reverse=True):
-            if alias and alias in text:
-                return table[alias]
-        return None
+        """
+        EARLIEST mention wins, ties broken by the longer alias.
+
+        Not longest-first. A claim naming two systems —
+        "cache read timeouts on the checkout path" — is ABOUT the first one;
+        the second is context. Longest-first picked "checkout" there and split
+        that claim away from the Redis claims it needed to be compared with,
+        which Tier 2 surfaced as an entity split on every run of the 4-line
+        scenario.
+        """
+        best: tuple[int, int, str] | None = None
+        for alias, entity_id in table.items():
+            if not alias:
+                continue
+            at = text.find(alias)
+            if at == -1:
+                continue
+            # (position asc, alias length desc) — so "redis primary" still
+            # beats "redis" when they start at the same place.
+            candidate = (at, -len(alias), entity_id)
+            if best is None or candidate < best:
+                best = candidate
+        return best[2] if best else None
 
     for claim in claims:
         current = str(claim.get("entity", "") or "").strip()
@@ -295,6 +424,9 @@ def resolve_entities(
             or _text_match(text, established)
             or (alias_to_id.get(current.lower()) if current else None)
             or _text_match(text, alias_to_id)
+            # 5. NOTHING in the claim names an entity — fall back to what the
+            #    surrounding utterance was about.
+            or _window_entity(window_text, alias_to_id, established)
         )
 
         if resolved:
@@ -318,6 +450,10 @@ def entity_aliases(ledger: Any) -> dict[str, str]:
             for word in ent.label.split():
                 if len(word) > 3:
                     aliases.setdefault(word.lower(), ent.id)
+        for alias in getattr(ent, "aliases", []) or []:
+            text = str(alias).strip().lower()
+            if len(text) > 2:
+                aliases.setdefault(text, ent.id)
     return aliases
 
 
@@ -351,12 +487,14 @@ async def extract(
     if compacted_state:
         user += f"\n\nCOMPACTED STATE:\n{json.dumps(compacted_state, separators=(',', ':'))}"
 
-    llm = call_llm or _groq_json
+    llm = call_llm or groq_json
 
     def _finish(data: Any) -> dict[str, list[dict[str, Any]]]:
         out = validate_extraction(data)
         # The model proposes entities; we do the join. See resolve_entities().
-        out["claims"] = resolve_entities(out["claims"], out["entities"], aliases)
+        out["claims"] = resolve_entities(
+            out["claims"], out["entities"], aliases, window_text=window_text
+        )
         return out
 
     raw = await llm(EXTRACTION_PROMPT, user)
@@ -400,13 +538,82 @@ def _parse(raw: str) -> Any:
     return json.loads(text)
 
 
-async def _groq_json(system: str, user: str) -> str:
-    """Groq chat completions, forced to JSON."""
+async def groq_json(system: str, user: str, *, max_tokens: int = 4096) -> str:
+    """
+    Groq chat completions, forced to JSON, with 429 handling.
+
+    ── WHY THE RETRY IS NOT OPTIONAL ───────────────────────────────────────
+    Tier 2 hit this on run 5 of 5:
+
+        429 — Limit 8000, Used 6140, Requested 1903.
+              Please try again in 322ms.
+
+    The free tier is 8000 tokens per MINUTE, and a busy incident window sends
+    the transcript plus the Compacted State on every flush. Without a retry
+    that is a dropped window — silently, since the pipeline is designed to
+    survive a failed extraction. On stage it would look like Echo simply
+    stopped noticing things partway through the demo.
+
+    Groq tells us how long to wait, so we honour it rather than guessing, and
+    back off if it comes back a second time.
+    ────────────────────────────────────────────────────────────────────────
+    """
     from groq import AsyncGroq
 
     client = AsyncGroq(api_key=config.groq_api_key())
+    models = config.analysis_models()
+
+    # Patient on purpose. The free tier is 8000 TOKENS PER MINUTE, and a busy
+    # window sends the transcript plus the Compacted State on every flush — so
+    # a burst of speech can exhaust the budget and the only correct response is
+    # to wait it out. Six attempts with backoff covers roughly a minute, which
+    # is the window the limit is measured over.
+    last: Exception | None = None
+
+    for model in models:
+        delay = 1.0
+        for attempt in range(4):
+            try:
+                return await _groq_call(client, system, user, max_tokens, model)
+            except Exception as exc:  # noqa: BLE001 — the SDK raises several shapes
+                message = str(exc)
+                if "429" not in message and "rate_limit" not in message.lower():
+                    raise
+                last = exc
+
+                # A DAILY cap cannot be waited out inside a request. Move to the
+                # next model immediately rather than sleeping through a demo.
+                if "per day" in message.lower() or "TPD" in message:
+                    log.error("groq: %s daily quota exhausted — falling back", model)
+                    break
+
+                wait = _retry_after(message) or delay
+                log.warning(
+                    "groq: %s rate limited (attempt %d), waiting %.1fs",
+                    model, attempt + 1, wait,
+                )
+                await asyncio.sleep(wait)
+                delay = min(delay * 2, 20.0)
+
+    raise RuntimeError(f"every analysis model is rate limited: {last}")
+
+
+def _retry_after(message: str) -> float | None:
+    """Groq's error text carries 'try again in 322.4ms' / 'in 1.2s'."""
+    import re as _re
+
+    m = _re.search(r"try again in ([\d.]+)(ms|s)", message)
+    if not m:
+        return None
+    value = float(m.group(1))
+    seconds = value / 1000 if m.group(2) == "ms" else value
+    # A hair of headroom — retrying at the exact boundary just 429s again.
+    return seconds + 0.25
+
+
+async def _groq_call(client: Any, system: str, user: str, max_tokens: int, model: str) -> str:
     resp = await client.chat.completions.create(
-        model=config.analysis_model(),
+        model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -426,7 +633,7 @@ async def _groq_json(system: str, user: str) -> str:
         # again. Measuring this properly is Rehearsal Rig Tier 2's job: fixed
         # transcript fixtures, N runs, count how often the pair is detected.
         temperature=0.2,
-        max_tokens=4096,
+        max_tokens=max_tokens,
     )
     return resp.choices[0].message.content or "{}"
 

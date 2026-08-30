@@ -10,6 +10,7 @@ import { AgentPresence } from "@/components/voice/AgentPresence";
 import { TranscriptFeed } from "@/components/voice/TranscriptFeed";
 import { GraphCanvas } from "@/components/graph/GraphCanvas";
 import { ContradictionAlert } from "@/components/intel/ContradictionAlert";
+import { ApprovalModal } from "@/components/intel/ApprovalModal";
 import { IntelColumn } from "@/components/intel/IntelColumn";
 import { Panel, PanelHeader } from "@/components/ui/Panel";
 
@@ -73,6 +74,11 @@ export function IncidentConsole() {
             <IntelColumn />
           </Panel>
         </div>
+
+        {/* The Authorization Gate overlays everything: a CRITICAL action
+            waiting on a human is the one thing that should interrupt reading
+            the graph. It has no dismiss control — Approve, Deny, or expire. */}
+        <ApprovalModal />
 
         <StatusBar />
       </div>

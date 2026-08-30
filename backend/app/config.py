@@ -71,6 +71,30 @@ def groq_api_key() -> str:
     return _required("GROQ_API_KEY")
 
 
+def analysis_models() -> list[str]:
+    """
+    The Slow Loop model, plus fallbacks — v6 §13's degradation ladder applied
+    to the analytical LLM.
+
+    Groq's limits are TOKENS PER DAY and they are scoped PER MODEL. A day of
+    measurement exhausted `gpt-oss-120b` (200k TPD) outright, and every call
+    then failed with a 429 that no amount of retrying could clear — "try again
+    in 21m" against a daily budget is not a wait, it is a wall.
+
+    Because the quota is per model, falling back to another one restores
+    service immediately. Ordered best-quality first: the fallbacks are smaller
+    and a little worse at the epistemic tagging, which is the right trade
+    against a dashboard that has stopped updating entirely.
+    """
+    primary = _optional("ANALYSIS_MODEL", "openai/gpt-oss-120b")
+    fallbacks = [
+        m.strip() for m in _optional(
+            "ANALYSIS_MODEL_FALLBACKS", "openai/gpt-oss-20b,qwen/qwen3.8-27b"
+        ).split(",") if m.strip()
+    ]
+    return [primary, *[m for m in fallbacks if m != primary]]
+
+
 def analysis_model() -> str:
     """
     The Slow Loop model.
