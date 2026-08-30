@@ -127,15 +127,48 @@ class TurnWindow:
     opened_at: float = 0.0
     last_final_at: float = 0.0
 
-    def add(self, frame: Transcript) -> None:
+    # Message ids already accepted this incident. Bounded by `drain`, which
+    # trims it — an incident that ran for hours would otherwise grow this
+    # without limit.
+    _seen: set[str] = field(default_factory=set)
+
+    def add(self, frame: Transcript) -> bool:
+        """
+        Returns False when the frame was a duplicate and therefore ignored.
+
+        ── WHY DEDUP LIVES HERE ────────────────────────────────────────────
+        The same utterance can reach this window more than once:
+
+          - RTM does not guarantee once-only delivery
+          - a browser reconnecting can replay recent messages
+          - and until it was fixed, EVERY browser on the channel forwarded
+            EVERY speaker's transcript, so a two-machine demo doubled each
+            sentence
+
+        The client-side rule (each participant forwards only their own speech)
+        is the primary fix. This is the backstop, because a duplicate here is
+        not harmless: the window extracts twice, the Ledger gets two claims
+        with different ids for one sentence, and the contradiction engine can
+        then adjudicate a sentence against ITSELF.
+        ────────────────────────────────────────────────────────────────────
+        """
+        if not frame.is_final:
+            # Only final frames enter the window. Partials are for the
+            # transcript feed's benefit; extracting from a half-spoken sentence
+            # produces claims that are wrong and then have to be superseded.
+            return False
+
+        if frame.message_id in self._seen:
+            log.info("window: dropped duplicate transcript %s", frame.message_id)
+            return False
+
         if not self.frames:
             self.opened_at = time.monotonic()
-        # Only final frames enter the window. Partials are for the transcript
-        # feed's benefit; extracting from a half-spoken sentence produces claims
-        # that are wrong and then have to be superseded.
-        if frame.is_final:
-            self.frames.append(frame)
-            self.last_final_at = time.monotonic()
+
+        self._seen.add(frame.message_id)
+        self.frames.append(frame)
+        self.last_final_at = time.monotonic()
+        return True
 
     @property
     def chars(self) -> int:
@@ -159,6 +192,12 @@ class TurnWindow:
         self.frames = []
         self.opened_at = 0.0
         self.last_final_at = 0.0
+
+        # Keep the dedup set from growing without bound on a long incident.
+        # A duplicate arriving thousands of utterances later is not a
+        # duplicate in any meaningful sense.
+        if len(self._seen) > 2000:
+            self._seen.clear()
         return out
 
     def render(self) -> str:

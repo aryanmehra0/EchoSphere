@@ -23,9 +23,21 @@ from app.ledger import Ledger
 from app.models import Claim, Task, Transcript, Unchecked
 
 
+# The id is derived from (text, role), not text alone. Agora issues one id per
+# UTTERANCE, so two engineers independently saying "the cache is fine" carry
+# different ids — and a helper that collides them would make dedup look like it
+# was erasing a real second speaker.
+_UIDS = {"DevOps Lead": 1001, "Support Engineer": 1002, "Database Admin": 1003}
+
+
 def frame(text: str, role: str = "DevOps Lead", *, final: bool = True) -> Transcript:
-    return Transcript(message_id=f"m{hash(text) % 999}", uid=1001, role=role,
-                      text=text, is_final=final)
+    return Transcript(
+        message_id=f"m{abs(hash((text, role))) % 999999}",
+        uid=_UIDS.get(role, 1001),
+        role=role,
+        text=text,
+        is_final=final,
+    )
 
 
 def run(coro):
@@ -72,6 +84,55 @@ class TestTurnWindow(unittest.TestCase):
         rendered = w.render()
         self.assertIn("[DevOps Lead] memory at 40 percent", rendered)
         self.assertIn("[Support Engineer] read timeouts", rendered)
+
+    def test_the_same_utterance_twice_is_accepted_once(self):
+        """
+        The backstop for duplicate delivery.
+
+        RTM does not guarantee once-only delivery, a reconnecting browser can
+        replay, and until it was fixed every browser on the channel forwarded
+        every speaker's transcript — so a two-machine demo doubled each
+        sentence. A duplicate here is not harmless: the Ledger gets two claims
+        with different ids for one sentence, and the contradiction engine can
+        then adjudicate a sentence against itself.
+        """
+        w = TurnWindow()
+        first = frame("Redis memory is at 40 percent")
+        again = frame("Redis memory is at 40 percent")
+        again.message_id = first.message_id  # same utterance, forwarded twice
+
+        self.assertTrue(w.add(first))
+        self.assertFalse(w.add(again), "a duplicate transcript was accepted")
+        self.assertEqual(len(w.frames), 1)
+
+    def test_two_speakers_saying_the_same_words_are_both_kept(self):
+        # Dedup is by message id, NOT by text. Two engineers independently
+        # reporting "the cache is fine" is a real signal, and collapsing them
+        # would erase one person's contribution to the record.
+        w = TurnWindow()
+        a = frame("The cache is fine", "DevOps Lead")
+        b = frame("The cache is fine", "Support Engineer")
+        self.assertNotEqual(a.message_id, b.message_id)
+
+        self.assertTrue(w.add(a))
+        self.assertTrue(w.add(b))
+        self.assertEqual(len(w.frames), 2)
+
+    def test_a_duplicate_after_a_flush_is_still_rejected(self):
+        # The window drains, but the incident has still heard that sentence.
+        w = TurnWindow()
+        f = frame("Memory is at 40 percent")
+        w.add(f)
+        w.drain()
+
+        repeat = frame("Memory is at 40 percent")
+        repeat.message_id = f.message_id
+        self.assertFalse(w.add(repeat))
+
+    def test_add_reports_whether_the_frame_was_taken(self):
+        w = TurnWindow()
+        self.assertTrue(w.add(frame("a final sentence")))
+        self.assertFalse(w.add(frame("a partial", final=False)))
 
     def test_drain_resets_the_window(self):
         w = TurnWindow()

@@ -410,13 +410,23 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
         at=int(body.get("at") or now_ms()),
     )
 
-    # The transcript reaches the dashboard immediately — an operator should see
-    # words appear as they are spoken, not 1.5 s later when the window flushes.
-    await hub.publish({"transcripts": [t.to_wire()]})
-
     # Extraction batches on turn boundaries (§4.4). Only final frames enter the
-    # window; the flush ticker handles the silence rule.
-    window.add(t)
+    # window; the flush ticker handles the silence rule. `add` also rejects a
+    # repeat of an utterance already accepted.
+    accepted = window.add(t)
+
+    # A duplicate is not re-published either. The reducer would dedupe it by
+    # messageId, but a delta that changes nothing still costs a render on every
+    # connected dashboard — and a transcript appearing twice in the feed while
+    # someone is reading it is its own small betrayal of trust.
+    if accepted or not t.is_final:
+        # The transcript reaches the dashboard immediately — an operator should
+        # see words appear as they are spoken, not 1.5 s later when the window
+        # flushes.
+        await hub.publish({"transcripts": [t.to_wire()]})
+    else:
+        return {"accepted": False, "duplicate": True, "messageId": t.message_id}
+
     outcome = await run_pipeline_if_ready()
 
     return {

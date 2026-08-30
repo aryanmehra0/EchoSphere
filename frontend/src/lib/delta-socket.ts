@@ -1,7 +1,9 @@
 "use client";
 
+import type { BridgeCredentials } from "./agora-bridge";
+import type { AgoraTranscript } from "./agora-transcript";
 import type { IncidentAction } from "./incident-reducer";
-import type { ApprovalRequest, IncidentDelta, Transcript } from "./types";
+import type { ApprovalRequest, IncidentDelta, ParticipantRole, Transcript } from "./types";
 
 /**
  * The dashboard's half of the reconnect protocol — v6 §9.3, closing G6.
@@ -218,4 +220,49 @@ export function slowLoopUrl(): string {
   return (
     process.env.NEXT_PUBLIC_SLOW_LOOP_WS ?? "ws://127.0.0.1:8000/ws/deltas"
   );
+}
+
+/** Same approved boundary as the delta socket, expressed as HTTP for ingress. */
+function slowLoopHttpUrl(): string {
+  return slowLoopUrl()
+    .replace(/^wss:/, "https:")
+    .replace(/^ws:/, "http:")
+    .replace(/\/ws\/deltas$/, "");
+}
+
+/** Zone 2 mints only short-lived participant credentials after roster writes. */
+export async function requestBridgeCredentials(
+  channel: string,
+  role: ParticipantRole,
+): Promise<BridgeCredentials> {
+  const response = await fetch("/api/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channel, role }),
+  });
+  const body = (await response.json()) as Partial<BridgeCredentials> & { error?: string };
+  if (!response.ok) throw new Error(body.error ?? `Token request failed (${response.status})`);
+  if (!body.appId || !body.rtcToken || !body.rtmToken || !body.uid) {
+    throw new Error("Token response was incomplete");
+  }
+  return {
+    appId: body.appId,
+    rtcToken: body.rtcToken,
+    rtmToken: body.rtmToken,
+    uid: body.uid,
+    role,
+  };
+}
+
+/** Final human ASR frames enter the Observer only through the approved egress. */
+export async function forwardTranscriptToSlowLoop(
+  transcript: AgoraTranscript,
+  role: ParticipantRole,
+): Promise<void> {
+  const response = await fetch(`${slowLoopHttpUrl()}/observer/transcript`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...transcript, role }),
+  });
+  if (!response.ok) throw new Error(`Slow Loop returned HTTP ${response.status}`);
 }

@@ -22,10 +22,13 @@ import {
 import { DEMO_SCRIPT, rebaseAction } from "./mock-stream";
 import {
   openDeltaSocket,
+  requestBridgeCredentials,
   slowLoopUrl,
   type DeltaSocket,
 } from "./delta-socket";
-import type { IncidentState } from "./types";
+import { AgoraBridge } from "./agora-bridge";
+import type { IRemoteAudioTrack } from "agora-rtc-sdk-ng";
+import type { IncidentState, ParticipantRole } from "./types";
 
 /**
  * Where the incident data on screen is coming from.
@@ -36,6 +39,11 @@ import type { IncidentState } from "./types";
  * believe it is live would be its own kind of epistemic failure.
  */
 export type DataSource = "live" | "replay" | null;
+
+export interface BridgeJoinOptions {
+  channel: string;
+  role: ParticipantRole;
+}
 
 /**
  * The console's state container.
@@ -64,12 +72,14 @@ interface IncidentStore {
   dispatch: (action: IncidentAction) => void;
   /** Monotonic clock for elapsed timers, ticking once per second. */
   now: number;
-  openBridge: () => void;
+  openBridge: (options: BridgeJoinOptions) => void;
   closeBridge: () => void;
   micOn: boolean;
   toggleMic: () => void;
   /** live = Slow Loop socket, replay = scripted fallback, null = idle. */
   source: DataSource;
+  /** Remote Echo track for the visual envelope, never incident data. */
+  agentTrack: IRemoteAudioTrack | null;
 }
 
 const Ctx = createContext<IncidentStore | null>(null);
@@ -78,9 +88,11 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(incidentReducer, initialIncidentState);
   const [micOn, setMicOn] = useState(true);
   const [source, setSource] = useState<DataSource>(null);
+  const [agentTrack, setAgentTrack] = useState<IRemoteAudioTrack | null>(null);
 
   /** The live delta socket, when one is open. */
   const socket = useRef<DeltaSocket | null>(null);
+  const agora = useRef<AgoraBridge | null>(null);
 
   /**
    * A single shared 1Hz tick drives every elapsed timer in the console.
@@ -96,6 +108,20 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   const clearTimers = useCallback(() => {
     timers.current.forEach(window.clearTimeout);
     timers.current = [];
+  }, []);
+
+  useEffect(() => {
+    const transport = new AgoraBridge({
+      onAgentTrack: setAgentTrack,
+      onAgentState: (agent) => dispatch({ type: "AGENT", state: agent }),
+      onError: (detail) => console.warn(`[agora bridge] ${detail}`),
+    });
+    agora.current = transport;
+
+    return () => {
+      void transport.leave();
+      if (agora.current === transport) agora.current = null;
+    };
   }, []);
 
   /**
@@ -130,9 +156,16 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const openBridge = useCallback(() => {
+  const openBridge = useCallback(async ({ channel, role }: BridgeJoinOptions) => {
+    const cleanChannel = channel.trim();
+    if (!cleanChannel) return;
+
     clearTimers();
     socket.current?.close();
+    socket.current = null;
+    await agora.current?.leave();
+    setAgentTrack(null);
+    setMicOn(true);
     dispatch({ type: "RESET" });
     dispatch({ type: "BRIDGE", state: "connecting" });
 
@@ -145,6 +178,21 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
      * because an operator deserves to know whether they are looking at a live
      * incident or a rehearsal.
      */
+    /*
+      ORDER MATTERS: evidence path first, microphone second.
+
+      §17's standing rule is "never let a change make the dashboard depend on
+      the Fast Loop", and joining Agora before opening the delta socket breaks
+      exactly that. A denied microphone permission, a stale token, a laptop with
+      no input device — any of those would have taken the LIVE DASHBOARD down
+      with them, even though the Slow Loop was healthy and everyone else's
+      speech was still being transcribed and analysed.
+
+      So the socket opens first and the dashboard is live regardless. The RTC
+      join is then attempted, and if it fails we lose only this operator's
+      microphone: they can still watch a real incident unfold, and the console
+      says which capability was lost rather than silently pretending.
+    */
     socket.current = openDeltaSocket({
       url: slowLoopUrl(),
       dispatch,
@@ -155,6 +203,10 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
         }
       },
       onUnavailable: () => {
+        // A live microphone with no evidence path is misleading — speech would
+        // reach the channel and nothing would record it.
+        void agora.current?.leave();
+        setAgentTrack(null);
         // The Slow Loop is not up. Say so once, then run the rehearsal so the
         // dashboard is never a blank screen in front of a judge.
         console.info("[bridge] Slow Loop unreachable — falling back to the scripted replay");
@@ -162,12 +214,38 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
         startReplay();
       },
     });
+
+    try {
+      const credentials = await requestBridgeCredentials(cleanChannel, role);
+      await agora.current?.join(cleanChannel, credentials);
+    } catch (error) {
+      // Voice is gone; the incident record is not. This is the ANALYTICS-ONLY
+      // rung of §13's ladder, and the operator is told rather than left to
+      // wonder why nobody can hear them.
+      console.warn("[bridge] RTC join failed — continuing without a microphone", error);
+      await agora.current?.leave();
+      setAgentTrack(null);
+      dispatch({
+        type: "DELTA",
+        payload: {
+          degraded: {
+            voice: true,
+            extraction: false,
+            model: null,
+            banner: "NO MICROPHONE — you can watch, but the room cannot hear you",
+          },
+        },
+      });
+    }
   }, [clearTimers, startReplay]);
 
   const closeBridge = useCallback(() => {
     clearTimers();
     socket.current?.close();
     socket.current = null;
+    void agora.current?.leave();
+    setAgentTrack(null);
+    setMicOn(true);
     setSource(null);
     dispatch({ type: "BRIDGE", state: "closing" });
     timers.current.push(
@@ -179,14 +257,30 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     return () => {
       clearTimers();
       socket.current?.close();
+      void agora.current?.leave();
     };
   }, [clearTimers]);
 
-  const toggleMic = useCallback(() => setMicOn((v) => !v), []);
+  const toggleMic = useCallback(() => {
+    const next = !micOn;
+    void agora.current?.setMuted(!next)
+      .then(() => setMicOn(next))
+      .catch((error) => console.warn("[bridge] microphone update failed", error));
+  }, [micOn]);
 
   const value = useMemo<IncidentStore>(
-    () => ({ state, dispatch, now, openBridge, closeBridge, micOn, toggleMic, source }),
-    [state, now, openBridge, closeBridge, micOn, toggleMic, source],
+    () => ({
+      state,
+      dispatch,
+      now,
+      openBridge,
+      closeBridge,
+      micOn,
+      toggleMic,
+      source,
+      agentTrack,
+    }),
+    [state, now, openBridge, closeBridge, micOn, toggleMic, source, agentTrack],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

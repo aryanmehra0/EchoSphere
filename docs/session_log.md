@@ -219,6 +219,60 @@ four-label NLI task, which is where a fast open model is at its most reliable.
 > prompt-enforced. The Tier 1 tripwires and the S6 Tier 2 LLM-judge exist for
 > this; do not relax them. Rule 3 is structural and unaffected.
 
+### Aug 30 (2) — reviewed another session's RTM work; two bugs that only appear on two machines
+
+A parallel session moved RTM transcript forwarding into the console —
+`agora-bridge.ts`, `agora-transcript.ts` and a test file. Good work: the parser
+is typed, pure and unit-tested, forwarding is routed through `delta-socket.ts`
+so the single-egress boundary holds, and `AgentPresence` finally receives the
+REAL Echo track instead of a synthesised envelope.
+
+Review found three problems. All three were invisible on one laptop.
+
+**1. Every transcript was attributed to whoever's browser received it.**
+`credentials.role` is the LOCAL user's role, but RTM broadcasts to every
+subscriber — so on the two-machine setup §18 makes a hard requirement, DevOps's
+console received Support's utterance and forwarded it labelled "DevOps Lead".
+
+A MIS-sourced claim is worse than an unsourced one: §6.2 Rule 1 catches the
+second and nothing downstream can catch the first. The contradiction engine
+would then compare two people's claims believing them to be one person's.
+
+Fixed with `forwardDecision()` — each participant forwards ONLY their own
+speech, because a browser knows exactly one role for certain. Pure and exported
+so it can be tested without two machines on a channel, which is precisely the
+configuration it exists for and the one that cannot be exercised on a laptop.
+Six tests pin it.
+
+**2. The same utterance was forwarded by every browser.** Same root cause, and
+it doubled extraction. Fixed client-side by (1), plus a backstop:
+`TurnWindow.add()` now dedupes by `message_id` and returns whether the frame was
+taken. RTM does not guarantee once-only delivery and a reconnecting browser can
+replay, so this is worth having regardless of what the client does.
+
+> Dedup is by message id, NOT by text. Two engineers independently reporting
+> "the cache is fine" is a real signal, and collapsing them would erase one
+> person's contribution to the record. The test helper had been deriving ids
+> from text alone, which made that case look broken — the helper was wrong.
+
+**3. The dashboard was made to depend on the microphone.** `openBridge` joined
+Agora BEFORE opening the delta socket and returned early on failure, so a denied
+mic permission or a stale token took the LIVE DASHBOARD down with it — while the
+Slow Loop was healthy and everyone else's speech was still being analysed.
+
+§17's standing rule is explicit: *never let a change make the dashboard depend on
+the Fast Loop*. Order inverted — socket first, microphone second. A failed join
+now costs only this operator's voice and raises the ANALYTICS-ONLY rung of §13's
+ladder with a banner saying so.
+
+**Verified after:** 222 tests (127 backend + 95 frontend), live run LIVE DATA
+with 0 console errors, contradiction fired in the backend.
+
+> **Harness note:** `final-demo.mjs` now checks the DOM too early. Extraction
+> takes 20–60 s per window on the primary model, and the script allows 6.5 s
+> between lines — so a run can report "contradiction not shown" while the
+> backend has one. Widen the waits before trusting that line again.
+
 ### Aug 29 — S4/S5/S6 built, and the Rig turned tuning into measurement
 
 **Everything remaining was built:** Rehearsal Rig Tier 2 (§15, closes G8),
