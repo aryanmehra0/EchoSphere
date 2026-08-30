@@ -1,0 +1,5 @@
+# Local assistant instructions. The same content is tracked as AGENTS.md, which
+# is the vendor-neutral convention; this file is kept on disk for tooling that
+# looks for it by name and is deliberately not part of the repository.
+CLAUDE.md
+frontend/CLAUDE.md
