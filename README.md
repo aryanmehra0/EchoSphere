@@ -57,8 +57,8 @@ values. The backend reads the same file, so you only fill it in once.
 | `AGORA_APP_ID` | Agora Console → Projects (32-char hex) |
 | `AGORA_APP_CERTIFICATE` | same project → Configure → Primary Certificate |
 | `AGORA_CUSTOMER_ID` / `AGORA_CUSTOMER_SECRET` | Console → **RESTful API** → Add a secret |
-| `GROQ_API_KEY` | console.groq.com |
-| `ELEVENLABS_API_KEY` | elevenlabs.io → API keys (starts `sk_`) |
+| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) |
+| `ELEVENLABS_API_KEY` | [elevenlabs.io](https://elevenlabs.io) → API keys (starts `sk_`) |
 
 Two traps that have each cost hours here:
 
@@ -99,7 +99,7 @@ this number moving.
 
 ## How it fits together
 
-```
+```text
   browser ──► Next.js (Zone 2) ──► Agora ──► Groq ──► ElevenLabs
      │           Agora creds only        Echo speaks
      │
@@ -173,5 +173,16 @@ Stated plainly rather than discovered by a reviewer.
   measurably worse at adjudication.
 - **The Roster is in-memory in Next.js.** Fine for a single dev server; it will
   not survive serverless, and the Python Roster is the intended home.
-- **`frontend/public/listen.html` is throwaway.** It predates the console's own
-  RTC join and should be deleted once nothing depends on it.
+- **`frontend/public/listen.html` does not work on a fresh clone.** It loads the
+  Agora SDKs from `public/vendor/`, which is gitignored — 3 MB of minified
+  vendor JS does not belong in git history. It predates the console's own RTC
+  join and is kept only as a debugging ear. To use it:
+
+  ```bash
+  cd frontend
+  mkdir -p public/vendor
+  cp node_modules/agora-rtc-sdk-ng/AgoraRTC_N-production.js public/vendor/
+  cp node_modules/agora-rtm-sdk/agora-rtm.js public/vendor/
+  ```
+
+  You do not need it for the demo — the console joins the channel itself.
