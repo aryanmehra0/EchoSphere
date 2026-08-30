@@ -70,6 +70,7 @@ export const initialIncidentState: IncidentState = {
   timeline: [],
   transcripts: [],
   approval: null,
+  degraded: null,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -127,6 +128,8 @@ export function incidentReducer(
         rti: d.rti ?? state.rti,
         phase: d.phase ?? state.phase,
         agent: d.agent ?? state.agent,
+        // `undefined` means "unchanged"; an explicit null means "recovered".
+        degraded: d.degraded === undefined ? state.degraded : d.degraded,
       };
     }
 
@@ -152,6 +155,8 @@ export function incidentReducer(
         rti: d.rti ?? state.rti,
         phase: d.phase ?? state.phase,
         agent: d.agent ?? state.agent,
+        // `undefined` means "unchanged"; an explicit null means "recovered".
+        degraded: d.degraded === undefined ? state.degraded : d.degraded,
       };
     }
 

@@ -191,6 +191,30 @@ export function CommandBar() {
         </div>
       </div>
 
+      {/*
+        Degradation banner — v6 §13's "demo-visible impact" column, made real.
+
+        It sits in the command bar rather than a toast because a toast is
+        dismissible and transient, and this is neither: while a dependency is
+        down the operator must not forget it. The wording names the
+        CONSEQUENCE ("Echo cannot speak") rather than the component, because
+        "bridge controller unavailable" makes them guess.
+      */}
+      {state.degraded?.banner ? (
+        <div
+          role="status"
+          className={cn(
+            "absolute inset-x-0 top-full z-10 flex items-center justify-center gap-2",
+            "border-b border-warning/35 bg-warning/12 py-1",
+          )}
+        >
+          <Dot tone="warning" pulse />
+          <span className="text-2xs font-semibold tracking-[0.08em] text-warning uppercase">
+            {state.degraded.banner}
+          </span>
+        </div>
+      ) : null}
+
       {/* Indeterminate progress hairline, pinned to the bar's bottom edge.
           Present only while the transport is actually negotiating. */}
       {state.bridge === "connecting" ? (

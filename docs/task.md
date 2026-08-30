@@ -56,7 +56,11 @@ Server side is built and unit-tested. Everything remaining needs credentials.
   `ready:true`; Echo measured speaking at 80–87% peak on a live channel.
   (Sarvam also wired but **broken upstream** — Agora's adapter is pinned to the
   deprecated `bulbul:v2`; see `session_log.md`.)
-- `[ ]` Replace the replay driver with live Agora RTC join + RTM subscribe
+- `[x]` **Live RTM transcript path** — `listen.html` subscribes to Agora ASR over
+  RTM and forwards each final utterance to the Slow Loop, so the dashboard fills
+  itself from real speech. Defensive parser verified against 8 payload shapes;
+  Echo's own transcripts filtered client-side (G2)
+- `[ ]` Move that path into the console itself (it lives in the listener today)
 - `[ ]` Feed the real remote track into `useVoiceEnvelope`
 - `[ ]` Observer self-renewal on its own T-minus-300s timer (Python, S2)
 - `[ ]` **Gate:** two humans + Echo in a channel; every UID resolves to a role
@@ -155,10 +159,12 @@ FastAPI service, 13 tests, verified end to end on a live channel.
 
 - `[x]` **Rehearsal Rig Tier 2** *(closes G8)* — 5 scenarios, scored, paced
 - `[x]` Degradation: LLM model fallback chain on daily-quota exhaustion
+- `[x]` **Degradation ladder** — `degradation.py`, edge-triggered, published to
+  the dashboard as a command-bar banner naming the CONSEQUENCE not the component
+- `[x]` **GATE MET (Aug 30):** three consecutive runs, 3/3 fully correct, all six
+  Tier 2 metrics at 100% on the primary model
 - `[ ]` Rehearsal Rig Tier 3 (recorded channel replayed into Agora)
-- `[ ]` Remaining degradation paths (STT failover, injection fallback)
-- `[ ]` **Gate:** three consecutive clean runs on the PRIMARY model — blocked
-  today only by the exhausted daily quota, not by a defect
+- `[ ]` STT failover + injection fallback (the remaining §13 rows)
 
 ## S0 — Bridge Spike · Aug 26–28 · **RUN THIS FIRST** *(closes G9)*
 

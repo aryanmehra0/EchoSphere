@@ -236,6 +236,21 @@ export interface ApprovalRequest {
   evidence?: Claim[];
 }
 
+/**
+ * What is currently broken — v6 §13.
+ *
+ * Surfaced rather than swallowed. A system quietly running degraded is worse
+ * than one that has obviously failed, because the operator keeps trusting
+ * output that is no longer complete.
+ */
+export interface Degradation {
+  voice: boolean;
+  extraction: boolean;
+  model: string | null;
+  /** One short line naming the CONSEQUENCE, for the command bar. */
+  banner: string | null;
+}
+
 /** Connection lifecycle of the local RTC client. */
 export type BridgeState = "idle" | "connecting" | "live" | "closing";
 
@@ -283,6 +298,9 @@ export interface IncidentState {
 
   /** The pending CRITICAL action, if one is awaiting a human. */
   approval: ApprovalRequest | null;
+
+  /** Null when everything is healthy. */
+  degraded: Degradation | null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -310,4 +328,5 @@ export interface IncidentDelta {
   rti?: number;
   phase?: IncidentPhase;
   agent?: AgentState;
+  degraded?: Degradation | null;
 }

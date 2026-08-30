@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from . import config
 from .bridge import BridgeController
 from .contradiction import ContradictionEngine
+from .degradation import Degradation
 from .deltas import DeltaHub, encode
 from .extraction import TurnWindow, compact, entity_aliases, extract
 from .proxy import ProxyActionLayer
@@ -63,6 +64,7 @@ window = TurnWindow()
 engine = ContradictionEngine()
 rti = RTIMonitor()
 proxy = ProxyActionLayer(channel="inc-4417")
+degraded = Degradation()
 _pipeline_lock = asyncio.Lock()
 
 
@@ -118,6 +120,7 @@ async def health() -> JSONResponse:
             "credentials": creds,
             "missing": missing,
             "observerMode": config.observer_mode(),
+            "degraded": degraded.to_wire(),
             "agent": _agent,
             "seq": hub.seq,
             "subscribers": hub.subscriber_count,
@@ -302,6 +305,17 @@ async def _surface_contradiction(a: Claim, b: Claim, relation: str) -> dict[str,
 
     async with br:
         result = await br.speak_now(line)
+
+    # §13: losing the Bridge must NOT lose the finding. The contradiction is
+    # already on the dashboard by this point — all that is lost is Echo saying
+    # it aloud, and the banner makes that explicit rather than leaving the room
+    # wondering why it went quiet.
+    if result is None or not result.ok:
+        if degraded.voice_failed("bridge /speak failed"):
+            await hub.publish({"degraded": degraded.to_wire()})
+    elif degraded.voice_restored():
+        await hub.publish({"degraded": degraded.to_wire()})
+
     return {"spoken": bool(result and result.ok), "text": line}
 
 
@@ -330,8 +344,9 @@ async def reset_incident() -> dict[str, Any]:
     window.drain()
     engine._cooldown.clear()  # noqa: SLF001 — same-module reset seam
     rti.reset()
-    global proxy
+    global proxy, degraded
     proxy = ProxyActionLayer(channel=proxy.channel)
+    degraded = Degradation()
 
     # Tell every connected dashboard to drop what it is holding. The reducer's
     # SNAPSHOT case replaces rather than merges, so this genuinely clears them
