@@ -345,6 +345,41 @@ export function buildAgentPayload(params: {
         enable_aivad: false,
         enable_rtm: true,
       },
+
+      /*
+        ── ⚠️ UNVERIFIED, AND THE BLOCKER IS STILL OPEN ──────────────────────
+        THE SYMPTOM (measured Aug 31, not assumed): the console subscribes to
+        RTM successfully, a WAV plays into the channel as a real microphone
+        for sixty continuous seconds, and ZERO RTM frames arrive. No error, no
+        warning. The Slow Loop never learns that anyone spoke. The system
+        works perfectly on injected text and is completely deaf to speech.
+
+        THE HYPOTHESIS: `enable_rtm: true` opens the channel but does not make
+        the engine publish into it, so the transcript stream has to be asked
+        for separately — this block.
+
+        THE RESULT: it did NOT fix it. Agora accepted the payload (it returns
+        200 whether or not it understood the keys — the same trap documented
+        for `tts.params` in session_log.md §5) and still published nothing.
+
+        So this config is a PLAUSIBLE GUESS AT A VENDOR API, left in place
+        because it is harmless and may be half-right, NOT a working feature.
+        Anyone reading this: do not assume speech-in works because this exists.
+        The next step is Agora's Conversational AI Engine transcription docs
+        for the exact key names, or their support channel — not another guess.
+      */
+      parameters: {
+        data_channel: "rtm",
+        enable_metrics: true,
+        // Surfaced rather than swallowed: a silent agent is the hardest
+        // failure to diagnose here, and this is the channel that says why.
+        enable_error_message: true,
+        transcript: {
+          enable: true,
+          protocol_version: "v2",
+          enable_words: false,
+        },
+      },
       turn_detection: TURN_DETECTION,
       llm: {
         // No `vendor` field: this is Agora's CUSTOM LLM path, which is selected

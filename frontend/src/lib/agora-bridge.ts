@@ -61,6 +61,11 @@ export class AgoraBridge {
   readonly skipped: Partial<Record<ForwardDecision, number>> = {};
   forwarded = 0;
 
+  /** Inbound RTM frames of any kind. Zero means Agora is publishing nothing. */
+  rtmFrames = 0;
+  /** Frames that arrived but were not recognisable as transcripts. */
+  unparsed = 0;
+
   constructor(private readonly events: AgoraBridgeEvents) {}
 
   async join(channel: string, credentials: BridgeCredentials): Promise<void> {
@@ -168,8 +173,28 @@ export class AgoraBridge {
     this.rtm = rtm;
 
     rtm.addEventListener("message", (event) => {
+      /*
+        EVERY inbound RTM frame is counted, before parsing.
+
+        A live test with real audio produced zero claims, and the existing
+        counters could not distinguish the two very different causes: Agora
+        publishing nothing at all, versus Agora publishing frames this code
+        then discards. Those need opposite fixes, and on a stage you have
+        about ten seconds to tell them apart.
+      */
+      this.rtmFrames += 1;
+      console.info(
+        `[agora rtm] frame ${this.rtmFrames}:`,
+        typeof event.message === "string"
+          ? event.message.slice(0, 200)
+          : event.message,
+      );
+
       const transcript = parseAgoraTranscript(event.message);
-      if (!transcript) return;
+      if (!transcript) {
+        this.unparsed += 1;
+        return;
+      }
 
       // Each participant forwards only their OWN speech — see forwardDecision.
       const decision = forwardDecision(transcript, credentials.uid);
@@ -188,6 +213,9 @@ export class AgoraBridge {
 
     await rtm.login({ token: credentials.rtmToken });
     await rtm.subscribe(channel, { withMessage: true });
+    // Said out loud because "subscribed but silent" and "never subscribed"
+    // look identical from the dashboard, and only one of them is a bug here.
+    console.info(`[agora rtm] subscribed to ${channel} as uid ${credentials.uid}`);
   }
 
   private async forwardTranscript(
