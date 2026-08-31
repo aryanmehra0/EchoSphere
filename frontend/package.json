@@ -9,8 +9,9 @@
     "spike": "node scripts/s0-bridge-spike.mjs",
     "lint": "eslint src tests --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/incident-reducer.test.ts tests/phase1-evaluation.test.ts tests/s1-identity.test.ts tests/agora-transcript.test.ts",
-    "verify": "npm run typecheck && npm run lint && npm run test && npm run build"
+    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/incident-reducer.test.ts tests/phase1-evaluation.test.ts tests/s1-identity.test.ts tests/agora-transcript.test.ts tests/active-agents.test.ts",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run build",
+    "demo": "node scripts/demo.mjs"
   },
   "dependencies": {
     "@xyflow/react": "^12.11.3",

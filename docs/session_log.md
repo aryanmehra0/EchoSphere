@@ -8,7 +8,7 @@
 > **If you are an agent or developer starting a new session: read this file
 > first, then `echosphere_architecture_v6.md`, then `handoff_log.md`.**
 >
-> **Last updated:** August 27, 2026
+> **Last updated:** August 31, 2026
 
 ---
 
@@ -17,12 +17,19 @@
 | | |
 |---|---|
 | **Governing architecture** | `docs/echosphere_architecture_v6.md` (v6 supersedes v5) |
-| **Branch** | `main` — clean, everything pushed |
-| **Last commit** | `db7faa3` docs: add cross-session context log |
-| **Phase 1 (console UI)** | ✅ Done, v6-aligned — **run and screenshotted end to end, 0 console errors** |
-| **S1 (identity layer)** | 🟡 Server code done and tested — never run against live Agora |
-| **S0 (Bridge Spike)** | ⬜ Script **fixed** and dry-runs clean; not yet run live. Two bugs found Aug 27 — see §5 |
-| **Tests** | 72 passing (`npm run verify` — full gate green Aug 27) |
+| **Branch** | `main` — **uncommitted work** (Panel + consent gate, Aug 31) |
+| **Phase 1 (console UI)** | ✅ Done, v6-aligned — run and screenshotted end to end |
+| **S1 (identity)** | 🟡 Code done and tested — never run against live Agora, two machines |
+| **S2 (Observer)** | 🟡 Adapter seam only. Agent-UID exclusion (G2) live; real PCM blocked on Python 3.14 |
+| **S3 (Ledger/extraction/deltas)** | ✅ Verified live — speech to graph in under 4 s, screenshotted |
+| **S4 (contradiction + RTI)** | ✅ Rebuilt as the Deliberation Panel, Aug 31 — see below |
+| **S5 (Bridge + Authorization Gate)** | ✅ Verified live: verbal yes denied, wrong role rejected, replay rejected |
+| **S6 (Rig + degradation)** | 🟡 Tiers 1-3 exist; **Tier 3 is new (Aug 31)**. Dress rehearsals below |
+| **7a Deliberation Panel** | ✅ New Aug 31 — replaced the single adjudicator |
+| **10.5 Consent gate** | ✅ New Aug 31 — off the record, verified leaves no trace |
+| **Tests** | **101 frontend** (`npm run verify` green) + **157 backend** = 258 |
+| **Voice path** | ✅ Verified live Aug 31 — `spoken: true`, 790 ms. Was never wired before. |
+| **Demo runbook** | `docs/DEMO.md` — three modes, the script, the questions judges ask |
 
 ### 🚧 THE ONE BLOCKER
 
@@ -218,6 +225,235 @@ four-label NLI task, which is where a fast open model is at its most reliable.
 > A weaker model also raises the odds of violating §6 Rules 1–2, which are
 > prompt-enforced. The Tier 1 tripwires and the S6 Tier 2 LLM-judge exist for
 > this; do not relax them. Rule 3 is structural and unaffected.
+
+### Aug 31 (2) — Echo had never actually spoken, and nothing said so
+
+Checking whether the product's central claim was true turned up the largest
+defect in the project. `/health` reported `agent: {agent_id: null}` after every
+rehearsal, because:
+
+- **Nothing called `/api/invite-agent`.** The route existed, was tested, and
+  was invoked by no one. The console minted tokens and joined RTC, and stopped
+  there. Echo was never put in the channel at all.
+- **Nothing called `/agent/register`.** So even with an agent, the Bridge
+  Controller had no id to speak through and `_bridge()` returned `None`.
+
+Every other link worked. Tokens minted, RTC joined, claims extracted,
+contradictions detected, dashboard filled. **Nothing errored — it was simply
+silent**, which is why five days of rehearsals never caught it. An AI incident
+commander that cannot talk is a dashboard.
+
+Fixed as a chain: join → invite → register → speak → leave → stop. Verified
+live: `{"spoken": true, "status": 200, "latencyMs": 790}`.
+
+#### Three things that came out of the fix
+
+**The invite is idempotent per channel** (`lib/server/active-agents.ts`). §18
+puts two humans on two machines and both consoles join the same channel —
+without this, both invite, and the room gets two Echoes answering every
+question in slightly different words. That looks exactly like the product being
+broken.
+
+**Leaving RTC does NOT stop the Cloud Agent.** It is a separate server-side
+process that Agora keeps running, and billing, until its own timeout. There was
+no way to stop one from inside the app, so every rehearsal left another Echo in
+the channel. `/api/stop-agent` now exists and `closeBridge` calls it, as does
+the unmount path. **Ten rehearsals without this leaves ten Echoes and the tenth
+demo looks broken.**
+
+**The invite must never block the dashboard.** §17's standing rule. It is fired
+alongside the join, not awaited before it, and a failure degrades to a banner —
+`ECHO CANNOT SPEAK` when the agent joined but the Slow Loop never got the id,
+which is otherwise impossible to diagnose from inside the room.
+
+#### ⚠️ The panel was rate-limiting itself into silence
+
+First live Mode A rehearsal after wiring the panel in: the log was full of
+`429 Too Many Requests` and the headline contradiction never fired. The
+analysis was correct and never got to run.
+
+Two causes, and the first is genuinely counter-intuitive:
+
+**Groq's per-minute limit counts RESERVED output, not produced output.** Its
+own 429 says `Limit 8000, Used 6140, Requested 1903`. At the default
+`max_tokens=4096`, three personas reserve 12k against an 8k/minute ceiling
+before a single token comes back.
+
+The obvious fix — "a verdict is 40 tokens of JSON, reserve 320" — is **wrong**,
+and failed immediately with `max completion tokens reached before generating a
+valid document`. `gpt-oss-120b` is a REASONING model: it emits reasoning tokens
+before the JSON, so a tight ceiling truncates it mid-thought and every persona
+abstains. That converts a rate-limit problem into a total-silence problem.
+
+`PANEL_MAX_TOKENS = 1536` is the measured middle. **Do not tighten it to "just
+enough for the JSON".**
+
+**Second: `retrieve` returns TOP_K=5 and every pair convened a full panel** —
+up to 15 calls for one new claim. `PANEL_PAIR_BUDGET = 2` now caps it; beyond
+that the engine falls back to the single judge, which is a sound floor since it
+was the entire system the day before. The headline conflict has always been in
+the top two by similarity.
+
+Result: 429s went from a flood to **zero**, and the S6 gate passes again.
+
+#### The §6 tripwire 500'd the ingest endpoint
+
+`utterance.validate()` refused `"Recording resumed."` — no attributed source,
+Rule 1. Correct in itself, but the exception escaped the privacy branch and the
+endpoint carrying *every utterance* returned a non-JSON 500.
+
+Both halves fixed. The announcements joined `_NO_CLAIM`, which is the right
+home — they assert nothing about the incident, they report Echo's own state,
+and §10.5 rule 3 *requires* Echo to say them aloud. And the speak call is now
+wrapped: **a guard that can crash the ingestion path is the wrong shape
+regardless of which phrases currently pass it.** Losing an announcement costs a
+spoken confirmation; losing the endpoint costs the incident record.
+
+`_NO_CLAIM` is still anchored prefixes naming specific things Echo does, never
+a general escape — there is a test asserting an unattributed *finding* is still
+refused.
+
+#### docs/DEMO.md
+
+Written because "how do we show this" had no answer. Three modes ordered by
+risk, the script with what to say over it, the questions judges ask, and a
+pre-flight checklist.
+
+The headline: **two machines, not three, and never two tabs on one laptop.**
+One laptop has one microphone, so both tabs hear the same voice and both
+forward it under different roles — Echo then compares a person to themselves
+and misattributes their words. That is the exact failure per-UID separation
+exists to prevent. Headsets, not speakers, for the same reason by a slower
+route.
+
+---
+
+### Aug 31 — mentorship review: the adjudicator was one biased judge, and Echo could not be turned off
+
+Two things came out of the mentorship round, and both landed on real gaps
+rather than cosmetics. Recording them because the *reasoning* is the part that
+will not survive in the diff.
+
+#### The single judge had a bias baked into its prompt
+
+`ADJUDICATION_PROMPT` contains, in capitals, `THE MOST COMMON MISTAKE IS
+OVER-USING "OPPOSED"`. That was added for a good reason — early runs
+interrupted the room over two symptoms of one fault. But it over-corrected,
+and a live rehearsal caught it. The headline pair:
+
+    DevOps Lead       "Memory is at 40 percent. The cache is fine."
+    Support Engineer  "application logs are showing cache read timeouts"
+
+came back **INDEPENDENT** and the room heard nothing. Entity resolution was
+right (both on `redis`), scope was right (different speakers, 14.3 s apart),
+retrieval was right. The prompt's own example table teaches INDEPENDENT for
+the memory/timeout pair and OPPOSED for the fine/timeout pair — so the verdict
+depended on which candidate came back first.
+
+**One prompt cannot sit at both ends of a precision/recall tradeoff.** So
+Stage 3 is now `app/panel.py`: a SKEPTIC biased against firing and a SEEKER
+biased toward it, on two different models, with a REFEREE settling splits.
+
+Three things worth keeping:
+
+- **Different models per persona is not decoration.** It buys independence
+  (they cannot anchor on each other) and, because Groq's daily cap is scoped
+  PER MODEL, it draws each persona from a separate bucket. A three-persona
+  panel costs roughly what one adjudication cost, in quota terms.
+- **The personas argue about EVIDENCE, never about cause.** The mentor's
+  phrasing — "compare answers and say why one is wrong" — would break Rule 1
+  taken literally. The Referee says why a *reading* is wrong, never why a
+  *system* failed. That is what keeps the panel inside the rubric.
+- **A prompt asking a model not to diagnose is a request, not a guarantee.**
+  The personas tried to diagnose six times across the live runs. The first
+  tripwire was a phrase list and it missed every one — including "High latency
+  is a direct technical cause of user-facing failures" and "causally linked
+  symptoms of the same underlying incident". It is now structural: a causal
+  connector in the same SENTENCE as telemetry vocabulary. Reasoning about a
+  reading carries no telemetry noun and survives; reasoning about the system
+  always names one, and dies. Both live escapes are pinned as tests.
+
+#### ⚠️ The panel introduced its own false positive — and cost a demo beat
+
+First live run after wiring it up, this fired at 90%:
+
+    "Users say their carts empty"  vs  "Latency is through the roof"
+
+Both analysts were right — those ARE different properties. That is exactly the
+problem: **unanimous agreement that two claims are independent is the DEFAULT
+for any two claims about one entity**, and averaging two confident votes clears
+a fixed gate far more easily than one vote ever did.
+
+INDEPENDENT now also requires the analysts to have **disagreed**. A split is
+the signal that something subtle is happening; easy unanimity is the signal
+that nothing is.
+
+**This deliberately silences a scripted Demo Script v2 beat** — the redis
+memory/timeout pair no longer interrupts. Judged worth it: one sharp
+intervention beats two soft ones, and a false interruption costs more trust
+than a missed nuance. *If a future session wants that beat back, the lever is
+`PanelVerdict.is_actionable`, and the tradeoff is written there.*
+
+Related arithmetic bug, caught by its own test: the gate is checked AFTER the
+dissent penalty, so leaving `INDEPENDENT_GATE` at 0.85 while subtracting 0.15
+meant only a perfect 1.00 could ever pass. The path was dead. Rebased to 0.70,
+which is the same effective bar the single judge held at 0.85.
+
+#### Echo could not be turned off
+
+The mentor's other question: what happens when two people say something to
+each other that was never meant for the record?
+
+The honest answer was that §10.4 redacts PII before the LLM and before
+embedding, and the Ledger stores structured claims rather than the
+conversation. Both true, **and both beside the point** — redaction decides
+what a *vendor* sees; it gives the people on the bridge no say in whether they
+are minuted at all. There was no way to turn Echo off.
+
+`app/privacy.py` is the answer. Three rules, all load-bearing:
+
+1. **Speech is the control.** Nobody alt-tabs mid-Sev-1. Fixed phrases, not
+   intent classification: an LLM here is slower than speech, fails OPEN
+   (recording) when rate-limited, and a false negative is unrecoverable
+   because the words are already in the Ledger by the time anyone notices.
+2. **Suspended means nothing is kept** — not the text, not a redacted copy,
+   not a log line containing it. Only a count, which is what makes the pause
+   auditable without making it a leak.
+3. **The room must see it.** A recording state nobody can perceive is worse
+   than no control at all, because people believe whichever state they
+   assumed. The banner is not dismissible, for the same reason the
+   contradiction alert has no X.
+
+Verified end to end, not merely unit-tested: a distinctive sentence spoken
+while suspended is absent from `/tools/query_incident_state`,
+`/privacy/inventory` and `/audit` afterwards. That check is now in Tier 3.
+
+`/privacy/inventory` exists because "we redact PII" is an assurance, and an
+assurance is not evidence. It reports real counts, where they live, and that
+nothing survives a restart.
+
+#### Rig Tier 3
+
+Tiers 1 and 2 never touch HTTP, the Ledger singleton, the Delta Hub or the
+consent gate — both stayed green through a live run where the dashboard showed
+nothing. Tier 3 drives the running server at conversational pace and asserts
+against the API.
+
+**Why against the API and not the DOM:** my own screenshot harness lied twice
+in one day — once passing an interrupt check against an all-zero trace, once
+reporting "contradiction surfaced ✓" because the regex matched the word
+`CONFLICTS` in the header chrome, and twice reporting HYPOTHESIS/OBSERVED
+missing when the UI simply renders them as ESTABLISHED and OPEN QUESTIONS. Do
+not trust a harness that string-matches rendered text.
+
+```bash
+.venv/Scripts/python -m rig.tier3 --runs 3   # the S6 gate
+```
+
+Three CONSECUTIVE clean runs, not an average — the failure it catches is state
+leaking between runs, and an average hides exactly that.
+
+---
 
 ### Aug 30 (2) — reviewed another session's RTM work; two bugs that only appear on two machines
 

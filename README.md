@@ -10,6 +10,17 @@ That last clause is not a limitation we apologise for. It is the product.
 > Most AI incident tools will tell you the root cause. This one tells you what
 > you actually know, who established it, and what nobody has checked.
 
+Two consequences of taking that seriously:
+
+- **Echo shows its working.** Contradictions are judged by a panel of AI
+  analysts with deliberately opposite biases, on different models. When they
+  disagree, you see the disagreement — a contested verdict is a weaker thing
+  to act on than a unanimous one, and hiding that would be Echo overstating
+  its own certainty.
+- **Echo can be told to stop listening.** Say *"off the record"* and it stops
+  minuting until someone says otherwise. Suspended turns are counted, never
+  stored.
+
 ---
 
 ## Quick start
@@ -76,7 +87,7 @@ Two traps that have each cost hours here:
 
 ```bash
 cd frontend && npm run verify      # typecheck → lint → 95 tests → build
-cd backend && .venv/Scripts/python -m unittest discover -s tests -t .   # 127 tests
+cd backend && .venv/Scripts/python -m unittest discover -s tests -t .   # 155 tests
 ```
 
 **No slot is done until `npm run verify` passes.** And a green build says
@@ -94,6 +105,22 @@ The Rehearsal Rig runs the real pipeline over fixed transcripts N times and
 attribution, entity convergence. It exists because reliability cannot be tuned
 by watching three demos — every fix in the contradiction engine was chosen by
 this number moving.
+
+**Tier 3** goes further and drives the running server the way the demo does —
+real endpoints, real Ledger, real deltas, at conversational pace:
+
+```bash
+.venv/Scripts/python -m rig.tier3 --runs 3    # needs the Slow Loop running
+```
+
+Three *consecutive* clean runs, not an average: the failure it catches is
+state leaking between runs, and an average hides exactly that. Tiers 1 and 2
+never touch HTTP or the Ledger singleton, and both stayed green through a live
+run where the dashboard showed nothing — that is why Tier 3 exists.
+
+It asserts against the **API**, never against rendered text. A DOM-scraping
+harness here reported "contradiction surfaced ✓" because its regex matched the
+word `CONFLICTS` in the page header.
 
 ---
 
@@ -119,6 +146,8 @@ Echo says came from state it was given.
 | `frontend/src/app/globals.css` | The design system, heavily commented. Read before writing UI |
 | `backend/app/utterance.py` | Composes Echo's exact words — §6 Rules 1–2 enforced in code |
 | `backend/app/contradiction.py` | Two-stage scope → retrieve → cooldown → adjudicate |
+| `backend/app/panel.py` | The Deliberation Panel — two biased analysts, one referee |
+| `backend/app/privacy.py` | Consent gate. "Off the record" stops ingestion entirely |
 | `backend/app/authorization.py` | Nonce + TTL + argsHash gate. Voice authorizes nothing |
 | `docs/echosphere_architecture_v6.md` | **The governing architecture** |
 | `docs/session_log.md` | Cross-session memory: decisions, dead ends, corrections |
@@ -145,6 +174,10 @@ and §17 (why the Bridge was proven before anything depended on it).
    nonce-bound token redeemed by a UI click from an authorized role.
 6. **Don't trust a green build, and don't trust a green dependency.** Agora
    reports `RUNNING` whether or not a sound was made. Measure the audio.
+7. **A prompt asking a model not to diagnose is a request, not a guarantee.**
+   The panel's personas tried to assert causation six times in one afternoon.
+   The tripwire that stops them is structural and lives in `panel.py`, not in
+   any prompt. Do not weaken it to make an explanation read better.
 
 ---
 
