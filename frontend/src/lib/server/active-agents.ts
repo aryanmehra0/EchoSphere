@@ -1,0 +1,105 @@
+/**
+ * Which Agora agent is live on which channel — Zone 2 only.
+ *
+ * NOT marked `server-only`, deliberately and by the same reasoning as
+ * `roster.ts`: that marker is required of modules that read a SECRET, and this
+ * one holds agent ids and a loopback URL. The zone boundary is held by the
+ * path-based import ban in `phase1-evaluation.test.ts` — a client file
+ * importing from `@/lib/server/` fails the build regardless — so the marker
+ * would add nothing here except making the module unimportable from tests.
+ *
+ * ── WHY THIS EXISTS ────────────────────────────────────────────────────────
+ * Two problems, both found on Aug 31 while checking whether Echo had ever
+ * actually spoken. It had not.
+ *
+ * 1. NOBODY WAS INVITING ECHO. The console minted tokens and joined RTC, and
+ *    that was all. `/api/invite-agent` existed, was tested, and was called by
+ *    nothing. So the product — an AI that joins a voice bridge and talks — was
+ *    never joining the bridge.
+ *
+ * 2. NOBODY WAS STOPPING IT EITHER. `closeBridge` left the RTC channel, which
+ *    does nothing to the Cloud Agent: it keeps running, and keeps billing,
+ *    until Agora times it out. Rehearsing the demo ten times would leave ten
+ *    agents in the channel talking over each other.
+ *
+ * ── WHY THE MAP IS NEEDED AT ALL ───────────────────────────────────────────
+ * §18 requires TWO humans on two machines. Both consoles join the same
+ * channel, so both would invite an agent, and the room would get two Echoes
+ * answering every question in slightly different words. Invite has to be
+ * idempotent per channel, and idempotency needs somewhere to remember.
+ *
+ * In-memory, like the Roster it sits beside, and with the same caveat: this
+ * does not survive a serverless deployment or a dev-server restart. For a
+ * single dev server driving a demo it is exactly right, and the honest fix is
+ * the same as the Roster's — move it to the Python side.
+ */
+
+interface ActiveAgent {
+  agentId: string;
+  channel: string;
+  startedAt: number;
+  expiresAt: number;
+}
+
+const agents = new Map<string, ActiveAgent>();
+
+/** The live agent on this channel, if one is still within its token window. */
+export function getActiveAgent(channel: string): ActiveAgent | null {
+  const found = agents.get(channel);
+  if (!found) return null;
+
+  // An agent whose token has expired is gone whether or not we noticed.
+  // Returning it would make invite idempotent against a corpse, and the room
+  // would sit waiting for a voice that cannot come back.
+  if (found.expiresAt <= Date.now()) {
+    agents.delete(channel);
+    return null;
+  }
+  return found;
+}
+
+export function rememberAgent(entry: ActiveAgent): void {
+  agents.set(entry.channel, entry);
+}
+
+export function forgetAgent(channel: string): ActiveAgent | null {
+  const found = agents.get(channel) ?? null;
+  agents.delete(channel);
+  return found;
+}
+
+/**
+ * Tell the Slow Loop which agent to speak through.
+ *
+ * The Bridge Controller cannot speak without an agent id, and ONLY Zone 2
+ * knows it — Zone 2 holds the Agora credentials that created the agent, and
+ * §10.1 says those never cross into Zone 3. So this hop is structural, not
+ * incidental: it is the one piece of information that has to travel.
+ *
+ * Deliberately never throws. A Slow Loop that is down must not fail the
+ * invite — §17's standing rule is that the dashboard never depends on the
+ * Fast Loop, and the reverse holds too. Echo joins the channel and can be
+ * heard; only Echo's *analysis-driven* speech is lost, which the degradation
+ * banner already covers.
+ */
+export async function registerWithSlowLoop(
+  agentId: string,
+  channel: string,
+): Promise<boolean> {
+  const base = (process.env.NEXT_PUBLIC_SLOW_LOOP_WS ?? "ws://127.0.0.1:8000/ws/deltas")
+    .replace(/^ws/, "http")
+    .replace(/\/ws\/deltas$/, "");
+
+  try {
+    const response = await fetch(`${base}/agent/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId, channel }),
+      signal: AbortSignal.timeout(4000),
+    });
+    return response.ok;
+  } catch (error) {
+    console.warn("[agents] Slow Loop registration failed — Echo will be mute", error);
+    return false;
+  }
+}

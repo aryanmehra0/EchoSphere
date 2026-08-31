@@ -21,9 +21,11 @@ import {
 } from "./incident-reducer";
 import { DEMO_SCRIPT, rebaseAction } from "./mock-stream";
 import {
+  inviteAgent,
   openDeltaSocket,
   requestBridgeCredentials,
   slowLoopUrl,
+  stopAgent,
   type DeltaSocket,
 } from "./delta-socket";
 import { AgoraBridge } from "./agora-bridge";
@@ -93,6 +95,8 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   /** The live delta socket, when one is open. */
   const socket = useRef<DeltaSocket | null>(null);
   const agora = useRef<AgoraBridge | null>(null);
+  /** The channel Echo was invited to, so leaving can stop the right agent. */
+  const joinedChannel = useRef<string | null>(null);
 
   /**
    * A single shared 1Hz tick drives every elapsed timer in the console.
@@ -215,6 +219,58 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       },
     });
 
+    /*
+      PUT ECHO IN THE CHANNEL — v6 W1.
+
+      Deliberately NOT awaited before the join, and deliberately not allowed to
+      throw into it. Inviting a Cloud Agent is a round trip to Agora that can
+      take seconds or fail outright on a bad TTS key; §17 says the dashboard
+      must never depend on the Fast Loop, and that includes not waiting on it.
+
+      This call was missing entirely until Aug 31. Every other link worked —
+      tokens minted, RTC joined, claims extracted, contradictions detected —
+      and Echo was never in the room to say any of it. Nothing errored. It was
+      simply silent, which is the hardest kind of bug to see.
+    */
+    joinedChannel.current = cleanChannel;
+    void inviteAgent(cleanChannel)
+      .then(({ agentId, registeredWithSlowLoop }) => {
+        if (!agentId) {
+          console.warn("[bridge] Agora accepted the invite but returned no agent id");
+          return;
+        }
+        if (!registeredWithSlowLoop) {
+          // Echo is audible but will never speak ABOUT the incident. That
+          // distinction is impossible to work out from inside the room, so it
+          // gets said out loud rather than left to be discovered on stage.
+          dispatch({
+            type: "DELTA",
+            payload: {
+              degraded: {
+                voice: true,
+                extraction: false,
+                model: null,
+                banner: "ECHO CANNOT SPEAK — the Slow Loop never received the agent id",
+              },
+            },
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn("[bridge] agent invite failed — dashboard is unaffected", error);
+        dispatch({
+          type: "DELTA",
+          payload: {
+            degraded: {
+              voice: true,
+              extraction: false,
+              model: null,
+              banner: "NO VOICE — Echo could not join the bridge",
+            },
+          },
+        });
+      });
+
     try {
       const credentials = await requestBridgeCredentials(cleanChannel, role);
       await agora.current?.join(cleanChannel, credentials);
@@ -244,6 +300,13 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     socket.current?.close();
     socket.current = null;
     void agora.current?.leave();
+    // Leaving RTC does NOT stop the Cloud Agent — it is a separate process
+    // that keeps running, and billing, until Agora times it out. Rehearsing
+    // ten times without this leaves ten Echoes in the channel.
+    if (joinedChannel.current) {
+      void stopAgent(joinedChannel.current);
+      joinedChannel.current = null;
+    }
     setAgentTrack(null);
     setMicOn(true);
     setSource(null);
@@ -258,6 +321,7 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       clearTimers();
       socket.current?.close();
       void agora.current?.leave();
+      if (joinedChannel.current) void stopAgent(joinedChannel.current);
     };
   }, [clearTimers]);
 

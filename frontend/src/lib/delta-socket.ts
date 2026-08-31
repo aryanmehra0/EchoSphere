@@ -231,6 +231,61 @@ function slowLoopHttpUrl(): string {
 }
 
 /** Zone 2 mints only short-lived participant credentials after roster writes. */
+/**
+ * Ask Zone 2 to put Echo in the channel — v6 W1.
+ *
+ * ── WHY THE CALLER MUST NOT AWAIT THIS BEFORE SHOWING THE DASHBOARD ────────
+ * §17's standing rule: never let a change make the dashboard depend on the
+ * Fast Loop. Inviting a Cloud Agent is a round trip to Agora that can take
+ * seconds, time out, or fail on a bad TTS key — and none of that has anything
+ * to do with whether the incident record works. So the invite is fired
+ * alongside the join, and a failure costs Echo's voice and nothing else.
+ *
+ * Idempotent server-side, which matters because §18 puts two humans on two
+ * machines and both consoles call this against the same channel.
+ */
+export async function inviteAgent(channel: string): Promise<{
+  agentId: string | null;
+  reused: boolean;
+  registeredWithSlowLoop: boolean;
+}> {
+  const response = await fetch("/api/invite-agent", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channel }),
+  });
+  const body = (await response.json()) as {
+    agentId?: string;
+    reused?: boolean;
+    registeredWithSlowLoop?: boolean;
+    error?: string;
+  };
+  if (!response.ok) throw new Error(body.error ?? `Agent invite failed (${response.status})`);
+  return {
+    agentId: body.agentId ?? null,
+    reused: Boolean(body.reused),
+    registeredWithSlowLoop: Boolean(body.registeredWithSlowLoop),
+  };
+}
+
+/**
+ * End Echo's session. Leaving the RTC channel does NOT do this — the Cloud
+ * Agent is a separate process that runs, and bills, until Agora times it out.
+ */
+export async function stopAgent(channel: string): Promise<void> {
+  try {
+    await fetch("/api/stop-agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel }),
+    });
+  } catch (error) {
+    // Best-effort on the way out. An orphan times out on its own; blocking
+    // the operator's exit on a cleanup call would be worse.
+    console.warn("[bridge] could not stop the agent", error);
+  }
+}
+
 export async function requestBridgeCredentials(
   channel: string,
   role: ParticipantRole,

@@ -8,6 +8,11 @@ import {
   putEntry,
   RosterWriteError,
 } from "@/lib/server/roster";
+import {
+  getActiveAgent,
+  registerWithSlowLoop,
+  rememberAgent,
+} from "@/lib/server/active-agents";
 
 /**
  * POST /api/invite-agent — v6 W1, "Fast Loop startup".
@@ -50,6 +55,25 @@ export async function POST(request: Request) {
   const channel = body.channel?.trim();
   if (!channel) {
     return NextResponse.json({ error: "channel is required" }, { status: 400 });
+  }
+
+  /*
+    IDEMPOTENT PER CHANNEL, and §18 is why.
+
+    Two humans on two machines is a hard requirement, and both their consoles
+    join the same channel. Without this check both would invite an agent and
+    the room would get two Echoes answering every question in slightly
+    different words — which looks exactly like the product being broken.
+  */
+  const existing = getActiveAgent(channel);
+  if (existing) {
+    return NextResponse.json({
+      agentId: existing.agentId,
+      agentUid: AGENT_UID,
+      channel,
+      expiresAt: existing.expiresAt,
+      reused: true,
+    });
   }
 
   try {
@@ -132,11 +156,38 @@ export async function POST(request: Request) {
       expiresAt: agentTokens.expiresAt,
     });
 
+    /*
+      Hand the agent id to the Slow Loop.
+
+      This is the hop that was missing entirely until Aug 31, and its absence
+      was invisible: every other part of the chain worked, the dashboard filled
+      with claims, contradictions were detected and recorded — and Echo never
+      said a word, because the Bridge Controller had no agent to speak through.
+      Nothing failed. It was just silent.
+
+      Only Zone 2 can do this. It holds the Agora credentials that created the
+      agent, and §10.1 forbids those crossing into Zone 3, so the id itself is
+      the one thing that has to travel.
+    */
+    if (agentId) {
+      rememberAgent({
+        agentId,
+        channel,
+        startedAt: Date.now(),
+        expiresAt: agentTokens.expiresAt,
+      });
+    }
+    const registered = agentId ? await registerWithSlowLoop(agentId, channel) : false;
+
     return NextResponse.json({
       agentId,
       agentUid: AGENT_UID,
       channel,
       expiresAt: agentTokens.expiresAt,
+      // Surfaced rather than swallowed: an agent that joined but is not
+      // registered can be HEARD but will never speak about the incident, and
+      // that distinction is impossible to diagnose from the room.
+      registeredWithSlowLoop: registered,
     });
   } catch (error) {
     if (error instanceof MissingEnvError) {
