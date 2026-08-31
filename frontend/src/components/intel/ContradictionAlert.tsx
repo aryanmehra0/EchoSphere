@@ -1,6 +1,6 @@
 "use client";
 
-import { Scale } from "lucide-react";
+import { Scale, Users } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
 import {
@@ -11,6 +11,7 @@ import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/Signal";
 import { Button } from "@/components/ui/Button";
 import { clockShort, initials } from "@/lib/format";
+import type { PanelDeliberation } from "@/lib/types";
 
 /**
  * The contradiction alert.
@@ -72,6 +73,99 @@ function Claim({
         ) : null}
       </div>
       <p className="text-xs leading-snug text-ink-2">{text}</p>
+    </div>
+  );
+}
+
+/**
+ * How the Deliberation Panel reached this verdict — §7a.
+ *
+ * ── WHY THIS IS ON SCREEN AT ALL ───────────────────────────────────────────
+ * Stage 3 used to be one model against one prompt, and that prompt leaned
+ * away from OPPOSED to suppress false alarms. It over-corrected: a live
+ * rehearsal fed "the cache is fine" against "cache read timeouts" and the
+ * judge returned INDEPENDENT, so the room heard nothing. Two analysts with
+ * opposite biases now read every pair, and a third settles any split.
+ *
+ * Showing the split is the point, not a debug affordance. A conflict the
+ * analysts DISAGREED about is a weaker thing to act on than a unanimous one,
+ * and an operator deserves to know which they are looking at. Presenting a
+ * contested verdict as settled would be the same error as filing a
+ * HYPOTHESIS as OBSERVED — Echo overstating its own certainty, one level up.
+ *
+ * ── WHY IT IS DELIBERATELY DRAB ────────────────────────────────────────────
+ * The claims above are the finding; this is Echo's working. Saturated colour
+ * is reserved for status, and the alert already spends warning on the
+ * conflict itself. So the rail sits in graphite, and only DISSENT — which is
+ * genuinely a status — is allowed to carry any.
+ * ───────────────────────────────────────────────────────────────────────────
+ */
+function PanelRail({ panel }: { panel: PanelDeliberation }) {
+  // The referee only sits when the bench splits, so its presence IS the signal.
+  const bench = panel.positions.filter((p) => p.persona !== "REFEREE");
+  const referee = panel.positions.find((p) => p.persona === "REFEREE");
+
+  return (
+    <div className="border-t border-line-faint bg-sunken/40 px-4 py-2.5">
+      <div className="mb-2 flex items-center gap-2">
+        <Users size={10} strokeWidth={2.2} className="text-ink-4" />
+        <span className="text-[9px] font-semibold tracking-[0.08em] text-ink-4 uppercase">
+          Deliberation
+        </span>
+        {panel.dissent ? (
+          <Badge tone="warning" variant="outline">
+            Analysts split
+          </Badge>
+        ) : (
+          <span className="text-[9px] tracking-[0.04em] text-ink-4 uppercase">
+            Unanimous
+          </span>
+        )}
+        <span className="tnum ml-auto font-mono text-[9px] text-ink-4">
+          {Math.round(panel.confidence * 100)}% confidence
+        </span>
+      </div>
+
+      <ul className="flex flex-col gap-1">
+        {bench.map((p) => (
+          <li key={p.persona} className="flex items-baseline gap-2 text-[10px]">
+            <span className="w-14 shrink-0 font-mono font-semibold tracking-[0.04em] text-ink-3 uppercase">
+              {p.persona}
+            </span>
+            <span className="w-[5.5rem] shrink-0 font-mono text-[9px] text-ink-2">
+              {p.relation}
+            </span>
+            <span className="tnum w-8 shrink-0 font-mono text-[9px] text-ink-4">
+              {p.confidence.toFixed(2)}
+            </span>
+            {/* The model is shown because persona independence IS model
+                independence — same model twice would be one opinion. */}
+            <span className="min-w-0 flex-1 truncate text-ink-4" title={p.why}>
+              {p.why || <span className="italic text-ink-4">no reason given</span>}
+            </span>
+            <span className="hidden shrink-0 font-mono text-[8px] text-ink-4/70 md:inline">
+              {p.model}
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      {referee ? (
+        <div className="mt-2 border-l-2 border-warning/30 pl-2">
+          <p className="text-[10px] leading-snug text-ink-3">
+            <span className="font-mono font-semibold tracking-[0.04em] text-ink-2 uppercase">
+              Referee
+            </span>{" "}
+            ruled <span className="font-mono text-ink-2">{referee.relation}</span>
+            {referee.why ? <> — {referee.why}</> : null}
+          </p>
+          {panel.whyOtherFailed ? (
+            <p className="mt-0.5 text-[10px] leading-snug text-ink-4">
+              What the other analyst missed: {panel.whyOtherFailed}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -152,6 +246,10 @@ export function ContradictionAlert() {
           align="right"
         />
       </div>
+
+      {/* Echo's working, shown rather than hidden. Absent for verdicts that
+          came from the pre-panel single judge, and for the scripted replay. */}
+      {current.panel ? <PanelRail panel={current.panel} /> : null}
 
       {/* Resolution rail — the human-in-the-loop gate. */}
       <div className="flex items-center justify-between gap-3 border-t border-line-faint bg-sunken/60 px-3 py-1.5">

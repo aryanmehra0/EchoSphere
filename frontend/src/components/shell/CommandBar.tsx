@@ -1,6 +1,6 @@
 "use client";
 
-import { Radio } from "lucide-react";
+import { MicOff, Radio } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
 import {
@@ -212,6 +212,49 @@ export function CommandBar() {
           <span className="text-2xs font-semibold tracking-[0.08em] text-warning uppercase">
             {state.degraded.banner}
           </span>
+        </div>
+      ) : null}
+
+      {/*
+        OFF THE RECORD — §10.5.
+
+        Takes precedence over the degradation banner's slot and is the single
+        loudest thing on screen while it is up, because the failure mode it
+        guards against is someone BELIEVING they are off the record when they
+        are not — or, worse, believing they are on it when Echo has stopped
+        minuting and nobody noticed the incident going unrecorded.
+
+        Deliberately not dismissible, for the same reason the contradiction
+        alert has no X: a state you can sweep away is a state people will
+        forget they are in.
+
+        This is one of the few places saturated colour is spent on something
+        other than entity health, and it earns it — recording state IS status.
+      */}
+      {!state.privacy.recording ? (
+        <div
+          role="status"
+          aria-live="assertive"
+          className={cn(
+            "absolute inset-x-0 top-full z-20 flex items-center justify-center gap-2",
+            "border-b border-critical/45 bg-critical/15 py-1",
+          )}
+        >
+          <MicOff size={11} strokeWidth={2.4} className="text-critical" />
+          <span className="text-2xs font-semibold tracking-[0.08em] text-critical uppercase">
+            Off the record — Echo has stopped minuting
+          </span>
+          {state.privacy.changedBy ? (
+            <span className="text-2xs tracking-[0.04em] text-critical/70">
+              (paused by {state.privacy.changedBy})
+            </span>
+          ) : null}
+          {state.privacy.suspendedTurns > 0 ? (
+            <span className="tnum font-mono text-2xs text-critical/70">
+              {state.privacy.suspendedTurns} turn
+              {state.privacy.suspendedTurns === 1 ? "" : "s"} not recorded
+            </span>
+          ) : null}
         </div>
       ) : null}
 

@@ -26,6 +26,16 @@ from . import config
 from .models import Transcript, now_ms
 from .redaction import redact
 
+# How many PII spans have been replaced this session. A COUNT, never the
+# values — the whole point of §10.4 is that those never leave this process, so
+# the audit surface has to be a number. Read by /privacy/inventory, which
+# exists so "we redact PII" can be checked rather than believed.
+_redaction_total = 0
+
+
+def redaction_count() -> int:
+    return _redaction_total
+
 log = logging.getLogger("echo.extraction")
 
 # §4.4 flush triggers.
@@ -481,6 +491,8 @@ async def extract(
     """
     redacted = redact(window_text)
     if redacted.count:
+        global _redaction_total
+        _redaction_total += redacted.count
         log.info("extraction: redacted %d PII spans before the LLM call", redacted.count)
 
     user = f"TRANSCRIPT WINDOW:\n{redacted.text}"
@@ -538,7 +550,13 @@ def _parse(raw: str) -> Any:
     return json.loads(text)
 
 
-async def groq_json(system: str, user: str, *, max_tokens: int = 4096) -> str:
+async def groq_json(
+    system: str,
+    user: str,
+    *,
+    max_tokens: int = 4096,
+    models: list[str] | None = None,
+) -> str:
     """
     Groq chat completions, forced to JSON, with 429 handling.
 
@@ -561,7 +579,13 @@ async def groq_json(system: str, user: str, *, max_tokens: int = 4096) -> str:
     from groq import AsyncGroq
 
     client = AsyncGroq(api_key=config.groq_api_key())
-    models = config.analysis_models()
+
+    # `models` lets one caller pin its own model while keeping the rest of the
+    # chain as fallback. The Deliberation Panel (§7a) uses this to put each
+    # persona on a DIFFERENT model — which buys genuine independence between
+    # the personas and, because Groq's daily cap is scoped per model, costs
+    # nothing extra in quota. Two problems, one parameter.
+    models = models or config.analysis_models()
 
     # Patient on purpose. The free tier is 8000 TOKENS PER MINUTE, and a busy
     # window sends the transcript plus the Compacted State on every flush — so

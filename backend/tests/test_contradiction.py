@@ -187,18 +187,18 @@ class TestFullPipeline(unittest.TestCase):
         timeouts = claim("clm-timeouts", "Redis cache read timeouts observed", "redis",
                          role="Support Engineer")
 
-        first = run(self.eng.evaluate(timeouts, [mem], call_llm=verdict("INDEPENDENT", 0.86), now=100.0))
+        first = run(self.eng.evaluate(timeouts, [mem], call_llm=verdict("INDEPENDENT", 0.86), now=100.0, use_panel=False))
         self.assertIsNotNone(first)
         self.assertEqual(first[0].id, "clm-mem40")
 
         # Same pair again inside the cooldown — must stay silent.
-        second = run(self.eng.evaluate(timeouts, [mem], call_llm=verdict("INDEPENDENT", 0.86), now=150.0))
+        second = run(self.eng.evaluate(timeouts, [mem], call_llm=verdict("INDEPENDENT", 0.86), now=150.0, use_panel=False))
         self.assertIsNone(second, "the same conflict fired twice")
 
     def test_a_hypothesis_never_triggers_the_engine(self):
         hyp = claim("h1", "Redis might be evicting keys", "redis", status="HYPOTHESIS")
         mem = claim("c1", "Redis memory at 40 percent", "redis")
-        self.assertIsNone(run(self.eng.evaluate(hyp, [mem], call_llm=verdict("OPPOSED", 0.99))))
+        self.assertIsNone(run(self.eng.evaluate(hyp, [mem], call_llm=verdict("OPPOSED", 0.99), use_panel=False)))
 
     def test_unrelated_entities_never_reach_the_llm(self):
         called = {"n": 0}
@@ -209,9 +209,38 @@ class TestFullPipeline(unittest.TestCase):
 
         new = claim("c1", "Redis memory at 40 percent", "redis")
         other = claim("c2", "Postgres memory at 40 percent", "postgres")
-        run(self.eng.evaluate(new, [other], call_llm=counting))
+        run(self.eng.evaluate(new, [other], call_llm=counting, use_panel=False))
         self.assertEqual(called["n"], 0, "scoping should have prevented any LLM cost")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPanelIsTheDefaultJudge(unittest.TestCase):
+    """
+    The Panel replaced the single judge in production, and nothing downstream
+    would notice if that silently regressed — `evaluate` returns the same
+    shape either way. So the wiring itself is pinned here.
+    """
+
+    def test_evaluate_uses_the_panel_unless_told_otherwise(self):
+        seen: list[object] = []
+
+        async def spy(system, user, **kwargs):
+            seen.append(kwargs.get("models"))
+            return json.dumps({"relation": "AGREES", "confidence": 0.9, "why": "x"})
+
+        eng = ContradictionEngine()
+        new = claim("c1", "Redis cache read timeouts observed", "redis",
+                    role="Support Engineer")
+        other = claim("c2", "Redis primary memory measured at 40 percent", "redis")
+
+        run(eng.evaluate(new, [other], call_llm=spy))
+
+        # Two analysts, each pinned to its own model. One call with models=None
+        # would mean the single judge is still running.
+        self.assertGreaterEqual(len(seen), 2, "the panel did not convene")
+        self.assertTrue(all(m for m in seen), "a persona ran unpinned")
+        self.assertEqual(len(set(map(tuple, seen))), len(seen),
+                         "personas shared a model — independence lost")

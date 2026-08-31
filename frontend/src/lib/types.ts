@@ -167,6 +167,58 @@ export interface Task {
 }
 
 /**
+ * One analyst's independent read of a pair — §7a.
+ *
+ * Kept verbatim rather than summarised, because the whole value of the panel
+ * is that a human can see WHERE the judgement was contested.
+ */
+export interface PanelPosition {
+  persona: string;
+  model: string;
+  relation: string;
+  confidence: number;
+  why: string;
+  whyOtherFailed?: string;
+}
+
+/**
+ * How the Deliberation Panel reached a verdict.
+ *
+ * `dissent` is the field that earns this its screen space: a conflict two
+ * analysts disagreed about is a weaker signal than a unanimous one, and a
+ * human acting on it deserves to know which they are looking at. Hiding it
+ * would be the same error as collapsing HYPOTHESIS into OBSERVED — Echo
+ * presenting its own uncertainty as settled.
+ */
+export interface PanelDeliberation {
+  relation: string;
+  confidence: number;
+  why: string;
+  dissent: boolean;
+  whyOtherFailed?: string;
+  positions: PanelPosition[];
+}
+
+/**
+ * Whether Echo is minuting the bridge — §10.5.
+ *
+ * Surfaced prominently rather than tucked into a settings panel. A recording
+ * state nobody can see is worse than no control at all, because people will
+ * believe whichever state they assumed; the one thing worse than recording
+ * someone who did not expect it is convincing them you stopped when you had
+ * not. `suspendedTurns` is a COUNT — the dropped text is never sent, stored,
+ * or logged anywhere.
+ */
+export interface PrivacyState {
+  recording: boolean;
+  suspendedTurns: number;
+  /** Epoch ms the current pause began; null while recording. */
+  since: number | null;
+  /** The role that last flipped it — attribution applies here too. */
+  changedBy: string | null;
+}
+
+/**
  * Two claims the Semantic Contradiction Engine found to be in tension.
  * `claimA`/`claimB` are claim IDs — v6 §9.2 sends references, not copies, so
  * the ledger stays the single source of truth for the text.
@@ -178,6 +230,11 @@ export interface Contradiction {
   speakers: ParticipantRole[];
   resolved: boolean;
   at: number;
+  /** The adjudicated relation — OPPOSED, INDEPENDENT, AGREES, REFINES. */
+  relation?: string;
+  why?: string;
+  /** Absent when the verdict came from the pre-panel single judge. */
+  panel?: PanelDeliberation;
 }
 
 export type TimelineKind =
@@ -301,6 +358,9 @@ export interface IncidentState {
 
   /** Null when everything is healthy. */
   degraded: Degradation | null;
+
+  /** Whether the bridge is being minuted at all — §10.5. */
+  privacy: PrivacyState;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -329,4 +389,5 @@ export interface IncidentDelta {
   phase?: IncidentPhase;
   agent?: AgentState;
   degraded?: Degradation | null;
+  privacy?: PrivacyState;
 }

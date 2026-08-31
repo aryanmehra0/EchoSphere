@@ -67,8 +67,22 @@ _ATTRIBUTION = re.compile(
 )
 
 # Turns that carry no claim need no attribution — an acknowledgement is not a
-# finding. Kept deliberately narrow so it cannot become a loophole.
-_NO_CLAIM = re.compile(r"^(filed as|pausing for|nobody has|no one has|i have prepared)", re.I)
+# finding. Kept deliberately narrow so it cannot become a loophole: every entry
+# is an ANCHORED prefix naming a specific thing Echo does, never a general
+# escape like "note that" or "just to say".
+#
+# The recording-state lines were added on Aug 31 after §10.5 shipped and this
+# tripwire — correctly — refused to let Echo say "Recording resumed." It names
+# no source because it asserts nothing about the incident; it reports Echo's
+# own state. Confirming that out loud is REQUIRED by §10.5 rule 3 (the room
+# must be able to perceive whether it is being minuted), so the alternative to
+# allowing it was Echo pausing silently, which is the failure that rule exists
+# to prevent.
+_NO_CLAIM = re.compile(
+    r"^(filed as|pausing for|nobody has|no one has|i have prepared"
+    r"|off the record|recording resumed|recording paused)",
+    re.I,
+)
 
 
 class EpistemicViolation(ValueError):

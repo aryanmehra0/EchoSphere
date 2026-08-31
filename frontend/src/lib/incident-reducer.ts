@@ -71,6 +71,10 @@ export const initialIncidentState: IncidentState = {
   transcripts: [],
   approval: null,
   degraded: null,
+  // Recording is the default. An incident bridge that silently failed to
+  // record itself would be its own kind of failure — but the default is
+  // stated here rather than assumed by every component that reads it.
+  privacy: { recording: true, suspendedTurns: 0, since: null, changedBy: null },
 };
 
 /* -------------------------------------------------------------------------- */
@@ -130,6 +134,7 @@ export function incidentReducer(
         agent: d.agent ?? state.agent,
         // `undefined` means "unchanged"; an explicit null means "recovered".
         degraded: d.degraded === undefined ? state.degraded : d.degraded,
+        privacy: d.privacy ?? state.privacy,
       };
     }
 
@@ -157,6 +162,7 @@ export function incidentReducer(
         agent: d.agent ?? state.agent,
         // `undefined` means "unchanged"; an explicit null means "recovered".
         degraded: d.degraded === undefined ? state.degraded : d.degraded,
+        privacy: d.privacy ?? state.privacy,
       };
     }
 

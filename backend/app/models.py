@@ -210,6 +210,13 @@ class Contradiction:
     relation: str | None = None
     why: str | None = None
 
+    # §7a — how the Deliberation Panel reached this verdict: each persona's
+    # independent read, and whether they split. Sent to the dashboard rather
+    # than kept server-side because a verdict two analysts DISAGREED about is
+    # a different thing to act on than a unanimous one, and hiding that would
+    # be the same mistake as collapsing HYPOTHESIS into OBSERVED — one level up.
+    panel: dict[str, Any] | None = None
+
     def to_wire(self) -> dict[str, Any]:
         return _clean({
             "id": self.id,
@@ -218,6 +225,9 @@ class Contradiction:
             "speakers": self.speakers,
             "resolved": self.resolved,
             "at": self.at,
+            "relation": self.relation,
+            "why": self.why,
+            "panel": self.panel,
         })
 
 

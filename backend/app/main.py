@@ -26,10 +26,17 @@ from .bridge import BridgeController
 from .contradiction import ContradictionEngine
 from .degradation import Degradation
 from .deltas import DeltaHub, encode
-from .extraction import TurnWindow, compact, entity_aliases, extract
+from .extraction import (
+    TurnWindow,
+    compact,
+    entity_aliases,
+    extract,
+    redaction_count,
+)
 from .proxy import ProxyActionLayer
 from .rti import ParticipantFrame, RTIMonitor
 from .ledger import Ledger
+from .privacy import PrivacyGate
 from .models import (
     Claim,
     Contradiction,
@@ -65,6 +72,10 @@ engine = ContradictionEngine()
 rti = RTIMonitor()
 proxy = ProxyActionLayer(channel="inc-4417")
 degraded = Degradation()
+# §10.5 — whether the bridge is currently being minuted at all. Sits in front
+# of redaction, not behind it: redaction decides what a vendor sees, this
+# decides whether an utterance is processed.
+privacy = PrivacyGate()
 _pipeline_lock = asyncio.Lock()
 
 
@@ -272,19 +283,24 @@ async def run_pipeline_if_ready() -> dict[str, Any] | None:
                 continue
 
             other, verdict = found
-            spoken = await _surface_contradiction(claim, other, verdict.relation)
+            spoken = await _surface_contradiction(claim, other, verdict)
             break  # one interruption per window; §5.1's single-slot queue
 
         return {"claims": len(new_claims), "delta": bool(delta), "spoken": spoken}
 
 
-async def _surface_contradiction(a: Claim, b: Claim, relation: str) -> dict[str, Any] | None:
+async def _surface_contradiction(a: Claim, b: Claim, verdict: Any) -> dict[str, Any] | None:
     """Record the conflict, then speak it — Rule 3 filtered, §6 validated."""
     if len(BridgeController.strip_inferred([a, b])) < 2:
         return None
 
+    relation = verdict.relation
+    # A PanelVerdict carries the deliberation; the legacy Adjudication does not.
+    panel = verdict.as_dict() if hasattr(verdict, "positions") else None
+
     cx = Contradiction(id=f"cx-{now_ms()}", claim_a=a.id, claim_b=b.id,
-                       speakers=[a.speaker_role, b.speaker_role], relation=relation)
+                       speakers=[a.speaker_role, b.speaker_role], relation=relation,
+                       why=getattr(verdict, "why", None) or None, panel=panel)
     ledger.upsert_contradiction(cx)
     event = ledger.add_timeline(TimelineEvent(
         id=f"tl-{now_ms()}", kind="contradiction",
@@ -319,6 +335,56 @@ async def _surface_contradiction(a: Claim, b: Claim, relation: str) -> dict[str,
     return {"spoken": bool(result and result.ok), "text": line}
 
 
+@app.get("/privacy/inventory")
+async def privacy_inventory() -> dict[str, Any]:
+    """
+    Exactly what Echo is holding about this bridge — §10.5.
+
+    Exists because "we redact PII" is an assurance, and an assurance is not
+    evidence. Anyone can read this and see the real counts, where they live,
+    and when they die. It answers "what are you keeping about me" with
+    numbers instead of a paragraph.
+    """
+    snap = ledger.snapshot()
+    return privacy.inventory(
+        claims=len(snap.get("claims", [])),
+        entities=len(snap.get("entities", [])),
+        transcripts=len(snap.get("transcripts", [])),
+        redactions=redaction_count(),
+    )
+
+
+@app.post("/privacy/recording")
+async def set_recording(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    The same control as the spoken phrase, for the console.
+
+    Speech is the primary control (§10.5 rule 1) — nobody alt-tabs mid-Sev-1.
+    This is the fallback for a participant with no microphone, and for
+    stopping a recording you only realised was running after the fact.
+    """
+    want = bool(body.get("recording", True))
+    role = (body.get("role") or "Console").strip() or "Console"
+
+    phrase = "back on the record" if want else "off the record"
+    decision = privacy.evaluate(phrase, role)
+
+    if decision.action in ("pause", "resume"):
+        event = ledger.add_timeline(TimelineEvent(
+            id=f"tl-{now_ms()}", kind="decision",
+            text=(f"{role} brought the bridge BACK ON THE RECORD" if want
+                  else f"{role} took the bridge OFF THE RECORD — Echo stopped minuting"),
+            actor=role,
+        ))
+        await hub.publish({
+            "timeline": [event.to_wire()],
+            "privacy": privacy.state.to_wire(),
+        })
+
+    return {"recording": privacy.state.recording,
+            "suspendedTurns": privacy.state.suspended_turns}
+
+
 @app.post("/incident/reset")
 async def reset_incident() -> dict[str, Any]:
     """
@@ -344,9 +410,13 @@ async def reset_incident() -> dict[str, Any]:
     window.drain()
     engine._cooldown.clear()  # noqa: SLF001 — same-module reset seam
     rti.reset()
-    global proxy, degraded
+    global proxy, degraded, privacy
     proxy = ProxyActionLayer(channel=proxy.channel)
     degraded = Degradation()
+    # A new incident starts ON the record. Carrying a pause across a reset
+    # would mean the next incident silently records nothing, which is the one
+    # failure mode of this feature that nobody would notice until afterwards.
+    privacy = PrivacyGate()
 
     # Tell every connected dashboard to drop what it is holding. The reducer's
     # SNAPSHOT case replaces rather than merges, so this genuinely clears them
@@ -400,6 +470,61 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
         # routine case to guess at (§4.2's ordering rule makes this rare).
         log.warning("observer: uid %s has no role — claim would be unsourced", uid)
         return {"ignored": "unattributed uid", "uid": uid}
+
+    # ── §10.5 CONSENT GATE — before redaction, before extraction, before the
+    # transcript is published to a single dashboard.
+    #
+    # Position is the entire feature. Redaction decides what a VENDOR sees;
+    # this decides whether the utterance is processed at all. A suspended turn
+    # must not be handled more carefully — it must not be handled.
+    decision = privacy.evaluate(text, role)
+
+    if decision.action == "drop":
+        # Counted, never stored. `text` is not logged, not published, not kept.
+        return {"ignored": "off the record", "recording": False}
+
+    if decision.action in ("pause", "resume"):
+        # The control phrase itself is minuted in both directions: "Priya took
+        # the bridge off the record at 14:32" is what an incident review needs,
+        # and it reveals nothing about what was then said in private.
+        event = ledger.add_timeline(TimelineEvent(
+            id=f"tl-{now_ms()}",
+            kind="decision",
+            text=(
+                f"{role} took the bridge OFF THE RECORD — Echo stopped minuting"
+                if decision.action == "pause"
+                else f"{role} brought the bridge BACK ON THE RECORD"
+            ),
+            actor=role,
+        ))
+        await hub.publish({
+            "timeline": [event.to_wire()],
+            "privacy": privacy.state.to_wire(),
+        })
+        # Echo says it out loud, because a recording state the room cannot
+        # perceive is worse than none at all.
+        #
+        # Wrapped, and the reason is a real 500: the §6 tripwire refused
+        # "Recording resumed." for naming no source, the exception escaped the
+        # handler, and the whole ingest endpoint returned a non-JSON error.
+        # The phrase is allowed now — but a guard that can crash the path
+        # carrying every utterance is the wrong shape regardless of which
+        # phrases currently pass it. Losing the announcement costs a spoken
+        # confirmation; losing the endpoint costs the incident record.
+        spoke = False
+        try:
+            br = await _bridge()
+            if br is not None and decision.announce:
+                async with br:
+                    result = await br.speak_now(decision.announce)
+                    spoke = bool(result and result.ok)
+        except EpistemicViolation as exc:
+            log.error("privacy: refused to speak a §6-violating line: %s", exc)
+        except Exception:  # noqa: BLE001 — see above; never break ingestion
+            log.exception("privacy: could not announce the recording change")
+
+        return {"accepted": True, "recording": privacy.state.recording,
+                "announced": decision.announce, "spoken": spoke}
 
     t = Transcript(
         message_id=body.get("messageId") or f"m-{now_ms()}",

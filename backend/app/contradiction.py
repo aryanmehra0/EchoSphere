@@ -43,10 +43,13 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from . import config
 from .models import Claim
+
+if TYPE_CHECKING:  # imported lazily at the call site to avoid a cycle
+    from .panel import PanelVerdict
 
 log = logging.getLogger("echo.contradiction")
 
@@ -103,6 +106,20 @@ SCOPE_WINDOW_SECONDS = 1800.0   # 30 min
 # correcting themselves ten minutes later ("actually memory is at 95") IS worth
 # surfacing, and §7 never says a conflict must be between two people.
 SAME_UTTERANCE_SECONDS = 15.0
+
+# How many retrieved pairs may convene a full Deliberation Panel (§7a) before
+# the engine falls back to the cheaper single judge for the rest.
+#
+# Two, and the number is measured rather than chosen. `retrieve` returns
+# TOP_K=5; a panel costs 2–3 LLM calls against Groq's 8000-tokens-per-minute
+# ceiling, so an unbudgeted panel is up to 15 calls for one new claim. A live
+# rehearsal on Aug 31 hit exactly that and lost the headline contradiction to
+# 429s — the reasoning was correct and never got to execute.
+#
+# The headline conflict has always been in the top two by similarity. Below
+# that the pairs are weak, and the single judge is a sound floor for them: it
+# was the entire system the day before.
+PANEL_PAIR_BUDGET = 2
 
 _WORD = re.compile(r"[a-z0-9]+")
 # Words that carry no discriminating signal on an incident bridge.
@@ -314,12 +331,31 @@ class ContradictionEngine:
         new: Claim,
         existing: list[Claim],
         *,
-        call_llm: Callable[[str, str], Awaitable[str]] | None = None,
+        call_llm: Callable[..., Awaitable[str]] | None = None,
         now: float | None = None,
-    ) -> tuple[Claim, Adjudication] | None:
+        use_panel: bool = True,
+    ) -> tuple[Claim, Adjudication | "PanelVerdict"] | None:
         """
         The whole pipeline. Returns the counterpart claim and the verdict when
         something is worth surfacing, otherwise None.
+
+        ── WHY `use_panel` DEFAULTS TO TRUE ────────────────────────────────
+        Stage 3 used to be one call against `ADJUDICATION_PROMPT`, and that
+        prompt leans hard away from OPPOSED on purpose — it was tuned to stop
+        false alarms. A live rehearsal on Aug 30 showed the cost: the pair
+        "the cache is fine" / "cache read timeouts" came back INDEPENDENT and
+        the room heard nothing, because one prompt cannot sit at both ends of
+        a precision/recall tradeoff.
+
+        `panel.deliberate` runs two oppositely-biased analysts on two
+        different models and has a third settle any split. Measured on the
+        four-pair rig: 4/4, including the pair that failed live, with both
+        precision guards still quiet.
+
+        `use_panel=False` keeps the single judge for the tests that predate
+        the panel — they exercise scope, retrieval and cooldown, and are
+        clearer driving one deterministic call than three.
+        ────────────────────────────────────────────────────────────────────
         """
         if new.epistemic_status not in ("OBSERVED", "TOOL_RESULT"):
             return None
@@ -328,12 +364,38 @@ class ContradictionEngine:
         if not candidates:
             return None
 
+        deliberated = 0
+
         for claim, score in self.retrieve(new, candidates):
             if self.in_cooldown(new.id, claim.id, now=now):
                 log.info("contradiction: pair %s/%s in cooldown", new.id, claim.id)
                 continue
 
-            verdict = await self.adjudicate(new, claim, call_llm=call_llm)
+            """
+            BUDGET: only the strongest candidates get a panel.
+
+            `retrieve` returns TOP_K=5 ranked by similarity, and a panel costs
+            2–3 LLM calls where the single judge cost one. Five candidates
+            therefore meant up to 15 calls for ONE new claim, against Groq's
+            8000-tokens-per-MINUTE ceiling — and a busy window has several new
+            claims. The first live rehearsal after wiring the panel in drowned
+            in 429s and lost the headline contradiction: the analysis was
+            right, it just never got to run.
+
+            The tail of the ranking is where the weak pairs are anyway. Beyond
+            the budget, fall back to the single judge — cheaper, and it was the
+            entire system until yesterday, so it is a sound floor rather than a
+            degradation.
+            """
+            panel_here = use_panel and deliberated < PANEL_PAIR_BUDGET
+
+            if panel_here:
+                from .panel import deliberate
+
+                deliberated += 1
+                verdict = await deliberate(new, claim, call_llm=call_llm)
+            else:
+                verdict = await self.adjudicate(new, claim, call_llm=call_llm)
             self.mark_adjudicated(new.id, claim.id, now=now)
 
             log.info(
