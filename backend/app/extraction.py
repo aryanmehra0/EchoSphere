@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
@@ -259,12 +260,135 @@ def validate_extraction(data: Any) -> dict[str, list[dict[str, Any]]]:
             # rather than discarded — the claim was still said by someone.
             log.warning("extraction: coerced status %r -> HYPOTHESIS", status)
             status = "HYPOTHESIS"
+        # ── HEDGE GUARD — the fact/assumption split, enforced in code ──────
+        #
+        # A live run filed BOTH of these, from one sentence:
+        #
+        #   "Datadog indicates Redis might be evicting keys"  -> OBSERVED, 100%
+        #   "Redis might be evicting keys"                    -> HYPOTHESIS
+        #
+        # The same guess, recorded simultaneously as a measured fact and as an
+        # open question. Naming a tool ("Datadog indicates") was enough to make
+        # the model read a hedge as an observation.
+        #
+        # This is the single worst failure available to this product: the whole
+        # claim is that it separates what is known from what is assumed, and a
+        # judge reading that dashboard sees it do both at once. So the rule is
+        # structural, not a prompt instruction: text that hedges CANNOT be a
+        # fact, whatever the model called it and whatever tool it cites.
+        if status in ("OBSERVED", "TOOL_RESULT"):
+            hedge = _HEDGE.search(str(claim.get("text", "")))
+            if hedge:
+                log.warning(
+                    "extraction: %r hedges (%r) — OBSERVED downgraded to HYPOTHESIS",
+                    claim.get("text"), hedge.group(0),
+                )
+                status = "HYPOTHESIS"
+                # A downgraded claim must not keep a fact's confidence. 100%
+                # certainty about a guess is a contradiction in terms, and the
+                # dashboard prints that number next to the row.
+                claim["confidence"] = min(float(claim.get("confidence", 0.8) or 0.8), 0.8)
+
         claim["epistemicStatus"] = status
         claim.setdefault("confidence", 0.8)
         kept.append(claim)
-    out["claims"] = kept
+
+    out["claims"] = _dedupe_claims(kept)
 
     return out
+
+
+# Hedging language. If any of these appear, the speaker is not reporting a
+# measurement — they are proposing something, however confidently they say it.
+#
+# Deliberately does NOT include bare "may" (matches "may be" but also mangles
+# nothing else here) beyond the explicit forms below, and does not include
+# "appears to be" style phrasing used about measurements ("the graph appears
+# flat" is an observation). Kept to words that mark a PROPOSED CAUSE.
+_HEDGE = re.compile(
+    r"\b("
+    r"might(\s+be)?|may\s+be|could\s+be|maybe|perhaps|possibly|probably"
+    r"|likely|seems?\s+(to|like)|looks?\s+like|suspect(ing)?|suspicion"
+    r"|i\s+think|i\s+reckon|my\s+guess|guessing|presumably"
+    r"|indicates?\s+.{0,30}\bmight\b|pretty\s+sure|fairly\s+sure"
+    r")\b",
+    re.I,
+)
+
+
+def _claim_tokens(text: str) -> set[str]:
+    """Content words only, for near-duplicate detection."""
+    stop = {
+        "the", "a", "an", "is", "are", "was", "were", "at", "on", "in", "of",
+        "to", "and", "or", "it", "we", "i", "that", "this", "for", "with",
+        "has", "have", "be", "been", "indicates", "shows", "showing", "looks",
+    }
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in stop and len(w) > 1}
+
+
+# How much two claims must overlap to be treated as the same assertion said
+# twice. 0.7 was chosen against the live failure: "Datadog indicates Redis
+# might be evicting keys" and "Redis might be evicting keys" share every
+# content word of the shorter one, while genuinely different claims about one
+# entity ("memory is at 40 percent" vs "the cache is fine") share almost none.
+_DUPLICATE_OVERLAP = 0.7
+
+
+def _dedupe_claims(claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Collapse one assertion the model emitted twice.
+
+    Extraction splits a sentence into claims, and a sentence like "Datadog
+    looks like Redis might be evicting keys" can come back as two overlapping
+    rows. Left alone they double-count in the Ledger, and — worse, before the
+    hedge guard above — could disagree with each other about their own status.
+
+    When two rows from the same speaker say the same thing, the CAUTIOUS status
+    wins. A claim recorded once as a fact and once as a guess is a guess.
+    """
+    kept: list[dict[str, Any]] = []
+
+    for claim in claims:
+        tokens = _claim_tokens(str(claim.get("text", "")))
+        if not tokens:
+            kept.append(claim)
+            continue
+
+        merged = False
+        for existing in kept:
+            if existing.get("speakerRole") != claim.get("speakerRole"):
+                continue
+            other = _claim_tokens(str(existing.get("text", "")))
+            if not other:
+                continue
+            # Against the SMALLER set: a short claim fully contained in a
+            # longer one is the exact shape of this failure.
+            overlap = len(tokens & other) / min(len(tokens), len(other))
+            if overlap < _DUPLICATE_OVERLAP:
+                continue
+
+            # Same assertion twice. Caution wins, and the more informative
+            # wording survives so the dashboard keeps the fuller sentence.
+            if "HYPOTHESIS" in (existing.get("epistemicStatus"), claim.get("epistemicStatus")):
+                existing["epistemicStatus"] = "HYPOTHESIS"
+                existing["confidence"] = min(
+                    float(existing.get("confidence", 0.8) or 0.8),
+                    float(claim.get("confidence", 0.8) or 0.8),
+                )
+            if len(str(claim.get("text", ""))) > len(str(existing.get("text", ""))):
+                existing["text"] = claim["text"]
+
+            log.info(
+                "extraction: merged a duplicate claim from %s: %r",
+                claim.get("speakerRole"), claim.get("text"),
+            )
+            merged = True
+            break
+
+        if not merged:
+            kept.append(claim)
+
+    return kept
 
 
 # ---------------------------------------------------------------------------

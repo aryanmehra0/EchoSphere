@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -76,6 +77,11 @@ degraded = Degradation()
 # of redaction, not behind it: redaction decides what a vendor sees, this
 # decides whether an utterance is processed.
 privacy = PrivacyGate()
+
+# In-flight background analyses. Held strongly because asyncio keeps only a
+# weak reference to a running task — dropping ours would let the garbage
+# collector cancel an extraction halfway through, silently.
+_pipeline_tasks: set[asyncio.Task[Any]] = set()
 _pipeline_lock = asyncio.Lock()
 
 
@@ -335,6 +341,91 @@ async def _surface_contradiction(a: Claim, b: Claim, verdict: Any) -> dict[str, 
     return {"spoken": bool(result and result.ok), "text": line}
 
 
+@app.get("/health/model")
+async def model_health() -> dict[str, Any]:
+    """
+    Is there any analysis budget left today?
+
+    ── WHY THIS IS AN ENDPOINT AND NOT A DOC NOTE ──────────────────────────
+    Groq's free tier is 200,000 tokens per DAY, scoped per model. A full demo
+    costs 15–20k, so roughly ten runs — and a day of tuning eats all of it.
+    When it goes, nothing announces it. The console still joins, the dashboard
+    still fills with transcripts, Echo still sits in the channel. The claims
+    simply never appear, because every extraction is failing behind the
+    scenes with a 429 nobody is looking at.
+
+    That is the worst possible failure to discover with an audience watching,
+    and it is invisible right up until the moment it matters. So the
+    pre-flight asks, using a deliberately tiny probe (a handful of tokens),
+    and refuses to say GO when the answer is no.
+    ────────────────────────────────────────────────────────────────────────
+    """
+    from .extraction import groq_json
+
+    results: list[dict[str, Any]] = []
+    for model in config.analysis_models():
+        try:
+            # The word "json" must appear literally in the messages — Groq
+            # rejects `response_format: json_object` without it, with a 400.
+            # The first version of this probe said 'Reply with {"ok":true}'
+            # and failed every single time, which the pre-flight then reported
+            # as an exhausted quota. A check that cries wolf is worse than no
+            # check: it trains you to ignore the one time it is right.
+            await groq_json(
+                "Reply with the JSON object {\"ok\":true} and nothing else.",
+                "Return that json now.",
+                max_tokens=64,
+                models=[model],
+            )
+            results.append({"model": model, "available": True})
+        except Exception as exc:  # noqa: BLE001 — the SDK raises several shapes
+            message = str(exc)
+            low = message.lower()
+
+            # The distinction is the whole point of the field: a per-MINUTE
+            # limit clears while you are still setting up, a per-DAY one means
+            # there is no demo today. Telling an operator "rate limited" for
+            # both is useless at exactly the moment they need to decide.
+            if "per day" in low or "tpd" in low:
+                reason = "DAILY quota exhausted — resets tomorrow"
+            elif "per minute" in low or "tpm" in low:
+                reason = "per-minute limit — clears in under a minute"
+            elif "429" in message or "rate_limit" in low:
+                reason = "rate limited"
+            else:
+                # NOT a quota problem. Saying "rate limited" here sent an
+                # operator hunting for a budget they had not spent.
+                reason = "request rejected — see detail"
+
+            wait = re.search(r"try again in ([\dhms.]+)", message)
+            used = re.search(r"Used (\d+)", message)
+            limit = re.search(r"Limit (\d+)", message)
+
+            # The raw text, truncated. Classifying vendor error strings is
+            # guesswork — Groq has at least TPM, TPD and RPM shapes and they
+            # change — so the parsed fields are a convenience and THIS is the
+            # ground truth. An operator deciding whether to wait or reschedule
+            # deserves to see what the vendor actually said.
+            log.warning("model probe: %s unavailable — %s", model, message)
+
+            results.append({
+                "model": model,
+                "available": False,
+                "reason": reason,
+                "retryAfter": wait.group(1) if wait else None,
+                "used": int(used.group(1)) if used else None,
+                "limit": int(limit.group(1)) if limit else None,
+                "detail": message[-300:],
+            })
+
+    usable = [r for r in results if r["available"]]
+    return {
+        "usable": len(usable),
+        "primary": results[0]["model"] if results else None,
+        "models": results,
+    }
+
+
 @app.get("/privacy/inventory")
 async def privacy_inventory() -> dict[str, Any]:
     """
@@ -552,12 +643,44 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
     else:
         return {"accepted": False, "duplicate": True, "messageId": t.message_id}
 
-    outcome = await run_pipeline_if_ready()
+    """
+    THE PIPELINE RUNS IN THE BACKGROUND, and this is not an optimisation.
+
+    Awaiting it here made the response time of `/observer/transcript` equal to
+    the runtime of the whole analysis: extraction, entity resolution, and up to
+    two Deliberation Panels, each of which honours Groq's rate-limit backoff by
+    sleeping. A rehearsal on Aug 31 hit a 60-second ReadTimeout on a single
+    utterance because of it.
+
+    The caller is a BROWSER forwarding speech as it is spoken. Blocking it for
+    a minute stalls every subsequent utterance behind the slow one, so a busy
+    moment on the bridge — exactly when the analysis matters most — is exactly
+    when transcripts stop arriving.
+
+    Nothing is lost by returning early. The transcript has already been
+    published above, and every result the pipeline produces reaches the
+    dashboard over the delta socket, which is the asynchronous channel §9.3
+    exists to provide. `run_pipeline_if_ready` takes a lock, so overlapping
+    tasks are safe.
+    """
+    task = asyncio.create_task(run_pipeline_if_ready())
+    # Held until completion: asyncio keeps only a weak reference to a running
+    # task, and a garbage-collected one cancels the analysis mid-flight.
+    _pipeline_tasks.add(task)
+    task.add_done_callback(_pipeline_tasks.discard)
+
+    def _report(t: asyncio.Task[Any]) -> None:
+        if not t.cancelled() and t.exception() is not None:
+            log.exception("pipeline failed in the background", exc_info=t.exception())
+
+    task.add_done_callback(_report)
 
     return {
         "accepted": True,
         "messageId": t.message_id,
-        "extracted": outcome,
+        # The analysis is now in flight rather than finished. Named so no
+        # caller mistakes a fast 200 for a completed extraction.
+        "queued": True,
     }
 
 

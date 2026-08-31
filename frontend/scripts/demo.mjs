@@ -103,6 +103,35 @@ async function preflight() {
   const isDegraded = Boolean(degraded?.voice || degraded?.extraction);
   say(!isDegraded, "no degradation banner", degraded?.banner ?? "", false);
 
+  /*
+    7 — is there any analysis budget left today?
+
+    The one that has actually bitten. Groq's free tier is 200,000 tokens per
+    DAY and a full run costs 15–20k, so about ten rehearsals. When it runs
+    out NOTHING announces it: the console joins, the dashboard fills with
+    transcripts, Echo sits in the channel — and no claims ever appear,
+    because every extraction is failing behind the scenes with a 429 nobody
+    is watching.
+
+    A demo that looks alive and produces nothing is worse than one that
+    plainly fails. This probe costs a few tokens and is checked last so the
+    cheap checks report first.
+  */
+  const models = await get(`${API}/health/model`, 45000);
+  if (!models) {
+    say(false, "analysis budget", "could not probe the model — is the Slow Loop up?", false);
+  } else {
+    const usable = models.usable ?? 0;
+    const dead = (models.models ?? []).filter((m) => !m.available);
+    const detail = usable
+      ? `${usable}/${models.models.length} models available`
+      : dead.map((m) => `${m.model}: ${m.reason}${m.retryAfter ? ` (retry in ${m.retryAfter})` : ""}`).join(" · ");
+    say(usable > 0, "analysis budget available today", detail);
+    if (usable > 0 && dead.length) {
+      console.log(d(`      ${dead.length} fallback model(s) already exhausted — budget is tight`));
+    }
+  }
+
   console.log("");
   if (problems.length === 0) {
     console.log(`  ${g(b("GO"))}  — open ${WEB}, press ${b("J")}, then: ${b("npm run demo feed")}\n`);

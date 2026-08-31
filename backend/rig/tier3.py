@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -109,6 +110,25 @@ async def one_run(client: httpx.AsyncClient, *, verbose: bool) -> list[Check]:
         Check("measurements recorded as established",
               any_text(established, "40 percent"),
               "a measured value must not be filed as a guess"),
+
+        # The failure this catches shipped to a live dashboard: "Datadog
+        # indicates Redis might be evicting keys" filed as OBSERVED at 100%,
+        # beside the same guess filed as an open question. A hedge in the
+        # ESTABLISHED column refutes the entire pitch in one row.
+        Check("no hedge filed as a fact",
+              not any(
+                  re.search(r"\b(might|may be|could be|probably|possibly|likely"
+                            r"|looks? like|seems?|suspect|i think)\b",
+                            c.get("text", ""), re.I)
+                  for c in established
+              ),
+              "; ".join(c.get("text", "") for c in established
+                        if re.search(r"\b(might|may be|could be|probably)\b",
+                                     c.get("text", ""), re.I))),
+
+        Check("one assertion is not filed twice",
+              len({c.get("text", "").lower() for c in established}) == len(established),
+              "duplicate rows in the Ledger"),
 
         # ---- attribution, Rule 1 ------------------------------------------
         Check("every claim is attributed",
