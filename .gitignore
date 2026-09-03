@@ -6,3 +6,7 @@ frontend/CLAUDE.md
 
 # the scrub script is a one-time local tool, not part of the project
 scrub-history.sh
+
+# Official Agora quickstart, kept locally as REFERENCE only.
+# The product is not built around it — see docs/session_log.md.
+agent-quickstart-python/
