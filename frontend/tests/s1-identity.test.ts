@@ -267,13 +267,14 @@ describe("Agent configuration", () => {
   });
 
   /** The cascaded Fast Loop config, as `/api/invite-agent` builds it. */
-  const samplePayload = (channel = "inc-4417") =>
+  const samplePayload = (channel = "inc-4417", toolBaseUrl: string | null = "https://echo.example") =>
     buildAgentPayload({
       channel,
       agentUid: AGENT_UID,
       agentRtcToken: "fake-token",
       groqApiKey: "gsk-test",
       tts: { vendor: "elevenlabs", apiKey: "el-test" },
+      toolBaseUrl,
     });
 
   test("the payload carries the prompt, the tools and the VAD config", () => {
@@ -284,10 +285,55 @@ describe("Agent configuration", () => {
     assert.equal(payload.properties.llm.url, GROQ_CHAT_COMPLETIONS_URL);
     assert.equal(payload.properties.llm.model, FAST_LOOP_MODEL);
     assert.equal(payload.properties.turn_detection.interrupt_duration_ms, 300);
-    assert.equal(payload.properties.llm.tools.length, AGENT_TOOLS.length);
+    assert.equal(payload.properties.llm.tools?.length, AGENT_TOOLS.length);
     assert.match(
       payload.properties.llm.system_messages[0].content,
       /NEVER ASSERT CAUSATION/,
+    );
+  });
+
+  test("every tool is a REST tool pointed at the Slow Loop", () => {
+    /*
+      Agora REST tools are HTTP calls the Engine makes ITSELF, and the shape is
+      strict: `type: "function"` plus `server` is what declares one. Missing
+      either is a 400 at create time — which is how this was found, twice:
+
+          400  Missing required field: llm.tools.0.type
+          400  Missing required field: llm.tools.0.server
+
+      Before `enable_tools` was set, Agora never looked at the array at all, so
+      a malformed tools block sat there inert for weeks. Echo then answered
+      from the model's own memory instead of from the Ledger.
+    */
+    const tools = samplePayload("c", "https://echo.example").properties.llm.tools ?? [];
+    assert.equal(tools.length, AGENT_TOOLS.length);
+
+    for (const tool of tools) {
+      assert.equal(tool.type, "function");
+      assert.ok(tool.function.name, "a tool needs a name the model can call");
+      assert.equal(tool.server.method, "POST");
+      assert.match(tool.server.url, /^https:\/\/echo\.example\/tools\//);
+      assert.ok(tool.server.timeout_ms, "an untimed tool can hang the turn");
+    }
+
+    const read = tools.find((t) => t.function.name === "query_incident_state");
+    assert.ok(read, "the Ledger read tool must be present");
+    assert.match(read.server.url, /query_incident_state$/);
+  });
+
+  test("no public URL means NO tools, not broken ones", () => {
+    /*
+      Agora calls tools from its own servers, so a localhost URL fails on their
+      side invisibly. A tool that always fails is worse than an absent one: the
+      model retries, collects errors, and falls back on its own memory — the
+      exact hallucination this product exists to prevent.
+    */
+    const props = samplePayload("c", null).properties;
+    assert.equal(props.llm.tools, undefined, "tools must be omitted entirely");
+    assert.equal(
+      props.advanced_features.enable_tools,
+      false,
+      "enable_tools must track whether tools were actually attached",
     );
   });
 
@@ -299,14 +345,41 @@ describe("Agent configuration", () => {
     );
   });
 
-  test("ASR keyword biasing covers the demo's technical vocabulary", () => {
-    const payload = samplePayload("c");
-    const kw = payload.properties.asr.keywords;
+  test("ASR names a vendor — without one Agora runs no recogniser at all", () => {
+    /*
+      The regression this pins is the one that made the product deaf.
+
+      The block used to be `{ language, keywords: [...] }` with no `vendor`.
+      Agora returned 200, the agent joined, and not one word was ever
+      transcribed — speech reached the channel and produced nothing, with no
+      error on any surface. `vendor` is what selects a recogniser; everything
+      else is forwarded to it unchecked.
+    */
+    const asr = samplePayload("c").properties.asr;
+    assert.equal(asr.vendor, "deepgram", "ASR must name a vendor");
+    assert.ok(asr.params, "vendor options belong under params");
+  });
+
+  test("ASR keyterm biasing covers the demo's technical vocabulary", () => {
+    const params = samplePayload("c").properties.asr.params;
+    // `keyterm` is Deepgram's option name. The previous `keywords` array was
+    // not one, so it was silently discarded even had a vendor been set.
     // "Redis" reliably transcribes as "read us" without biasing, and the
     // extraction model then invents an entity nobody mentioned.
-    for (const term of ["Redis", "VPC", "us-east-1a", "failover"]) {
-      assert.ok(kw.includes(term), `ASR biasing is missing "${term}"`);
+    for (const term of ["Redis", "Datadog", "checkout", "failover"]) {
+      assert.ok(
+        params.keyterm.includes(term),
+        `ASR biasing is missing "${term}"`,
+      );
     }
+  });
+
+  test("ASR language stays in step with turn detection", () => {
+    // The SDK treats turn detection as the single source of truth for the
+    // interaction language and OVERWRITES the ASR field with it, so a
+    // mismatch here is silently discarded rather than honoured.
+    const props = samplePayload("c").properties;
+    assert.equal(props.asr.language, props.turn_detection.language);
   });
 });
 

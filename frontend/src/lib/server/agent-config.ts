@@ -322,13 +322,98 @@ export function buildTtsConfig(tts: TtsSettings) {
  * Echo's default state is silence, so a "say something if it goes quiet"
  * behaviour would directly contradict the WHEN TO SPEAK section above.
  */
+/**
+ * Where each tool actually lives on the Slow Loop.
+ *
+ * Agora REST tools are HTTP calls the Engine makes ITSELF, synchronously,
+ * feeding the response straight back into the model's context. So this table
+ * is the real seam between the voice agent and this product: the agent does
+ * not receive incident state in its prompt, it goes and reads the Ledger.
+ *
+ * That is the whole reason Echo cannot invent an incident. Ask it what is
+ * happening and it performs an HTTP GET against the same endpoint the
+ * dashboard renders from.
+ */
+const TOOL_ROUTES: Record<string, { path: string; body: Record<string, unknown> }> = {
+  query_incident_state: {
+    path: "/tools/query_incident_state",
+    // Only declared fields are sent, and `{{args.x}}` is substituted from the
+    // model's tool call — so the model cannot smuggle extra fields through.
+    body: { scope: "{{args.scope}}", entity: "{{args.entity}}" },
+  },
+  create_jira_ticket: {
+    path: "/tools/invoke",
+    body: {
+      tool: "create_jira_ticket",
+      summary: "{{args.summary}}",
+      assigneeRole: "{{args.assigneeRole}}",
+    },
+  },
+  post_slack_update: {
+    path: "/tools/invoke",
+    body: { tool: "post_slack_update", text: "{{args.text}}" },
+  },
+  page_oncall_team: {
+    path: "/tools/invoke",
+    body: { tool: "page_oncall_team", team: "{{args.team}}", reason: "{{args.reason}}" },
+  },
+  execute_runbook_script: {
+    path: "/tools/invoke",
+    body: {
+      tool: "execute_runbook_script",
+      runbook: "{{args.runbook}}",
+      target: "{{args.target}}",
+    },
+  },
+};
+
+/**
+ * The `tools` half of the llm block — or nothing at all.
+ *
+ * ── WHY NO TOOLS IS BETTER THAN BROKEN TOOLS ────────────────────────────────
+ * Agora calls these URLs from its own servers. Without a publicly reachable
+ * Slow Loop there is no URL that works, and a tool that always fails is worse
+ * than an absent one: the model retries, collects errors, and falls back on
+ * its own memory — producing exactly the confident, unsourced answer this
+ * product exists to prevent.
+ *
+ * So when `AGENT_TOOL_BASE_URL` is unset the agent is created with tools
+ * DISABLED. Echo can still hear, speak and be interrupted; it simply cannot
+ * read the Ledger, and the console says so rather than letting it improvise.
+ */
+export function buildToolsBlock(toolBaseUrl: string | null) {
+  if (!toolBaseUrl) return {};
+
+  return {
+    tools: AGENT_TOOLS.map(({ name, description, parameters }) => {
+      const route = TOOL_ROUTES[name];
+      return {
+        // `type: "function"` combined with `server` is what declares a REST
+        // tool. Omitting either is a 400 at create time.
+        type: "function",
+        function: { name, description, parameters },
+        server: {
+          method: "POST",
+          url: `${toolBaseUrl}${route.path}`,
+          headers: { "Content-Type": "application/json" },
+          body: route.body,
+          // The Ledger answers in milliseconds; a long timeout here would
+          // leave the room in silence waiting on a call that already failed.
+          timeout_ms: 8000,
+        },
+      };
+    }),
+  };
+}
+
 export function buildAgentPayload(params: {
   channel: string;
   agentUid: number;
   agentRtcToken: string;
   groqApiKey: string;
   tts: TtsSettings;
-  toolWebhookUrl?: string;
+  /** Public base URL of the Slow Loop. Null disables tools — see above. */
+  toolBaseUrl?: string | null;
 }) {
   return {
     name: `echo-${params.channel}`,
@@ -344,29 +429,26 @@ export function buildAgentPayload(params: {
       advanced_features: {
         enable_aivad: false,
         enable_rtm: true,
+        // Tracks whether tools were ACTUALLY attached. Declaring tools the
+        // Engine cannot reach is worse than declaring none: the model retries,
+        // collects errors, and falls back on its own memory — the exact
+        // hallucination this product exists to prevent.
+        enable_tools: Boolean(params.toolBaseUrl),
       },
 
       /*
-        ── ⚠️ UNVERIFIED, AND THE BLOCKER IS STILL OPEN ──────────────────────
-        THE SYMPTOM (measured Aug 31, not assumed): the console subscribes to
-        RTM successfully, a WAV plays into the channel as a real microphone
-        for sixty continuous seconds, and ZERO RTM frames arrive. No error, no
-        warning. The Slow Loop never learns that anyone spoke. The system
-        works perfectly on injected text and is completely deaf to speech.
+        Session parameters, matching the official quickstart's managed agent
+        config verbatim (agent-quickstart docs, "Managed Agent Config").
 
-        THE HYPOTHESIS: `enable_rtm: true` opens the channel but does not make
-        the engine publish into it, so the transcript stream has to be asked
-        for separately — this block.
+        An earlier version of this file carried an invented `transcript: {…}`
+        block, added while trying to work out why speech produced no claims.
+        It was a guess at a vendor API, Agora accepted the payload without
+        understanding it — the same 200-means-parsed trap already documented
+        for `tts.params` — and it changed nothing. Removed.
 
-        THE RESULT: it did NOT fix it. Agora accepted the payload (it returns
-        200 whether or not it understood the keys — the same trap documented
-        for `tts.params` in session_log.md §5) and still published nothing.
-
-        So this config is a PLAUSIBLE GUESS AT A VENDOR API, left in place
-        because it is harmless and may be half-right, NOT a working feature.
-        Anyone reading this: do not assume speech-in works because this exists.
-        The next step is Agora's Conversational AI Engine transcription docs
-        for the exact key names, or their support channel — not another guess.
+        The actual cause was on our side: transcripts arrive on the RTC DATA
+        STREAM, and the console was listening only to RTM. See
+        `lib/agora/voice-agent.ts`.
       */
       parameters: {
         data_channel: "rtm",
@@ -374,11 +456,6 @@ export function buildAgentPayload(params: {
         // Surfaced rather than swallowed: a silent agent is the hardest
         // failure to diagnose here, and this is the channel that says why.
         enable_error_message: true,
-        transcript: {
-          enable: true,
-          protocol_version: "v2",
-          enable_words: false,
-        },
       },
       turn_detection: TURN_DETECTION,
       llm: {
@@ -391,12 +468,7 @@ export function buildAgentPayload(params: {
         system_messages: [
           { role: "system", content: FAST_LOOP_SYSTEM_PROMPT },
         ],
-        tools: AGENT_TOOLS.map(({ name, description, parameters }) => ({
-          name,
-          description,
-          parameters,
-        })),
-        ...(params.toolWebhookUrl ? { tool_webhook: params.toolWebhookUrl } : {}),
+        ...buildToolsBlock(params.toolBaseUrl ?? null),
         max_history: 32,
         greeting_message: "",
       },
@@ -404,25 +476,41 @@ export function buildAgentPayload(params: {
       // block is rejected outright with `properties: tts.addon not found`.
       // (Verified, not assumed: see session_log.md.)
       tts: buildTtsConfig(params.tts),
+      /*
+        ── SPEECH-TO-TEXT, AND THE FIELD WHOSE ABSENCE MADE ECHO DEAF ────────
+        This block used to be `{ language, keywords: [...] }`. It has no
+        `vendor`, and without one Agora runs no recogniser at all — so speech
+        reached the channel, the agent sat in it, and not one word was ever
+        transcribed. Silently: the payload returns 200 because Agora validates
+        that `vendor` is one it knows and forwards `params` unchecked, exactly
+        as documented for `tts` above.
+
+        The shape below is not a guess. It is what the official SDK emits —
+        `agora_agent/agentkit/vendors/stt.py` builds `{vendor, params}`, and
+        `agent.py::_resolve_asr_config` injects `language` from turn detection
+        and defaults `vendor` when none is given. Verified by reading the
+        installed package rather than by trying key names against the API.
+
+        `nova-3` is an AGORA-MANAGED model: no Deepgram key is required, which
+        is what the hackathon organisers pointed at for teams without their own
+        provider keys.
+      */
       asr: {
-        language: "en-US",
-        // Biasing the recogniser toward the vocabulary of this incident.
-        // Without it "Redis" reliably becomes "read us" and the extraction
-        // model then invents an entity that nobody mentioned.
-        keywords: [
-          "Redis",
-          "Datadog",
-          "VPC",
-          "us-east-1a",
-          "us-east-1b",
-          "checkout",
-          "failover",
-          "eviction",
-          "latency",
-          "packet loss",
-          "replica",
-          "Sev-1",
-        ],
+        vendor: "deepgram",
+        params: {
+          model: "nova-3",
+          // `keyterm`, NOT `keywords` — the latter is not a Deepgram option and
+          // was silently discarded. Biasing matters here: without it "Redis"
+          // reliably becomes "read us", and extraction then invents an entity
+          // nobody mentioned.
+          keyterm: "Redis Datadog checkout eviction latency replica failover Sev-1",
+          smart_format: true,
+          punctuation: true,
+        },
+        // Kept in step with turn_detection deliberately. The SDK treats turn
+        // detection as the single source of truth for interaction language and
+        // OVERWRITES this field; a mismatch here would be silently discarded.
+        language: TURN_DETECTION.language,
       },
     },
   };

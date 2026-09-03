@@ -7,13 +7,9 @@ import type {
 } from "agora-rtc-sdk-ng";
 import type { RTMClient, RTMConfig } from "agora-rtm-sdk";
 
-import {
-  forwardDecision,
-  parseAgoraTranscript,
-  type AgoraTranscript,
-  type ForwardDecision,
-} from "./agora-transcript";
+import type { AgoraTranscript, ForwardDecision } from "./agora-transcript";
 import { forwardTranscriptToSlowLoop } from "./delta-socket";
+import { VoiceAgent } from "./agora/voice-agent";
 import type { AgentState, ParticipantRole } from "./types";
 
 const AGENT_UID = 9000;
@@ -46,13 +42,6 @@ export class AgoraBridge {
   private client: IAgoraRTCClient | null = null;
   private mic: ILocalAudioTrack | null = null;
   private rtm: RTMClient | null = null;
-  /**
-   * Agora's Conversational AI Engine publishes transcripts to a STREAM
-   * channel topic, which a MESSAGE-channel subscription never sees. Held so
-   * `leave` can tear it down — an orphaned stream channel keeps the RTM
-   * session alive and the next join then collides with it.
-   */
-  private stream: { leave: () => Promise<unknown> } | null = null;
   private silenceTimer: number | null = null;
   private channel: string | null = null;
   private credentials: BridgeCredentials | null = null;
@@ -68,12 +57,21 @@ export class AgoraBridge {
   readonly skipped: Partial<Record<ForwardDecision, number>> = {};
   forwarded = 0;
 
-  /** Inbound RTM frames of any kind. Zero means Agora is publishing nothing. */
-  rtmFrames = 0;
-  /** Frames that arrived but were not recognisable as transcripts. */
-  unparsed = 0;
 
-  constructor(private readonly events: AgoraBridgeEvents) {}
+  /**
+   * The Conversational AI transcript layer (Agora's official toolkit).
+   * Owns the RTC data-stream feed; this class owns the media session.
+   */
+  private readonly voice: VoiceAgent;
+
+  constructor(private readonly events: AgoraBridgeEvents) {
+    this.voice = new VoiceAgent({
+      onUtterance: (transcript, role) => void this.forwardTranscript(transcript, role),
+      onTranscriptView: () => {},
+      onAgentState: (state) => this.events.onAgentState(state),
+      onError: (detail) => this.events.onError(detail),
+    });
+  }
 
   async join(channel: string, credentials: BridgeCredentials): Promise<void> {
     await this.leave();
@@ -139,22 +137,13 @@ export class AgoraBridge {
       this.silenceTimer = null;
     }
     this.clearAgentTrack();
+    await this.voice.stop();
 
     const mic = this.mic;
     this.mic = null;
     if (mic) {
       mic.stop();
       mic.close();
-    }
-
-    const stream = this.stream;
-    this.stream = null;
-    if (stream) {
-      try {
-        await stream.leave();
-      } catch {
-        // Already gone with the RTM session; nothing to unwind.
-      }
     }
 
     const rtm = this.rtm;
@@ -186,162 +175,40 @@ export class AgoraBridge {
     channel: string,
     credentials: BridgeCredentials,
   ): Promise<void> {
-    const rtm = new RTM(credentials.appId, String(credentials.uid));
-    this.rtm = rtm;
-
-    rtm.addEventListener("message", (event) => {
-      /*
-        EVERY inbound RTM frame is counted, before parsing.
-
-        A live test with real audio produced zero claims, and the existing
-        counters could not distinguish the two very different causes: Agora
-        publishing nothing at all, versus Agora publishing frames this code
-        then discards. Those need opposite fixes, and on a stage you have
-        about ten seconds to tell them apart.
-      */
-      this.rtmFrames += 1;
-      console.info(
-        `[agora rtm] frame ${this.rtmFrames}:`,
-        typeof event.message === "string"
-          ? event.message.slice(0, 200)
-          : event.message,
-      );
-
-      const transcript = parseAgoraTranscript(event.message);
-      if (!transcript) {
-        this.unparsed += 1;
-        return;
-      }
-
-      // Each participant forwards only their OWN speech — see forwardDecision.
-      const decision = forwardDecision(transcript, credentials.uid);
-      if (decision !== "forward") {
-        // Logged rather than dropped silently. If Agora ever stops echoing a
-        // speaker's own transcript back to them, every frame would read
-        // "skip:not-mine" and the Slow Loop would go quiet with no other
-        // symptom — this line is what makes that diagnosable in seconds
-        // instead of during a demo.
-        this.skipped[decision] = (this.skipped[decision] ?? 0) + 1;
-        return;
-      }
-
-      void this.forwardTranscript(transcript, credentials.role);
-    });
-
-    await rtm.login({ token: credentials.rtmToken });
-    await rtm.subscribe(channel, { withMessage: true });
-    // Said out loud because "subscribed but silent" and "never subscribed"
-    // look identical from the dashboard, and only one of them is a bug here.
-    console.info(`[agora rtm] subscribed to MESSAGE channel ${channel} as uid ${credentials.uid}`);
-
     /*
-      ── THE STREAM CHANNEL, AND WHY THE MESSAGE CHANNEL WAS NOT ENOUGH ──────
-      RTM 2.x has two kinds of channel. `subscribe()` above joins a MESSAGE
-      channel — plain pub/sub. Agora's Conversational AI Engine publishes
-      transcripts to a STREAM channel TOPIC instead, and a message-channel
-      subscription is simply never shown those frames.
+      ── RTM IS OPTIONAL HERE, AND THAT WAS THE WHOLE BUG ────────────────────
+      This method used to subscribe to an RTM message channel and parse
+      transcript frames by hand. It received nothing, ever — proven by feeding
+      Chrome a real WAV as a microphone and watching sixty seconds of speech
+      produce zero frames while the dashboard filled happily from injected
+      text.
 
-      That is the shape of the failure measured on Aug 31: RTM logged in,
-      `subscribe` resolved without error, sixty seconds of real audio played
-      into the channel, and ZERO frames arrived. Nothing was broken in the
-      sense of throwing — we were listening to the wrong kind of channel.
+      Conversational AI transcripts travel on the RTC DATA STREAM, not RTM.
+      Agora's own toolkit says so plainly: "when absent, the toolkit operates
+      on RTC stream-messages only." RTM adds agent state, interrupts and text
+      injection on top — useful, but not the transcript feed.
 
-      TOPICS ARE DISCOVERED, NOT GUESSED. The engine's topic name is a vendor
-      detail that has already cost hours of guessing, so instead of hardcoding
-      one, this joins the stream channel and subscribes to whatever topics
-      actually show up. If Agora renames it, this keeps working; if Agora
-      publishes nothing, the log says so in as many words rather than leaving
-      another silent gap.
+      So the RTM client is now built for those extras and passed to the
+      toolkit, and losing it degrades the experience rather than silencing it.
     */
+    let rtmClient: RTMClient | undefined;
+
     try {
-      const stream = rtm.createStreamChannel(channel);
-      this.stream = stream;
-
-      /*
-        THE RTC TOKEN, NOT THE RTM ONE — and the error that proves it is:
-
-            CAN_NOT_GET_GATEWAY_SERVER … Error Code -10005: Invalid token
-
-        A stream channel is backed by the RTC gateway rather than the RTM
-        message bus, so it is authorised by an RTC token minted for THIS
-        channel and THIS uid. Logging the client in with the RTM token is
-        necessary but not sufficient, and the failure names the gateway rather
-        than the token, which sends you looking in the wrong place.
-      */
-      await stream.join({ token: credentials.rtcToken, withPresence: true });
-      console.info(`[agora rtm] joined STREAM channel ${channel}`);
-
-      const subscribed = new Set<string>();
-      const subscribeTo = async (topicName: string) => {
-        if (!topicName || subscribed.has(topicName)) return;
-        subscribed.add(topicName);
-        try {
-          await stream.subscribeTopic(topicName);
-          console.info(`[agora rtm] subscribed to topic "${topicName}"`);
-        } catch (error) {
-          subscribed.delete(topicName);
-          console.warn(`[agora rtm] could not subscribe to "${topicName}"`, error);
-        }
-      };
-
-      // Anyone joining a topic reveals its name — including the agent, which
-      // starts publishing the moment it has something to say. The event
-      // carries `topicInfos[]` rather than a single name: one event can
-      // announce several topics, and the snapshot on join announces all of
-      // them at once.
-      rtm.addEventListener("topic", (event) => {
-        console.info(
-          `[agora rtm] topic event ${event.eventType} from ${event.publisher}:`,
-          (event.topicInfos ?? []).map((t) => t.topicName).join(", ") || "(none)",
-        );
-        for (const info of event.topicInfos ?? []) {
-          void subscribeTo(info.topicName);
-        }
-      });
-
-      // The names Agora's engine is documented to use, tried up front so a
-      // transcript that starts before any topic event still lands. Failures
-      // here are expected and harmless — a topic that does not exist simply
-      // does not subscribe.
-      for (const candidate of ["chat", "subtitle", "transcription", "message"]) {
-        void subscribeTo(candidate);
-      }
+      const rtm = new RTM(credentials.appId, String(credentials.uid));
+      this.rtm = rtm;
+      await rtm.login({ token: credentials.rtmToken });
+      await rtm.subscribe(channel);
+      rtmClient = rtm;
+      console.info(`[agora rtm] subscribed to ${channel} as uid ${credentials.uid}`);
     } catch (error) {
-      /*
-        ── THE ROOT CAUSE OF "SPEECH DOES NOTHING", TRACED Sep 1 ─────────────
-        Losing the stream channel costs transcripts, not the dashboard — the
-        Slow Loop keeps working on whatever is already in the Ledger. But the
-        two failures that land here mean completely different things, and the
-        generic message sent an investigation in the wrong direction twice:
-
-          -10005  Invalid token / CAN_NOT_GET_GATEWAY_SERVER
-                  The RTM token was passed to a stream-channel join. A stream
-                  channel is backed by the RTC gateway and needs the RTC
-                  token, which is why the error names a gateway.
-
-          -11012  DATASTREAM2_NOT_AVAILABLE
-                  NOT A CODE PROBLEM. Stream Channel is not enabled on the
-                  Agora project. The Conversational AI Engine then has nowhere
-                  to publish transcripts, so speech reaches the channel, Agora
-                  transcribes it for its own turn-taking, and the console
-                  never sees a word. Enable it in the Agora Console under the
-                  project's Real-Time Messaging configuration.
-
-        Named explicitly here because the symptom — a live bridge that fills
-        with nothing — is identical for both, and identical to a dozen other
-        causes.
-      */
-      const detail = message(error);
-      const hint = detail.includes("-11012") || detail.includes("not available for this app id")
-        ? "Stream Channel is not enabled on this Agora project — enable RTM Stream Channel in the Agora Console. Speech will not reach the Ledger until it is."
-        : detail.includes("-10005")
-          ? "The stream channel rejected the token. It needs the RTC token, not the RTM one."
-          : detail;
-
-      console.warn(`[agora rtm] stream channel unavailable — ${hint}`, error);
-      this.events.onError(`NO TRANSCRIPTS — ${hint}`);
+      // Non-fatal by design. Transcripts do not come from here.
+      this.rtm = null;
+      console.warn("[agora rtm] unavailable — continuing without it", error);
     }
+
+    await this.voice.start(this.client!, credentials.uid, credentials.role, rtmClient);
   }
+
 
   private async forwardTranscript(
     transcript: AgoraTranscript,

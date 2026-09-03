@@ -125,6 +125,28 @@ export const serverEnv = {
   get agoraApiBase(): string {
     return optional("AGORA_API_BASE", "https://api.agora.io");
   },
+
+  /**
+   * PUBLIC base URL of the Slow Loop, for Agora's REST tools.
+   *
+   * ── WHY THIS CANNOT DEFAULT TO LOCALHOST ────────────────────────────────
+   * Agora's Conversational AI Engine calls tool endpoints from ITS OWN
+   * servers, not from the browser. `http://127.0.0.1:8000` resolves to
+   * Agora's machine, not ours, so a tool pointed at localhost fails on their
+   * side with nothing visible here.
+   *
+   * Null when unset, and the agent is then created WITHOUT tools rather than
+   * with tools that cannot work. A tool that always fails is worse than no
+   * tool: the model keeps trying it, gets errors, and eventually answers from
+   * its own memory — which is the hallucination this product exists to stop.
+   *
+   * For a local demo, expose the Slow Loop with a tunnel and set this:
+   *     ngrok http 8000   →   AGENT_TOOL_BASE_URL=https://<id>.ngrok-free.app
+   */
+  get agentToolBaseUrl(): string | null {
+    const v = process.env.AGENT_TOOL_BASE_URL?.trim().replace(/\/+$/, "");
+    return v && v !== "" ? v : null;
+  },
 };
 
 /**

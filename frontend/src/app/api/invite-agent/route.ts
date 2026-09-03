@@ -41,7 +41,8 @@ import {
 interface InviteRequest {
   channel?: string;
   /** Public URL Agora calls for tool invocations (v6 §5.2). Optional in S1. */
-  toolWebhookUrl?: string;
+  /** Overrides AGENT_TOOL_BASE_URL for a one-off run. */
+  toolBaseUrl?: string;
 }
 
 export async function POST(request: Request) {
@@ -97,7 +98,9 @@ export async function POST(request: Request) {
               language: serverEnv.sarvamLanguage,
             }),
       },
-      toolWebhookUrl: body.toolWebhookUrl,
+      // Agora calls tools from ITS servers, so this must be publicly
+      // reachable. Null disables tools rather than attaching broken ones.
+      toolBaseUrl: body.toolBaseUrl ?? serverEnv.agentToolBaseUrl,
     });
 
     const url = `${serverEnv.agoraApiBase}/api/conversational-ai-agent/v2/projects/${serverEnv.agoraAppId}/join`;
@@ -188,6 +191,10 @@ export async function POST(request: Request) {
       // registered can be HEARD but will never speak about the incident, and
       // that distinction is impossible to diagnose from the room.
       registeredWithSlowLoop: registered,
+      // Whether Echo can actually READ the Ledger. Without tools it can still
+      // hear and speak, but every factual answer would come from the model's
+      // own memory — so the console needs to know, and say so.
+      toolsEnabled: Boolean(body.toolBaseUrl ?? serverEnv.agentToolBaseUrl),
     });
   } catch (error) {
     if (error instanceof MissingEnvError) {
