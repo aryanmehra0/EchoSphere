@@ -92,13 +92,22 @@ function slowLoopBase(): string {
 export async function registerWithSlowLoop(
   agentId: string,
   channel: string,
+  /**
+   * Whether the agent was created with a reachable Ledger. The Slow Loop says
+   * this out loud when Echo joins, so the room learns what Echo can and cannot
+   * do at the start rather than when someone asks and gets a refusal.
+   */
+  toolsEnabled = false,
 ): Promise<boolean> {
   try {
     const response = await fetch(`${slowLoopBase()}/agent/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId, channel }),
-      signal: AbortSignal.timeout(4000),
+      body: JSON.stringify({ agentId, channel, toolsEnabled }),
+      // Registration now also composes and speaks the join line, which is a
+      // round trip to Agora's TTS — 4s was tight enough to time out on a
+      // healthy path and report Echo as mute when it was merely talking.
+      signal: AbortSignal.timeout(15000),
     });
     return response.ok;
   } catch (error) {

@@ -251,7 +251,29 @@ class SchemaError(ValueError):
     pass
 
 
-def validate_extraction(data: Any) -> dict[str, list[dict[str, Any]]]:
+# Roles that are not roles. §6.2 Rule 1 needs a SOURCE, and the emptiness
+# check below is not enough on its own: asked for a speakerRole it could not
+# determine, the model wrote the literal string "unknown" and the claim sailed
+# through non-empty. The dashboard then showed the demo's headline guess —
+# "Redis might be evicting keys" — attributed to nobody.
+#
+# That is the exact laundering the old comment here said must not happen,
+# performed by the model rather than by us. Naming the placeholders closes it.
+_PLACEHOLDER_ROLE = re.compile(
+    r"^\s*(unknown|unspecified|unattributed|unidentified|n/?a|none|null"
+    r"|speaker|unnamed|someone|anonymous|\?+|-+)\s*$",
+    re.I,
+)
+
+# "[DevOps Lead] Latency is through the roof" — TurnWindow.render()'s shape.
+_WINDOW_SPEAKER = re.compile(r"^\[([^\]]+)\]", re.M)
+
+
+def validate_extraction(
+    data: Any,
+    *,
+    window_text: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     """
     Coerce the model's output into the shape §9.4 promises.
 
@@ -259,6 +281,12 @@ def validate_extraction(data: Any) -> dict[str, list[dict[str, Any]]]:
     yields nothing) and strict about MALFORMED ones. A claim without a
     speakerRole is dropped rather than defaulted, because §6.2 Rule 1 makes an
     unsourced claim unusable — inventing "unknown" would launder that.
+
+    `window_text` recovers the one case where attribution is not a guess: if
+    exactly ONE person spoke in the window, a claim drawn from it can only be
+    theirs. That is a deduction from the transcript, not an invention, and it
+    is what keeps a hedge on the board as a properly sourced open question
+    instead of silently vanishing.
     """
     if not isinstance(data, dict):
         raise SchemaError(f"expected an object, got {type(data).__name__}")
@@ -272,11 +300,26 @@ def validate_extraction(data: Any) -> dict[str, list[dict[str, Any]]]:
             raise SchemaError(f"{key} must be a list, got {type(value).__name__}")
         out[key] = [v for v in value if isinstance(v, dict)]
 
+    # The only speaker a claim could belong to, when there is exactly one.
+    speakers = sorted(set(_WINDOW_SPEAKER.findall(window_text or "")))
+    sole_speaker = speakers[0].strip() if len(speakers) == 1 else None
+
     kept: list[dict[str, Any]] = []
     for claim in out["claims"]:
-        if not str(claim.get("speakerRole", "")).strip():
-            log.warning("extraction: dropped an unsourced claim: %r", claim.get("text"))
-            continue
+        role = str(claim.get("speakerRole", "")).strip()
+        if not role or _PLACEHOLDER_ROLE.match(role):
+            if sole_speaker:
+                log.info(
+                    "extraction: attributed %r to %s — the only speaker in the window",
+                    claim.get("text"), sole_speaker,
+                )
+                claim["speakerRole"] = sole_speaker
+            else:
+                log.warning(
+                    "extraction: dropped an unsourced claim (role=%r): %r",
+                    role, claim.get("text"),
+                )
+                continue
         status = str(claim.get("epistemicStatus", "")).upper()
         if status not in _VALID_STATUS:
             # An unrecognised status is treated as the most cautious option
@@ -649,7 +692,7 @@ async def extract(
     llm = call_llm or groq_json
 
     def _finish(data: Any) -> dict[str, list[dict[str, Any]]]:
-        out = validate_extraction(data)
+        out = validate_extraction(data, window_text=window_text)
         # The model proposes entities; we do the join. See resolve_entities().
         out["claims"] = resolve_entities(
             out["claims"], out["entities"], aliases, window_text=window_text

@@ -147,6 +147,21 @@ export const serverEnv = {
     const v = process.env.AGENT_TOOL_BASE_URL?.trim().replace(/\/+$/, "");
     return v && v !== "" ? v : null;
   },
+
+  /**
+   * Shared secret sent with every tool call, as `X-Echo-Tool-Token`.
+   *
+   * A tunnel does not expose one endpoint — it exposes the whole Slow Loop,
+   * `/incident/reset` and `/bridge/say` included. The backend refuses any
+   * non-local request without this header, so without the secret the tools
+   * would 401 and Echo would be unable to read the Ledger.
+   *
+   * Null when unset. `start.ps1 -Tunnel` generates one and writes both halves.
+   */
+  get agentToolSecret(): string | null {
+    const v = process.env.AGENT_TOOL_SECRET?.trim();
+    return v && v !== "" ? v : null;
+  },
 };
 
 /**

@@ -262,5 +262,85 @@ class TestCompaction(unittest.TestCase):
         self.assertNotIn("transcripts", compact(self.led))
 
 
+# Two speakers in one window: attribution cannot be deduced, so a claim the
+# model failed to attribute must be dropped rather than guessed at.
+TWO_SPEAKERS = """[DevOps Lead] The cache is fine.
+[Support Engineer] Logs show timeouts."""
+
+
+class PlaceholderAttribution(unittest.TestCase):
+    """
+    §6.2 Rule 1 against a model that writes "unknown" rather than leaving the
+    field blank.
+
+    Seen live: the demo's headline guess — "Redis might be evicting keys" —
+    reached the dashboard as an open question attributed to nobody. The
+    emptiness check passed it because "unknown" is a non-empty string, which
+    is precisely the laundering the check exists to stop.
+    """
+
+    CLAIM = {
+        "text": "Redis might be evicting keys",
+        "epistemicStatus": "HYPOTHESIS",
+        "speakerRole": "unknown",
+        "confidence": 0.5,
+    }
+
+    def _claim(self, role: str) -> dict[str, object]:
+        return {**self.CLAIM, "speakerRole": role}
+
+    def test_every_placeholder_is_treated_as_unsourced(self) -> None:
+        two = TWO_SPEAKERS
+        for role in (
+            "unknown", "Unknown", "UNSPECIFIED", "unattributed", "n/a", "N/A",
+            "none", "null", "speaker", "someone", "anonymous", "?", "-", "  ",
+        ):
+            with self.subTest(role=role):
+                out = validate_extraction(
+                    {"claims": [self._claim(role)]}, window_text=two
+                )
+                self.assertEqual(out["claims"], [], f"{role!r} was let through")
+
+    def test_a_sole_speaker_is_a_deduction_not_an_invention(self) -> None:
+        """
+        One person spoke in the window, so a claim drawn from it can only be
+        theirs. This is what keeps the hedge on the board as a properly
+        sourced open question instead of silently vanishing.
+        """
+        one = "[DevOps Lead] Datadog looks like Redis might be evicting keys."
+        out = validate_extraction({"claims": [self._claim("unknown")]}, window_text=one)
+        self.assertEqual(len(out["claims"]), 1)
+        self.assertEqual(out["claims"][0]["speakerRole"], "DevOps Lead")
+
+    def test_two_speakers_means_drop_rather_than_guess(self) -> None:
+        two = TWO_SPEAKERS
+        out = validate_extraction({"claims": [self._claim("unknown")]}, window_text=two)
+        self.assertEqual(out["claims"], [])
+
+    def test_no_window_means_drop(self) -> None:
+        out = validate_extraction({"claims": [self._claim("unknown")]})
+        self.assertEqual(out["claims"], [])
+
+    def test_a_real_role_is_untouched(self) -> None:
+        two = TWO_SPEAKERS
+        out = validate_extraction(
+            {"claims": [self._claim("Support Engineer")]}, window_text=two
+        )
+        self.assertEqual(len(out["claims"]), 1)
+        self.assertEqual(out["claims"][0]["speakerRole"], "Support Engineer")
+
+    def test_a_role_merely_containing_a_placeholder_word_survives(self) -> None:
+        """
+        The match is anchored. "Unknown Systems Lead" is an odd job title, not
+        a missing attribution, and over-matching here would silently delete
+        real claims — a worse failure than the one being fixed.
+        """
+        one = "[Unknown Systems Lead] The cache is fine."
+        out = validate_extraction(
+            {"claims": [self._claim("Unknown Systems Lead")]}, window_text=one
+        )
+        self.assertEqual(len(out["claims"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

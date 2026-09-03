@@ -70,6 +70,58 @@ and do not re-ask.
 - When you interrupt, lead with the conflict, not with an apology.`;
 
 /**
+ * What to append when the agent is created WITHOUT tools.
+ *
+ * ── WHY THIS IS NOT OPTIONAL ────────────────────────────────────────────────
+ * Rule 3 tells the model to answer factual questions by calling
+ * `query_incident_state`. When `AGENT_TOOL_BASE_URL` is unset that tool is not
+ * in the payload at all — so the model is under a hard instruction to use an
+ * instrument it does not have.
+ *
+ * A model in that position does one of two things, and both are bad: it goes
+ * silent (which reads as a broken agent), or it decides the rule cannot have
+ * meant this and answers from memory (which is the unsourced confident answer
+ * this whole product exists to prevent).
+ *
+ * Naming the situation removes the bind. Echo can still hear, still speak,
+ * still take a direct question — it simply says what it cannot do. "I can't
+ * read the record right now" is a true sentence and an acceptable answer;
+ * inventing the record is not.
+ */
+export const NO_TOOLS_ADDENDUM = `
+
+[THE RECORD IS NOT READABLE RIGHT NOW]
+Your query_incident_state tool is unavailable in this session. This does NOT
+relax Rule 3 — it means you cannot satisfy it, so you must say so.
+
+When asked anything factual about this incident:
+  "I can't read the incident record from here, so I won't guess at it.
+   It's on the dashboard."
+Then stop. Do not reconstruct the incident from what you have overheard, and
+do not summarise it. Overhearing is not the record.
+
+You MAY still, without the tool:
+  - answer who and what you are, and what you do
+  - confirm you are listening and recording
+  - repeat back what someone just said, attributed to them, to check it
+  - state that a decision needs dashboard approval
+
+Being unable to answer is not a failure. Answering wrongly is.`;
+
+/**
+ * The system prompt actually sent, given whether tools survived configuration.
+ *
+ * Kept separate from FAST_LOOP_SYSTEM_PROMPT because the test suite asserts
+ * against that constant directly — the epistemic rules must stay greppable and
+ * diffable, not assembled at runtime out of fragments.
+ */
+export function buildSystemPrompt(toolsEnabled: boolean): string {
+  return toolsEnabled
+    ? FAST_LOOP_SYSTEM_PROMPT
+    : FAST_LOOP_SYSTEM_PROMPT + NO_TOOLS_ADDENDUM;
+}
+
+/**
  * Turn detection (v6 Appendix A).
  *
  * `interrupt_duration_ms` was raised from v5's 160ms to 300ms. At 160ms Echo
@@ -428,7 +480,10 @@ const TOOL_ROUTES: Record<string, { path: string; body: Record<string, unknown> 
  * DISABLED. Echo can still hear, speak and be interrupted; it simply cannot
  * read the Ledger, and the console says so rather than letting it improvise.
  */
-export function buildToolsBlock(toolBaseUrl: string | null) {
+export function buildToolsBlock(
+  toolBaseUrl: string | null,
+  toolSecret: string | null = null,
+) {
   if (!toolBaseUrl) return {};
 
   return {
@@ -442,7 +497,13 @@ export function buildToolsBlock(toolBaseUrl: string | null) {
         server: {
           method: "POST",
           url: `${toolBaseUrl}${route.path}`,
-          headers: { "Content-Type": "application/json" },
+          // The token the backend's tunnel gate checks. Without it every
+          // tool call comes back 401 and Echo cannot read the Ledger — which
+          // looks exactly like the model refusing to answer.
+          headers: {
+            "Content-Type": "application/json",
+            ...(toolSecret ? { "X-Echo-Tool-Token": toolSecret } : {}),
+          },
           body: route.body,
           // The Ledger answers in milliseconds; a long timeout here would
           // leave the room in silence waiting on a call that already failed.
@@ -463,9 +524,17 @@ export function buildAgentPayload(params: {
   userUid: number;
   agentRtcToken: string;
   groqApiKey: string;
+  /**
+   * Chosen at invite time by `selectFastLoopModel`, because the daily budget
+   * is per key AND per model and Agora's payload carries only one of each.
+   * Defaults to the primary.
+   */
+  groqModel?: string;
   tts: TtsSettings;
   /** Public base URL of the Slow Loop. Null disables tools — see above. */
   toolBaseUrl?: string | null;
+  /** Shared secret for the backend's tunnel gate. */
+  toolSecret?: string | null;
 }) {
   return {
     name: `echo-${params.channel}`,
@@ -586,7 +655,7 @@ export function buildAgentPayload(params: {
         url: GROQ_CHAT_COMPLETIONS_URL,
         api_key: params.groqApiKey,
         params: {
-          model: FAST_LOOP_MODEL,
+          model: params.groqModel ?? FAST_LOOP_MODEL,
           // Echo's turns are short by design (§14.1 DELIVERY: under 15
           // seconds), and a long ceiling only buys latency on a live bridge.
           max_tokens: 512,
@@ -595,12 +664,40 @@ export function buildAgentPayload(params: {
         style: "openai",
         input_modalities: ["text"],
         system_messages: [
-          { role: "system", content: FAST_LOOP_SYSTEM_PROMPT },
+          {
+            role: "system",
+            content: buildSystemPrompt(Boolean(params.toolBaseUrl)),
+          },
         ],
-        ...buildToolsBlock(params.toolBaseUrl ?? null),
+        ...buildToolsBlock(params.toolBaseUrl ?? null, params.toolSecret ?? null),
         max_history: 32,
+        // Echo's arrival line is composed by the Slow Loop and spoken through
+        // `/speak` (see `utterance.joined`), NOT here. This field makes the
+        // MODEL write the greeting, and the model is the component §6 does
+        // not trust to speak unsupervised.
         greeting_message: "",
-        failure_message: "One moment.",
+        /*
+          ── EMPTY ON PURPOSE, AND IT IS NOT COSMETIC ────────────────────────
+          This was "One moment.", and a live run recorded Echo saying it five
+          times into an otherwise silent channel.
+
+          The cause is the prompt working correctly. Agora's recogniser emits
+          turns for non-speech, so the model is invoked with an empty user
+          message; under "[WHEN TO SPEAK — default is ABSOLUTE SILENCE]" it
+          returns nothing, which is exactly right. Agora reads an empty
+          completion as a failure and speaks this field.
+
+          So the better the model obeys §14.1, the more filler Echo produces —
+          and "No filler. Never 'Got it', 'Sure'" is in the same prompt. On a
+          real bridge an assistant that interjects at every cough gets muted,
+          which ends the demo.
+
+          Empty means a silent turn stays silent. A genuine LLM outage is
+          still visible — `voiceVerified` on the invite response and the
+          pre-flight's "Echo can answer out loud" both report it, and neither
+          requires anyone to notice a phrase in a busy room.
+        */
+        failure_message: "",
       },
       // Echo's voice. MANDATORY in cascaded mode — an agent without a `tts`
       // block is rejected outright with `properties: tts.addon not found`.

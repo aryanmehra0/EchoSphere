@@ -80,7 +80,16 @@ _ATTRIBUTION = re.compile(
 # to prevent.
 _NO_CLAIM = re.compile(
     r"^(filed as|pausing for|nobody has|no one has|i have prepared"
-    r"|off the record|recording resumed|recording paused)",
+    r"|off the record|recording resumed|recording paused"
+    # "Echo is on the bridge" reports Echo's own presence, not the incident's
+    # state, so Rule 1 has no source to demand — the same reasoning that
+    # admits the recording phrases above.
+    #
+    # It is also load-bearing rather than decorative. Echo joined silently for
+    # this project's whole life, and a silent agent is indistinguishable from
+    # a broken one: there was no way to tell, from inside the room, whether it
+    # had joined, whether it could hear, or whether the demo was already over.
+    r"|echo is on the bridge)",
     re.I,
 )
 
@@ -117,6 +126,30 @@ def validate(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Composers
 # ---------------------------------------------------------------------------
+
+def joined(*, can_read_ledger: bool) -> str:
+    """
+    The one line Echo says on joining — proof of life, and nothing more.
+
+    Deliberately not a `greeting_message` on the Agora side. That field makes
+    the Fast Loop MODEL compose the greeting, and the model is the component
+    §6 does not trust; routing it through here means the first thing anyone
+    hears has passed the same gate as every other sentence Echo speaks.
+
+    It states a capability honestly. When the Ledger is unreachable, saying so
+    at the start is worth more than discovering it when someone asks a
+    question mid-incident and gets a refusal.
+    """
+    if can_read_ledger:
+        return validate(
+            "Echo is on the bridge. I am listening and keeping the record. "
+            "Say my name if you need it."
+        )
+    return validate(
+        "Echo is on the bridge. I am listening, but I cannot read the record "
+        "aloud in this session — it is on the dashboard."
+    )
+
 
 def _short_role(role: str) -> str:
     """'DevOps Lead' -> 'DevOps'. Spoken attribution should be brief."""

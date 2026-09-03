@@ -8,7 +8,7 @@
 > **If you are an agent or developer starting a new session: read this file
 > first, then `echosphere_architecture_v6.md`, then `handoff_log.md`.**
 >
-> **Last updated:** August 31, 2026
+> **Last updated:** September 3, 2026
 
 ---
 
@@ -866,6 +866,140 @@ Driving that page headlessly against real Agora:
 channel with every UID resolving to a role. One browser joined, and Echo cannot
 join until `OPENAI_API_KEY` exists. But the token → roster → SD-RTN path is no
 longer theoretical.
+
+---
+
+### Sep 3, 2026 — Echo could speak, but you could not talk to it
+
+The report was "it is not working, and I want the conversational AI agent to
+work properly with proper talking." Both halves turned out to be true, and
+neither was the thing that had been assumed.
+
+**Two false alarms first, because they are the more useful lesson.**
+
+`curl http://localhost:3000/api/health` returned `308` redirecting to itself —
+every route, `/` included, which in a browser is `ERR_TOO_MANY_REDIRECTS`. A
+long theory followed about `next build` having clobbered the dev server's
+`.next` while it ran. It had not. The agent's Bash tool runs behind a sandbox
+proxy (`HTTP_PROXY=127.0.0.1:58080`) that intercepts localhost. From the host,
+`Invoke-WebRequest` returned `200` with every credential present, and always
+had. **The console was never broken.**
+
+Then the join greeting came back from Agora's `/history` reading
+`session â it is on the dashboard` — the classic UTF-8-as-Latin-1 mojibake.
+A fix was written to send ASCII-escaped JSON, complete with a long comment
+explaining a corruption that does not exist. Re-reading the response bytes and
+decoding them explicitly showed a single clean `U+2014`. **PowerShell 5.1's
+`Invoke-RestMethod` decodes as ISO-8859-1 when the response has no `charset`
+in its `Content-Type`.** The fix was reverted, because a change resting on a
+false premise leaves a comment that will mislead the next person.
+
+That is now **four** times in this project a harness has reported a defect
+that was in the harness. §7 of `CLAUDE.md` says do not trust your own harness.
+Extend it: **when a probe reports something surprising, verify the probe before
+believing the finding.** Both of these cost more than the real bug did.
+
+**The real defect.** Echo speaks fine — `/bridge/say` returns 200 in ~720 ms
+and Agora's own `/history` records the assistant turn with
+`start_type: "api_speak"`. What did not work was *conversation*, for two
+reasons that compound:
+
+1. **Echo joined in total silence.** `greeting_message` was `""`, so from
+   inside the room a working agent, a failed invite, a wrong channel and a
+   mute TTS vendor all look identical. All four have happened here.
+
+2. **Tools were disabled, and the prompt did not know.** Agora's Engine calls
+   REST tools from *its own servers*, so with no public URL the agent is
+   created with no tools at all — `toolsEnabled: false`. Echo was then under
+   Rule 3 ("NEVER ANSWER FROM MEMORY, call `query_incident_state`") while
+   holding no such instrument. A model in that bind either goes silent, which
+   reads as broken, or decides the rule cannot have meant this and answers
+   from memory — which is precisely the confident unsourced answer this
+   product exists to prevent.
+
+**What was built.**
+
+| Change | Where |
+|---|---|
+| `joined()` — the join announcement, §6-validated like every other line | `backend/app/utterance.py` |
+| Spoken on registration, best-effort so a hoarse vendor cannot fail the invite | `backend/app/main.py` |
+| `NO_TOOLS_ADDENDUM` — names the situation instead of leaving the model stuck | `frontend/src/lib/server/agent-config.ts` |
+| Tunnel gate: non-local Host must present `AGENT_TOOL_SECRET`, fail-closed | `backend/app/main.py`, `backend/app/config.py` |
+| `X-Echo-Tool-Token` on every REST tool | `frontend/src/lib/server/agent-config.ts` |
+| `start.ps1 -Tunnel` — cloudflared, generates the secret, probes from outside | `start.ps1` |
+| 10 backend + 9 frontend tests pinning all of it | `tests/test_conversation.py`, `tests/agent-tools.test.ts` |
+
+**The greeting is composed by `utterance.joined`, not Agora's
+`greeting_message`.** That field makes the Fast Loop *model* write the
+greeting, and the model is the component §6 does not trust. Routing it through
+the same gate means the first thing anyone hears has passed the same check as
+everything else Echo says. It also states its own capability honestly: without
+the Ledger it says so on arrival rather than refusing twenty minutes later.
+
+**Why the tunnel needs a token.** A tunnel does not expose one endpoint — it
+exposes `/incident/reset`, `/bridge/say` and `/approval/redeem` too. A random
+`trycloudflare.com` hostname is obscurity, not authentication. The gate is
+**fail-closed**: tunnel up and secret unset means every remote request is
+refused, because the alternative is a public unauthenticated way to make Echo
+say things on a live bridge that looks like it is working correctly.
+
+**A test bug worth keeping written down.** The first run of
+`test_conversation.py` failed with `/health` returning 503. The cause was that
+`from app.main import app` sat *inside* the first `mock.patch.dict(os.environ,
+...)` block, so `load_dotenv()` ran within the patch — and restoring on exit
+deleted every credential dotenv had just loaded. The import is now at module
+level with a comment saying why.
+
+**Three more defects the live run exposed, all invisible from the console.**
+
+**1. The demo's headline guess was attributed to nobody.** The board read
+`[GUESS] Redis might be evicting keys — unknown`. `validate_extraction` drops
+claims with an EMPTY `speakerRole`, and its own comment said inventing
+"unknown" would launder an unsourced claim — so the model wrote the literal
+string `"unknown"` and sailed through the non-empty check. Placeholders are
+now named (`unknown`, `n/a`, `none`, `speaker`, `?`, `-`, …). When exactly one
+person spoke in the window the claim is attributed to them, which is a
+deduction from the transcript rather than an invention; otherwise it is
+dropped as before. The match is anchored so "Unknown Systems Lead" survives.
+
+**2. Echo was handed the one Groq key with no budget left.** The Slow Loop
+rotates across every configured key. Agora's create-agent payload carries
+exactly ONE `llm.api_key`, and Agora calls Groq itself, so the Fast Loop
+cannot rotate. Groq's free tier is 200k tokens/day scoped per key AND per
+model, so when the first key's budget went, the dashboard kept filling — and
+Echo answered every turn with Agora's `failure_message`.
+
+The pre-flight said GO throughout, because `/health/model` asks `groq_json`,
+which rotates. **The pre-flight was answering a different question than the
+one that mattered**: "reachable on some key" rather than "reachable on the key
+Agora will be given, reserving what a real turn reserves". A 16-token probe
+fits in budget a 512-token turn does not; measured directly, key #1 was at
+`Used 199806 / Limit 200000`.
+
+`selectFastLoopModel` now probes (key, model) pairs at invite time and hands
+over one that answered. The invite response reports `fastLoop.keyIndex` and
+`voiceVerified` — the index, never the key. `GET /api/health?voice=1` exposes
+the same check, and the pre-flight has an eighth line: **"Echo can answer out
+loud"**. First run after the fix picked `openai/gpt-oss-20b`, correctly
+routing around the exhausted primary.
+
+**3. `failure_message` made Echo blurt at every cough.** One run recorded five
+"One moment."s into an otherwise silent channel. The cause is the prompt
+working: Agora's recogniser emits turns for non-speech, the model is invoked
+with an empty user message, and under "default is ABSOLUTE SILENCE" it
+correctly returns nothing — which Agora reads as a failure. **The better the
+model obeyed §14.1, the more filler it produced.** Now `""`; verified live
+that Agora accepts it and the channel stays silent. A real outage is still
+visible through `voiceVerified` and the pre-flight, neither of which depends
+on someone noticing a phrase in a busy room.
+
+**Still not verified by a human mouth.** Everything up to the microphone is
+proven: ASR runs (`source: "asr"` in Agora's history), tools are reachable
+when the tunnel is up, the LLM is wired to Groq, TTS speaks. Whether a real
+spoken question comes back as a spoken answer needs someone to say it out
+loud — `npm run demo speech`.
+
+**Tests: 191 backend + 118 frontend = 309.**
 
 ---
 

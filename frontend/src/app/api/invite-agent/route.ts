@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { MissingEnvError, serverEnv } from "@/lib/server/env";
 import { agoraAuthHeader, mintTokens } from "@/lib/server/agora-tokens";
 import { buildAgentPayload } from "@/lib/server/agent-config";
+import { selectFastLoopModel } from "@/lib/server/groq-budget";
 import {
   AGENT_UID,
   putEntry,
@@ -100,12 +101,24 @@ export async function POST(request: Request) {
 
     const vendor = serverEnv.ttsVendor;
 
+    /*
+      Ask Groq which key and model can actually answer BEFORE handing one to
+      Agora. Costs one round trip on the happy path; the alternative is an
+      agent that joins, greets, and then says "One moment." to everything
+      because the key it was given has no daily budget left.
+    */
+    const fastLoop = await selectFastLoopModel();
+    if (!fastLoop.verified) {
+      console.warn("[agents] no Groq key answered — Echo will be mute:", fastLoop.detail);
+    }
+
     const payload = buildAgentPayload({
       channel,
       agentUid: AGENT_UID,
       userUid,
       agentRtcToken: agentTokens.rtcToken,
-      groqApiKey: serverEnv.groqApiKey,
+      groqApiKey: fastLoop.apiKey,
+      groqModel: fastLoop.model,
       tts: {
         vendor,
         apiKey: serverEnv.ttsApiKey,
@@ -119,6 +132,7 @@ export async function POST(request: Request) {
       // Agora calls tools from ITS servers, so this must be publicly
       // reachable. Null disables tools rather than attaching broken ones.
       toolBaseUrl: body.toolBaseUrl ?? serverEnv.agentToolBaseUrl,
+      toolSecret: serverEnv.agentToolSecret,
     });
 
     const url = `${serverEnv.agoraApiBase}/api/conversational-ai-agent/v2/projects/${serverEnv.agoraAppId}/join`;
@@ -198,7 +212,10 @@ export async function POST(request: Request) {
         expiresAt: agentTokens.expiresAt,
       });
     }
-    const registered = agentId ? await registerWithSlowLoop(agentId, channel) : false;
+    const toolsEnabled = Boolean(body.toolBaseUrl ?? serverEnv.agentToolBaseUrl);
+    const registered = agentId
+      ? await registerWithSlowLoop(agentId, channel, toolsEnabled)
+      : false;
 
     return NextResponse.json({
       agentId,
@@ -212,7 +229,23 @@ export async function POST(request: Request) {
       // Whether Echo can actually READ the Ledger. Without tools it can still
       // hear and speak, but every factual answer would come from the model's
       // own memory — so the console needs to know, and say so.
-      toolsEnabled: Boolean(body.toolBaseUrl ?? serverEnv.agentToolBaseUrl),
+      toolsEnabled,
+      /*
+        Which key and model Agora was actually given, and whether either could
+        answer. NEVER the key itself — the index is what makes a report
+        actionable without putting a credential in an HTTP response.
+
+        `voiceVerified: false` is the state that used to be invisible: Echo
+        joins, greets, and then answers every question with Agora's
+        `failure_message` because the key it was handed has no daily budget
+        left. The Slow Loop rotates past that; the Fast Loop cannot.
+      */
+      fastLoop: {
+        model: fastLoop.model,
+        keyIndex: fastLoop.keyIndex,
+        voiceVerified: fastLoop.verified,
+        ...(fastLoop.detail ? { detail: fastLoop.detail } : {}),
+      },
     });
   } catch (error) {
     if (error instanceof MissingEnvError) {

@@ -157,3 +157,26 @@ def credential_status() -> dict[str, bool]:
         "AGORA_CUSTOMER_SECRET": present("AGORA_CUSTOMER_SECRET"),
         "GROQ_API_KEY": present("GROQ_API_KEY"),
     }
+
+
+def tool_secret() -> str:
+    """
+    Shared secret for tool calls that arrive from outside this machine.
+
+    ── WHY THIS EXISTS ─────────────────────────────────────────────────────
+    Agora's Conversational AI Engine calls our REST tools from ITS servers,
+    not from the browser. So for `query_incident_state` to work at all, the
+    Slow Loop has to be reachable from the public internet — in development,
+    through a tunnel.
+
+    That tunnel does not expose one endpoint. It exposes the whole service,
+    including `/incident/reset`, `/bridge/say` and `/approval/redeem`. A
+    random tunnel hostname is obscurity, not security, and this project's
+    own trust-zone rule (Zone 3 holds the analytical keys) does not survive
+    "anyone who guesses the URL can make Echo say anything".
+
+    So: requests arriving with a non-local Host must carry this token.
+    Requests from localhost are unaffected, which is why the dashboard and
+    the Rehearsal Rig keep working exactly as before.
+    """
+    return _optional("AGENT_TOOL_SECRET", "")

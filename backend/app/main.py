@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -53,6 +54,7 @@ from .utterance import (
     EpistemicViolation,
     close_out,
     contradiction_intervention,
+    joined,
     tension_intervention,
 )
 
@@ -123,6 +125,55 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
+# The tunnel gate
+# ---------------------------------------------------------------------------
+#
+# Agora's Engine calls our REST tools from its own servers, so the Slow Loop
+# must be publicly reachable for `query_incident_state` to work. A tunnel does
+# that — and in doing so exposes `/incident/reset`, `/bridge/say` and
+# `/approval/redeem` to anyone who learns the hostname.
+#
+# So anything arriving on a non-local Host must present AGENT_TOOL_SECRET.
+# Local traffic is untouched: the dashboard, the demo script and all three
+# Rehearsal Rig tiers behave exactly as they did before this existed.
+#
+# Fail-closed on purpose. If the tunnel is up and the secret is NOT set, every
+# remote request is refused rather than served — the alternative is a public,
+# unauthenticated control surface that looks like it is working.
+
+def _is_local(host: str) -> bool:
+    return host.split(":")[0].strip("[]").lower() in ("127.0.0.1", "localhost", "::1")
+
+
+@app.middleware("http")
+async def tunnel_gate(request: Request, call_next):  # type: ignore[no-untyped-def]
+    host = request.headers.get("host", "")
+    if _is_local(host):
+        return await call_next(request)
+
+    # Health is the one thing a tunnel may answer unauthenticated: it reports
+    # presence, never values, and being able to check "is the tunnel live?"
+    # without a token is worth more than hiding it.
+    if request.url.path in ("/health", "/"):
+        return await call_next(request)
+
+    secret = config.tool_secret()
+    if not secret:
+        log.warning("refused remote %s %s — AGENT_TOOL_SECRET is not set", request.method, host)
+        return JSONResponse(
+            {"error": "This service is not configured to accept remote requests."},
+            status_code=503,
+        )
+
+    presented = request.headers.get("x-echo-tool-token", "")
+    if not secrets.compare_digest(presented, secret):
+        log.warning("refused remote %s %s — bad or missing tool token", request.method, host)
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
@@ -177,7 +228,30 @@ async def register_agent(body: dict[str, Any]) -> dict[str, Any]:
     _agent["agent_id"] = agent_id
     _agent["channel"] = channel
     log.info("agent registered: %s on %s", agent_id, channel)
-    return {"ok": True, "agent": _agent}
+
+    # ── PROOF OF LIFE ──────────────────────────────────────────────────────
+    # Echo used to join in complete silence. From inside the room that is
+    # indistinguishable from a broken agent, a wrong channel, a failed invite
+    # or a mute TTS vendor — all four of which have happened here, and none of
+    # which announce themselves. One spoken line separates them instantly.
+    #
+    # Composed by `utterance.joined` rather than Agora's `greeting_message`
+    # so it passes the same §6 gate as every other sentence Echo speaks; the
+    # model never gets to write the first thing anyone hears.
+    #
+    # Best-effort: a greeting that fails must not fail the registration, or a
+    # hoarse TTS vendor would take the whole bridge down with it.
+    greeting = None
+    try:
+        line = joined(can_read_ledger=bool(body.get("toolsEnabled")))
+        async with BridgeController(channel, agent_id, client=_http) as br:
+            result = await br.speak_now(line)
+        greeting = {"spoken": bool(result and result.ok), "text": line}
+    except Exception as exc:  # noqa: BLE001 — never block registration
+        log.warning("greeting failed (agent is registered regardless): %s", exc)
+        greeting = {"spoken": False, "error": str(exc)}
+
+    return {"ok": True, "agent": _agent, "greeting": greeting}
 
 
 @app.post("/agent/unregister")

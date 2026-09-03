@@ -43,6 +43,19 @@ report `ready: true`. The pipeline runs end to end and is screenshotted.
 - **Fast Loop is CASCADED, not audio-to-audio.** No OpenAI key was obtainable,
   so it is Agora ASR → **Groq** (`openai/gpt-oss-120b`) → TTS vendor. §12.1's
   latency budget therefore does not apply.
+- **Echo announces itself on joining** (`utterance.joined`), and the line is
+  §6-validated like every other. Not Agora's `greeting_message` — that field
+  makes the *model* write it, and the model is what §6 does not trust.
+- **`.\start.ps1 -Tunnel` is what makes Echo conversational.** Agora calls
+  REST tools from its own servers, so without a public URL the agent is created
+  with **no tools** and Echo cannot answer anything (Rule 3 forbids memory).
+  The tunnel exposes the whole Slow Loop, so a non-local Host must present
+  `AGENT_TOOL_SECRET` — fail-closed.
+- ⚠️ **Verify the probe before believing the finding.** Rule 7 says don't trust
+  your own harness; four times now the "defect" was in the tool. Bash `curl`
+  here goes through a sandbox proxy that 308s localhost. PowerShell 5.1's
+  `Invoke-RestMethod` decodes responses as ISO-8859-1 when `Content-Type`
+  carries no `charset`, which manufactures convincing UTF-8 mojibake.
 - ⚠️ **Agora does not validate `tts.params`.** A wrong param name still returns
   `200 RUNNING`, and Echo then joins and never speaks, with no error anywhere.
   ElevenLabs reads `key`; Sarvam reads `api_subscription_key`. If Echo is
@@ -52,7 +65,10 @@ report `ready: true`. The pipeline runs end to end and is screenshotted.
 
 ## Commands
 
-```bash
+```powershell
+# From the repo root — PowerShell 5.1 has NO `&&`; it is a parse error.
+.\start.ps1 -Tunnel -Reset   # everything, including Echo's tools
+
 cd frontend
 npm run verify    # typecheck → lint → tests → build   ← the gate
 npm run test      # Rehearsal Rig Tier 1
@@ -62,7 +78,7 @@ npm run spike     # S0 Bridge Spike (needs credentials)
 
 ```bash
 cd backend
-.venv/Scripts/python -m unittest discover -s tests -t .   # 155 tests
+.venv/Scripts/python -m unittest discover -s tests -t .   # 191 tests
 .venv/Scripts/python -m uvicorn app.main:app --port 8000  # the Slow Loop
 .venv/Scripts/python -m rig.tier2 --runs 5 --scenario full-demo
 .venv/Scripts/python -m rig.tier3 --runs 3   # ← the S6 gate, needs the server up

@@ -30,12 +30,27 @@ Two consequences of taking that seriously:
 From the repository root, in **PowerShell**:
 
 ```powershell
-.\start.ps1
+.\start.ps1            # console + Slow Loop
+.\start.ps1 -Tunnel    # ...and let Echo answer questions
 ```
 
 It starts both services, waits until each genuinely answers, and runs the
 pre-flight. Then open **http://localhost:3000**, press **`J`**, and run
-`npm run demo feed` from `frontend/`.
+`npm run demo feed` from `frontend/`. Echo announces itself out loud on
+joining — that greeting is your proof the voice path is live.
+
+**`-Tunnel` is what makes Echo conversational.** Agora's Engine calls tool
+endpoints from *its own servers*, so `127.0.0.1` is unreachable and without a
+public URL the agent is created with no tools at all. Echo can then hear and
+speak but has nothing it is permitted to say about the incident, because Rule 3
+forbids answering from memory. With the tunnel, "Echo, what do we know so far?"
+performs a real read against the same Ledger the dashboard renders from.
+
+The tunnel exposes the Slow Loop publicly for as long as it runs. The script
+generates `AGENT_TOOL_SECRET`, and the backend refuses any non-local request
+that does not present it — fail-closed, so a tunnel with no secret serves
+nothing rather than serving everything. Close it when you are done:
+`Get-Process cloudflared | Stop-Process`.
 
 > **Windows note.** Do not chain these with `&&`. Windows PowerShell 5.1 has
 > no `&&` operator and treats it as a *parse error* — the command does not run
@@ -131,10 +146,10 @@ Two traps that have each cost hours here:
 
 ```powershell
 cd frontend
-npm run verify        # typecheck -> lint -> 106 tests -> build
+npm run verify        # typecheck -> lint -> 118 tests -> build
 
 cd ..\backend
-.\.venv\Scripts\python -m unittest discover -s tests -t .    # 175 tests
+.\.venv\Scripts\python -m unittest discover -s tests -t .    # 191 tests
 ```
 
 **No slot is done until `npm run verify` passes.** And a green build says

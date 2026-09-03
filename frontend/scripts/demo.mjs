@@ -73,8 +73,9 @@ async function preflight() {
     if (!ok && fatal) problems.push(label);
   };
 
-  // 1 — the console
-  const web = await get(`${WEB}/api/health`);
+  // 1 — the console. `?voice=1` also asks whether the key Agora will be
+  // handed can answer; see check 8.
+  const web = await get(`${WEB}/api/health?voice=1`, 45000);
   say(web?.ready === true, "console is up and has its credentials",
       web ? (web.missing?.length ? `missing: ${web.missing.join(", ")}` : "") : `no response from ${WEB}`);
 
@@ -134,6 +135,30 @@ async function preflight() {
       // so the warning says how much rope is left rather than just "tight".
       console.log(d(`      ${dead.length} model(s) exhausted across all keys`));
     }
+  }
+
+  /*
+    8 — can ECHO answer, as opposed to the dashboard?
+
+    These are different questions and they came apart live on Sep 3. Check 7
+    asks the Slow Loop, which ROTATES across every Groq key, so it reports
+    "budget available" whenever any key has some. Agora's payload carries
+    exactly ONE key, and the Fast Loop cannot rotate — so with the first key
+    spent, the dashboard kept filling while Echo answered every spoken turn
+    with Agora's `failure_message`, and the pre-flight printed GO.
+
+    This asks with the key Agora will actually be given, reserving what a real
+    turn reserves. The invite picks a working pair now, so this is usually
+    informational — but if NOTHING answers, the demo's voice half is gone and
+    that has to be known beforehand.
+  */
+  const fastLoop = web?.fastLoop;
+  if (!fastLoop) {
+    say(false, "Echo's own model budget", "console did not report it", false);
+  } else {
+    const which = `${fastLoop.model} on key #${fastLoop.keyIndex}`;
+    say(fastLoop.voiceVerified === true, "Echo can answer out loud",
+        fastLoop.voiceVerified ? which : (fastLoop.detail ?? "no key answered"));
   }
 
   console.log("");

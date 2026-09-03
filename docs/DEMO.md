@@ -52,13 +52,42 @@ speech recognition having a good day.
 From the repository root, in **PowerShell**:
 
 ```powershell
-.\start.ps1 -Reset
+.\start.ps1 -Tunnel -Reset
 ```
 
-That starts both services, waits until each genuinely answers, clears the
-board, and runs the pre-flight. It exists because the two-terminal version was
-written with `&&`, which Windows PowerShell 5.1 treats as a **parse error** —
-the command does not run and does not say why, ninety seconds before a demo.
+That starts both services, waits until each genuinely answers, opens a tunnel
+so Echo can read the Ledger, clears the board, and runs the pre-flight. It
+exists because the two-terminal version was written with `&&`, which Windows
+PowerShell 5.1 treats as a **parse error** — the command does not run and does
+not say why, ninety seconds before a demo.
+
+### What `-Tunnel` is for, and why it is not optional for a conversation
+
+Agora's Conversational AI Engine calls tool endpoints **from its own servers**.
+`http://127.0.0.1:8000` resolves to Agora's machine, not yours, so without a
+public URL the agent is created with **no tools** — and Echo, under a hard rule
+never to answer from memory, has nothing it is permitted to say about the
+incident. It hears you, it can speak, and every factual question gets "I can't
+read the incident record from here."
+
+With the tunnel, `query_incident_state` works: ask Echo what is happening and
+it performs an HTTP call against the same Ledger the dashboard renders from.
+That is the difference between an agent that talks and one you can hold a
+conversation with.
+
+Two things worth knowing before you run it:
+
+- **It exposes the Slow Loop to the public internet** for as long as it runs.
+  The script generates `AGENT_TOOL_SECRET` and the backend refuses any
+  non-local request that does not present it — but the tunnel is real, so
+  close it when you are done (`Get-Process cloudflared | Stop-Process`).
+- **The URL changes every run**, so the script rewrites `frontend/.env.local`
+  and restarts both services each time. That is why `-Tunnel` takes about
+  twenty seconds longer than a plain start.
+
+Without it, everything else in this runbook still works — Echo greets the
+room, extracts claims, adjudicates contradictions and speaks them aloud. Only
+*asking Echo questions* is missing.
 
 Doing it by hand instead, two terminals:
 
@@ -82,9 +111,32 @@ npm run demo           # pre-flight — must print GO
 ### The demo, about two minutes
 
 1. Open `http://localhost:3000`, press **`J`**. Echo is invited into the
-   channel automatically. Wait for the status bar to read **LIVE DATA**.
+   channel automatically, and **announces itself out loud** — "Echo is on the
+   bridge. I am listening and keeping the record." That line is your proof the
+   whole voice path is live before you have staked anything on it. Wait for the
+   status bar to read **LIVE DATA**.
 2. Run `npm run demo feed`. Four utterances arrive at conversational pace.
 3. Talk over it — the script below.
+
+### Asking Echo a question *(needs `-Tunnel`, and it is the moment that lands)*
+
+After the feed has run, say into your microphone:
+
+> **"Echo, what do we know so far?"**
+
+It calls `query_incident_state` and answers from the Ledger — attributed, and
+with the guess still filed as a guess. Then push on it:
+
+> **"Echo, is Redis the cause?"**
+
+It will not say yes. It cannot: Rule 2 is enforced in `utterance.py` and in the
+Panel's tripwire, not merely requested in a prompt. That refusal, live, in
+front of someone trying to make it diagnose, is the strongest thirty seconds
+you have.
+
+If the answer comes back "I can't read the incident record from here", the
+tunnel is not up. That sentence is deliberate — Echo tells you what it cannot
+do rather than inventing an answer.
 
 ### Afterwards
 
