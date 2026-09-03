@@ -298,6 +298,8 @@ describe("Agent configuration", () => {
     buildAgentPayload({
       channel,
       agentUid: AGENT_UID,
+      // Agora subscribes to exactly one participant; there is no wildcard.
+      userUid: 1001,
       agentRtcToken: "fake-token",
       groqApiKey: "gsk-test",
       tts: { vendor: "elevenlabs", apiKey: "el-test" },
@@ -376,6 +378,26 @@ describe("Agent configuration", () => {
     );
   });
 
+  test("the agent subscribes to a REAL uid — \"*\" is not a wildcard", () => {
+    /*
+      The most expensive bug in this project, pinned.
+
+      `remote_rtc_uids` was `["*"]`, with a comment claiming it meant everyone.
+      The schema says otherwise: "A list of user IDs that the agent subscribes
+      to in the channel. Only subscribed users can interact with the agent.
+      Currently, only one user ID is supported."
+
+      So `"*"` was read as a participant literally named `*`. Nobody is. The
+      agent subscribed to no one, joined, sat in the channel hearing silence,
+      and produced no transcripts for days — while the create call returned
+      200 throughout, because the value is well-formed and simply matches
+      nothing.
+    */
+    const uids = samplePayload("c").properties.remote_rtc_uids;
+    assert.deepEqual(uids, ["1001"], "the agent must subscribe to a real uid");
+    assert.ok(!uids.includes("*"), '"*" is a user id, not a wildcard');
+  });
+
   test("ASR names a vendor — without one Agora runs no recogniser at all", () => {
     /*
       The regression this pins is the one that made the product deaf.
@@ -437,6 +459,7 @@ describe("TTS config — the one thing Agora will NOT catch for us", () => {
     const payload = buildAgentPayload({
       channel: "c",
       agentUid: AGENT_UID,
+      userUid: 1001,
       agentRtcToken: "t",
       groqApiKey: "gsk-test",
       tts: { vendor: "elevenlabs", apiKey: "el-test" },

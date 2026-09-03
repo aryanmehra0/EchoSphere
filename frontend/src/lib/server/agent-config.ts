@@ -456,6 +456,11 @@ export function buildToolsBlock(toolBaseUrl: string | null) {
 export function buildAgentPayload(params: {
   channel: string;
   agentUid: number;
+  /**
+   * The human the agent subscribes to. Agora supports exactly one — see
+   * `remote_rtc_uids` below, and do not pass a wildcard.
+   */
+  userUid: number;
   agentRtcToken: string;
   groqApiKey: string;
   tts: TtsSettings;
@@ -468,9 +473,31 @@ export function buildAgentPayload(params: {
       channel: params.channel,
       token: params.agentRtcToken,
       agent_rtc_uid: String(params.agentUid),
-      // Subscribe to every human on the bridge. "*" rather than an enumerated
-      // list so a late joiner is heard without reconfiguring the agent.
-      remote_rtc_uids: ["*"],
+      /*
+        ── THE AGENT HEARS EXACTLY ONE PERSON, AND "*" IS NOT A WILDCARD ─────
+        This was `["*"]`, with a comment claiming it subscribed to everyone so
+        late joiners would be heard. That is not what the field does. The
+        schema is unambiguous:
+
+          "A list of user IDs that the agent subscribes to in the channel.
+           Only subscribed users can interact with the agent. Currently, only
+           one user ID is supported."
+
+        So `"*"` was read as a user ID literally named `*`, which nobody has.
+        The agent therefore subscribed to NOBODY: it joined, sat in the
+        channel, heard silence, and produced no transcripts — with the create
+        call returning 200 the whole time, because the value is well-formed
+        even though it matches no one.
+
+        ⚠️ ARCHITECTURAL CONSEQUENCE, and it is not a small one. Agora's
+        Conversational AI Engine listens to ONE human. §18's two-machine
+        requirement still holds for the DASHBOARD — both consoles forward
+        their own speech to the Slow Loop over their own RTC connection — but
+        Echo's own ears are on a single participant. Whoever is subscribed
+        here is the person Echo can converse with; the second speaker's words
+        still reach the Ledger, they just do not reach the agent's STT.
+      */
+      remote_rtc_uids: [String(params.userUid)],
       enable_string_uid: false,
       idle_timeout: 300,
       advanced_features: {

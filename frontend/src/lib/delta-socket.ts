@@ -244,20 +244,25 @@ function slowLoopHttpUrl(): string {
  * Idempotent server-side, which matters because §18 puts two humans on two
  * machines and both consoles call this against the same channel.
  */
-export async function inviteAgent(channel: string): Promise<{
+export async function inviteAgent(channel: string, userUid: number): Promise<{
   agentId: string | null;
   reused: boolean;
   registeredWithSlowLoop: boolean;
+  /** Whether Echo can READ the Ledger, or must answer from its own memory. */
+  toolsEnabled: boolean;
 }> {
   const response = await fetch("/api/invite-agent", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel }),
+    // The agent subscribes to exactly one participant, so it has to be told
+    // WHICH one. Without this it heard nobody.
+    body: JSON.stringify({ channel, userUid }),
   });
   const body = (await response.json()) as {
     agentId?: string;
     reused?: boolean;
     registeredWithSlowLoop?: boolean;
+    toolsEnabled?: boolean;
     error?: string;
   };
   if (!response.ok) throw new Error(body.error ?? `Agent invite failed (${response.status})`);
@@ -265,6 +270,7 @@ export async function inviteAgent(channel: string): Promise<{
     agentId: body.agentId ?? null,
     reused: Boolean(body.reused),
     registeredWithSlowLoop: Boolean(body.registeredWithSlowLoop),
+    toolsEnabled: Boolean(body.toolsEnabled),
   };
 }
 

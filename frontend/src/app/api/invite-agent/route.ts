@@ -40,6 +40,12 @@ import {
 
 interface InviteRequest {
   channel?: string;
+  /**
+   * The human the agent subscribes to. Agora supports exactly ONE, so this is
+   * not optional — a missing value used to become `"*"`, which matches no
+   * participant and left the agent deaf.
+   */
+  userUid?: number;
   /** Public URL Agora calls for tool invocations (v6 §5.2). Optional in S1. */
   /** Overrides AGENT_TOOL_BASE_URL for a one-off run. */
   toolBaseUrl?: string;
@@ -56,6 +62,17 @@ export async function POST(request: Request) {
   const channel = body.channel?.trim();
   if (!channel) {
     return NextResponse.json({ error: "channel is required" }, { status: 400 });
+  }
+
+  const userUid = Number(body.userUid);
+  if (!Number.isInteger(userUid) || userUid <= 0) {
+    // Rejected rather than defaulted. The previous default was a wildcard the
+    // API does not support, and it failed by making the agent silently deaf —
+    // the single most expensive bug in this project.
+    return NextResponse.json(
+      { error: "userUid is required — the agent subscribes to exactly one participant" },
+      { status: 400 },
+    );
   }
 
   /*
@@ -86,6 +103,7 @@ export async function POST(request: Request) {
     const payload = buildAgentPayload({
       channel,
       agentUid: AGENT_UID,
+      userUid,
       agentRtcToken: agentTokens.rtcToken,
       groqApiKey: serverEnv.groqApiKey,
       tts: {

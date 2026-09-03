@@ -119,6 +119,19 @@ export class AgoraBridge {
       await client.join(credentials.appId, channel, credentials.rtcToken, credentials.uid);
       this.mic = await AgoraRTC.createMicrophoneAudioTrack();
       await client.publish([this.mic]);
+
+      /*
+        Exposed for diagnostics only, and it earns its place.
+
+        "No transcripts" is ambiguous between a deaf product and a silent
+        microphone, and telling those apart cost days. `getVolumeLevel()` on
+        the local track answers it in one line: zero means nothing was ever
+        transmitted, and no server-side configuration would have helped.
+
+        Read by `npm run demo speech` and the audio harness. Never read by
+        application code — incident state does not come from here.
+      */
+      (window as unknown as { __echoLocalTrack?: unknown }).__echoLocalTrack = this.mic;
       await this.startForwarding(AgoraRTM.RTM, channel, credentials);
       this.events.onAgentState("listening");
     } catch (error) {

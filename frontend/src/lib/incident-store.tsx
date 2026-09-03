@@ -233,16 +233,56 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       simply silent, which is the hardest kind of bug to see.
     */
     joinedChannel.current = cleanChannel;
-    void inviteAgent(cleanChannel)
-      .then(({ agentId, registeredWithSlowLoop }) => {
-        if (!agentId) {
-          console.warn("[bridge] Agora accepted the invite but returned no agent id");
-          return;
-        }
-        if (!registeredWithSlowLoop) {
-          // Echo is audible but will never speak ABOUT the incident. That
-          // distinction is impossible to work out from inside the room, so it
-          // gets said out loud rather than left to be discovered on stage.
+
+    /*
+      ORDER: credentials FIRST, because the invite needs the UID.
+
+      Agora's Conversational AI Engine subscribes to exactly ONE participant
+      (`remote_rtc_uids`, and the schema says "currently, only one user ID is
+      supported"). It therefore has to be told WHICH one, and the UID is
+      allocated by the Roster when the token is minted — so the token call has
+      to happen first.
+
+      This used to fire the invite in parallel with a hardcoded `"*"`, which is
+      not a wildcard: the agent subscribed to a participant named `*`, which
+      nobody is, and heard silence for the entire session.
+
+      §17 still holds. The dashboard is already live by this point — the delta
+      socket opened above — so neither of these calls can take it down, and the
+      invite remains unawaited so a slow Agora cannot stall the join.
+    */
+    try {
+      const credentials = await requestBridgeCredentials(cleanChannel, role);
+
+      void inviteAgent(cleanChannel, credentials.uid)
+        .then(({ agentId, registeredWithSlowLoop, toolsEnabled }) => {
+          if (!agentId) {
+            console.warn("[bridge] Agora accepted the invite but returned no agent id");
+            return;
+          }
+          console.info(
+            `[bridge] Echo joined as ${agentId}, listening to uid ${credentials.uid}` +
+              `${toolsEnabled ? " with Ledger tools" : " WITHOUT tools"}`,
+          );
+          if (!registeredWithSlowLoop) {
+            // Echo is audible but will never speak ABOUT the incident. That
+            // distinction is impossible to work out from inside the room, so
+            // it gets said out loud rather than discovered on stage.
+            dispatch({
+              type: "DELTA",
+              payload: {
+                degraded: {
+                  voice: true,
+                  extraction: false,
+                  model: null,
+                  banner: "ECHO CANNOT SPEAK — the Slow Loop never received the agent id",
+                },
+              },
+            });
+          }
+        })
+        .catch((error) => {
+          console.warn("[bridge] agent invite failed — dashboard is unaffected", error);
           dispatch({
             type: "DELTA",
             payload: {
@@ -250,29 +290,12 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
                 voice: true,
                 extraction: false,
                 model: null,
-                banner: "ECHO CANNOT SPEAK — the Slow Loop never received the agent id",
+                banner: "NO VOICE — Echo could not join the bridge",
               },
             },
           });
-        }
-      })
-      .catch((error) => {
-        console.warn("[bridge] agent invite failed — dashboard is unaffected", error);
-        dispatch({
-          type: "DELTA",
-          payload: {
-            degraded: {
-              voice: true,
-              extraction: false,
-              model: null,
-              banner: "NO VOICE — Echo could not join the bridge",
-            },
-          },
         });
-      });
 
-    try {
-      const credentials = await requestBridgeCredentials(cleanChannel, role);
       await agora.current?.join(cleanChannel, credentials);
     } catch (error) {
       // Voice is gone; the incident record is not. This is the ANALYTICS-ONLY
