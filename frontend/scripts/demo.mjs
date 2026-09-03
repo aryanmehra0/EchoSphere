@@ -7,6 +7,7 @@
  *   npm run demo reset      clean board, stop any stray agent
  *   npm run demo feed       speak Demo Script v2 at conversational pace
  *   npm run demo stop       stop the agent (also happens when you press J to leave)
+ *   npm run demo speech     say a line out loud and watch the Ledger fill
  *
  * ── WHY A SCRIPT AND NOT A CHECKLIST ───────────────────────────────────────
  * Every item checked here is something that has actually gone wrong, and none
@@ -179,7 +180,65 @@ async function stop() {
   return 0;
 }
 
-const COMMANDS = { check: preflight, reset, feed, stop };
+/**
+ * Watch the Ledger while a human talks — the one test that needs a real mouth.
+ *
+ * Everything else here can be driven from a script. This cannot: a synthetic
+ * WAV fed to headless Chrome as a fake microphone never produced a transcript,
+ * and it was never possible to tell whether that meant the product was deaf or
+ * the test rig was mute.
+ *
+ * So this asks for a real voice and reports exactly what arrives, live.
+ */
+async function speech() {
+  const api = await get(`${API}/health`);
+  if (!api?.agent?.agent_id) {
+    console.log(y("\n  Echo is not in the channel."));
+    console.log(d("  Open the console, press J, wait for LIVE DATA, then run this again.\n"));
+    return 1;
+  }
+
+  await post(`${API}/incident/reset`);
+  console.log(`\n  ${b("SPEECH CHECK")}  ${d(api.agent.agent_id)}\n`);
+  console.log("  Say this out loud, into your microphone:\n");
+  console.log(b('    "Everyone on the bridge, we have a spike in 500s on checkout."\n'));
+  console.log(d("  Watching the Ledger for 45 seconds. Ctrl-C to stop.\n"));
+
+  const seen = new Set();
+  let found = 0;
+
+  for (let i = 0; i < 45; i++) {
+    await sleep(1000);
+    const state = await post(`${API}/tools/query_incident_state`, {});
+    const rows = [...(state?.established ?? []), ...(state?.openHypotheses ?? [])];
+
+    for (const row of rows) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      found += 1;
+      console.log(`  ${g("✓")} ${d("[" + row.epistemicStatus + "]")} ${row.text}`);
+      console.log(d(`      — ${row.speakerRole}`));
+    }
+  }
+
+  console.log("");
+  if (found > 0) {
+    console.log(`  ${g(b("THE SPEECH PATH IS REAL"))} — ${found} claim(s) from your voice.\n`);
+    return 0;
+  }
+
+  console.log(`  ${r(b("NOTHING ARRIVED"))} — speech did not reach the Ledger.\n`);
+  console.log(d("  Check, in this order:"));
+  console.log(d("    1. Browser console for [voice-agent] update — zero means Agora"));
+  console.log(d("       published no transcript, so the problem is upstream of us."));
+  console.log(d("    2. Whether the mic is actually capturing (the console says"));
+  console.log(d("       'Microphone open', and mute is the loud red state)."));
+  console.log(d("    3. Conversational AI transcription enablement on the Agora"));
+  console.log(d("       project — the same class of problem as stream channels.\n"));
+  return 1;
+}
+
+const COMMANDS = { check: preflight, reset, feed, stop, speech };
 const cmd = process.argv[2] ?? "check";
 
 if (!COMMANDS[cmd]) {

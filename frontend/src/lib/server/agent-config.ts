@@ -82,12 +82,59 @@ and do not re-ask.
  * reads, so tension and turn-taking cannot disagree about who is speaking.
  */
 export const TURN_DETECTION = {
-  mode: "agora_vad",
-  interrupt_duration_ms: 300,
-  prefix_padding_ms: 800,
-  silence_duration_ms: 640,
-  threshold: 0.5,
+  /*
+    ── THE FLAT SHAPE WAS DEPRECATED, AND IT COST US THE WHOLE SPEECH PATH ────
+    This block used to be:
+
+        { mode: "agora_vad", interrupt_duration_ms, prefix_padding_ms,
+          silence_duration_ms, threshold, language }
+
+    Every one of those keys is wrong on the current API, and the SDK's own
+    schema says so:
+
+      • `mode` accepts ONLY "default". "agora_vad" belongs to `type`, which is
+        marked Deprecated.
+      • `interrupt_mode` and the flat timing keys are Deprecated in favour of
+        `config.start_of_speech` / `config.end_of_speech`.
+
+    An invalid `mode` means the turn-detection block does not apply. No VAD
+    means no start- or end-of-speech, no turn boundaries, and therefore NO
+    TRANSCRIPTS — which is exactly what a real WAV played into the channel
+    produced for days: an agent sitting in the room hearing nothing, with the
+    create call still returning 200 because Agora accepts unknown keys.
+
+    The nested shape below is copied from the official quickstart's managed
+    agent config and checked against
+    `agora_agent/agents/types/start_agents_request_properties_turn_detection*`.
+  */
+  mode: "default",
   language: "en-US",
+  config: {
+    // Sensitivity, 0–1. Lower detects quieter speech; higher ignores it.
+    speech_threshold: 0.5,
+    start_of_speech: {
+      mode: "vad",
+      vad_config: {
+        // 300ms, not v5's 160ms. At 160 Echo barged in on breaths and
+        // back-channel "mm-hm", which reads as a broken, over-eager agent —
+        // and an assistant that interrupts constantly gets muted, which ends
+        // the demo.
+        interrupt_duration_ms: 300,
+        // Audio captured BEFORE the trigger. Without it the first phoneme is
+        // clipped and "Redis" arrives as "edis".
+        prefix_padding_ms: 800,
+      },
+    },
+    end_of_speech: {
+      mode: "vad",
+      vad_config: {
+        // How much silence closes a turn. Extraction batches on whole
+        // sentences (§4.4), so cutting a speaker off mid-thought produces
+        // claims nobody finished making.
+        silence_duration_ms: 640,
+      },
+    },
+  },
 } as const;
 
 /** Action classes for the Proxy Action Layer (v6 §4.5). */
@@ -451,6 +498,8 @@ export function buildAgentPayload(params: {
         `lib/agora/voice-agent.ts`.
       */
       parameters: {
+        // The official quickstart's profile for browser clients.
+        audio_scenario: "chorus",
         data_channel: "rtm",
         enable_metrics: true,
         // Surfaced rather than swallowed: a silent agent is the hardest

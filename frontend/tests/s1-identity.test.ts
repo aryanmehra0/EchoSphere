@@ -237,11 +237,38 @@ describe("Agent configuration", () => {
 
   test("barge-in is 300ms, not v5's 160ms", () => {
     // At 160ms Echo interrupted on breaths and back-channel "mm-hm".
-    assert.equal(TURN_DETECTION.interrupt_duration_ms, 300);
+    assert.equal(
+      TURN_DETECTION.config.start_of_speech.vad_config.interrupt_duration_ms,
+      300,
+    );
   });
 
-  test("VAD is agora_vad, never server_vad", () => {
-    assert.equal(TURN_DETECTION.mode, "agora_vad");
+  test("turn detection uses the CURRENT nested shape, not the deprecated flat one", () => {
+    /*
+      The regression this pins made the product deaf.
+
+      `mode` used to be "agora_vad". The API accepts only "default" there —
+      "agora_vad" belongs to `type`, which is deprecated — and the flat timing
+      keys were deprecated in favour of config.start_of_speech/end_of_speech.
+
+      An invalid mode means turn detection does not apply: no VAD, no turn
+      boundaries, no transcripts. The create call still returns 200, because
+      Agora accepts unknown keys and validates only what it recognises.
+    */
+    assert.equal(TURN_DETECTION.mode, "default", "mode accepts only 'default'");
+    assert.ok(TURN_DETECTION.config, "timing config must be nested under config");
+    assert.equal(TURN_DETECTION.config.start_of_speech.mode, "vad");
+    assert.equal(TURN_DETECTION.config.end_of_speech.mode, "vad");
+    assert.equal(
+      TURN_DETECTION.config.end_of_speech.vad_config.silence_duration_ms,
+      640,
+    );
+
+    // The deprecated flat keys must not come back.
+    const flat = TURN_DETECTION as Record<string, unknown>;
+    for (const key of ["interrupt_duration_ms", "prefix_padding_ms", "silence_duration_ms", "threshold"]) {
+      assert.equal(flat[key], undefined, `deprecated flat key "${key}" is back`);
+    }
   });
 
   test("query_incident_state exists — the channel v5 lacked (G1)", () => {
@@ -284,7 +311,11 @@ describe("Agent configuration", () => {
     assert.equal(payload.properties.agent_rtc_uid, String(AGENT_UID));
     assert.equal(payload.properties.llm.url, GROQ_CHAT_COMPLETIONS_URL);
     assert.equal(payload.properties.llm.model, FAST_LOOP_MODEL);
-    assert.equal(payload.properties.turn_detection.interrupt_duration_ms, 300);
+    assert.equal(
+      payload.properties.turn_detection.config.start_of_speech.vad_config
+        .interrupt_duration_ms,
+      300,
+    );
     assert.equal(payload.properties.llm.tools?.length, AGENT_TOOLS.length);
     assert.match(
       payload.properties.llm.system_messages[0].content,
