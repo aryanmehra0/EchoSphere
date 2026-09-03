@@ -156,5 +156,90 @@ class TunnelGate(unittest.TestCase):
                 self.assertNotIn(r.status_code, (401, 503))
 
 
+class Registration(unittest.TestCase):
+    """
+    Re-registration is expected, and must be safe.
+
+    Zone 2's invite is idempotent per channel, but the agent id lives in THIS
+    process's memory. A backend restart forgets it while Zone 2 still says
+    "already handled" - so without re-registration Echo stayed mute for the
+    rest of the session with no way back short of a new channel. Reported
+    live, along with its twin: the reuse path returned no
+    `registeredWithSlowLoop`, so the console read undefined, took it for
+    false, and raised "ECHO CANNOT SPEAK" over an Echo that was working.
+    """
+
+    def setUp(self) -> None:
+        from app.main import _agent
+
+        self._saved = dict(_agent)
+        _agent["agent_id"] = None
+        _agent["channel"] = None
+
+    def tearDown(self) -> None:
+        from app.main import _agent
+
+        _agent.update(self._saved)
+
+    def _register(self, client: TestClient, **body: object) -> dict:
+        payload = {"agentId": "AGENT-1", "channel": "inc-4417", **body}
+        # TestClient sends `Host: testserver`, which the tunnel gate correctly
+        # treats as remote and refuses. Registration is a local call in real
+        # life - Zone 2 runs on the same machine - so say so.
+        return client.post(
+            "/agent/register", json=payload, headers={"host": "127.0.0.1:8000"}
+        ).json()
+
+    def test_a_new_agent_is_announced(self) -> None:
+        with TestClient(app) as c:
+            with mock.patch("app.main.BridgeController") as bridge:
+                bridge.return_value.__aenter__.return_value.speak = mock.AsyncMock()
+                out = self._register(c)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["agent"]["agent_id"], "AGENT-1")
+
+    def test_registering_the_same_agent_again_does_not_re_announce(self) -> None:
+        """Echo introducing itself on every reload is the filler §14.1 bans."""
+        with TestClient(app) as c:
+            with mock.patch("app.main.BridgeController") as bridge:
+                bridge.return_value.__aenter__.return_value.speak = mock.AsyncMock()
+                self._register(c)
+                again = self._register(c)
+        self.assertFalse(again["greeting"]["spoken"])
+        self.assertEqual(again["greeting"]["reason"], "already registered")
+
+    def test_greet_false_suppresses_the_announcement(self) -> None:
+        """
+        The flag Zone 2 sets on the REUSE path. This process cannot work it
+        out for itself: it holds the id in memory, so after a restart every
+        agent looks new and Echo would greet a room it has been sitting in.
+        """
+        with TestClient(app) as c:
+            with mock.patch("app.main.BridgeController") as bridge:
+                bridge.return_value.__aenter__.return_value.speak = mock.AsyncMock()
+                out = self._register(c, greet=False)
+        self.assertFalse(out["greeting"]["spoken"])
+        self.assertEqual(out["greeting"]["reason"], "not a new session")
+        # Registration itself must still have happened - that is the whole
+        # point of re-registering after a restart.
+        self.assertEqual(out["agent"]["agent_id"], "AGENT-1")
+
+    def test_the_greeting_does_not_interrupt_itself(self) -> None:
+        """
+        `speak`, not `speak_now`. speak_now interrupts before speaking, and a
+        greeting has nothing to pre-empt - it is the first thing said. Live,
+        the interrupt raced its own utterance and Agora recorded the arrival
+        line truncated to the single word "Echo".
+        """
+        with TestClient(app) as c:
+            with mock.patch("app.main.BridgeController") as bridge:
+                entered = bridge.return_value.__aenter__.return_value
+                entered.speak = mock.AsyncMock()
+                entered.speak_now = mock.AsyncMock()
+                self._register(c)
+        entered.speak.assert_awaited()
+        entered.speak_now.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

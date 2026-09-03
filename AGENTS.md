@@ -78,7 +78,7 @@ npm run spike     # S0 Bridge Spike (needs credentials)
 
 ```bash
 cd backend
-.venv/Scripts/python -m unittest discover -s tests -t .   # 191 tests
+.venv/Scripts/python -m unittest discover -s tests -t .   # 195 tests
 .venv/Scripts/python -m uvicorn app.main:app --port 8000  # the Slow Loop
 .venv/Scripts/python -m rig.tier2 --runs 5 --scenario full-demo
 .venv/Scripts/python -m rig.tier3 --runs 3   # ← the S6 gate, needs the server up

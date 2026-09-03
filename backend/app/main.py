@@ -225,9 +225,37 @@ async def register_agent(body: dict[str, Any]) -> dict[str, Any]:
     if not agent_id or not channel:
         return {"error": "agentId and channel are required"}
 
+    # Is this the same agent we already knew about?
+    #
+    # Re-registration is EXPECTED, not an error. Zone 2's invite is idempotent
+    # per channel, so a second console joining - or the same person rejoining
+    # after a reload - reuses the agent and registers it again. It has to:
+    # this process holds the agent id in memory, so a backend restart forgets
+    # it, and without a re-register Echo stays mute forever with no way back
+    # short of a new channel.
+    #
+    # What must NOT repeat is the greeting. Echo announcing itself on every
+    # reload is the "filler" the prompt forbids, and on a live bridge it reads
+    # as a stuck agent.
+    already_known = _agent["agent_id"] == agent_id
+
     _agent["agent_id"] = agent_id
     _agent["channel"] = channel
-    log.info("agent registered: %s on %s", agent_id, channel)
+    log.info(
+        "agent %s: %s on %s",
+        "re-registered" if already_known else "registered", agent_id, channel,
+    )
+
+    # Zone 2 decides whether this arrival deserves an announcement, because
+    # only Zone 2 knows whether it just CREATED the agent or is re-registering
+    # one that already existed. This process cannot tell: it holds the agent id
+    # in memory, so after a restart every agent looks new to it, and Echo would
+    # re-introduce itself to a room it has been sitting in for twenty minutes.
+    wants_greeting = bool(body.get("greet", True))
+
+    if already_known or not wants_greeting:
+        reason = "already registered" if already_known else "not a new session"
+        return {"ok": True, "agent": _agent, "greeting": {"spoken": False, "reason": reason}}
 
     # ── PROOF OF LIFE ──────────────────────────────────────────────────────
     # Echo used to join in complete silence. From inside the room that is
@@ -245,7 +273,11 @@ async def register_agent(body: dict[str, Any]) -> dict[str, Any]:
     try:
         line = joined(can_read_ledger=bool(body.get("toolsEnabled")))
         async with BridgeController(channel, agent_id, client=_http) as br:
-            result = await br.speak_now(line)
+            # `speak`, NOT `speak_now`. speak_now interrupts first, and a
+            # greeting has nothing to pre-empt - it is the first thing said.
+            # The interrupt raced its own utterance and Agora recorded the
+            # arrival line truncated to the single word "Echo".
+            result = await br.speak(line, priority="high", force=True)
         greeting = {"spoken": bool(result and result.ok), "text": line}
     except Exception as exc:  # noqa: BLE001 — never block registration
         log.warning("greeting failed (agent is registered regardless): %s", exc)

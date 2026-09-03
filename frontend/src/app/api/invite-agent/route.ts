@@ -86,12 +86,42 @@ export async function POST(request: Request) {
   */
   const existing = getActiveAgent(channel);
   if (existing) {
+    /*
+      ── RE-REGISTER, EVEN THOUGH THE AGENT ALREADY EXISTS ───────────────────
+      This branch used to return here without telling the Slow Loop anything,
+      and that was two bugs wearing one coat.
+
+      The silent one: this map lives in the Next.js process and the agent id
+      lives in the Python one. Restart Python alone and it has forgotten the
+      id, while this map still says "already handled" — so every rejoin short-
+      circuits here, the Slow Loop never learns the id, and Echo is mute for
+      the rest of the session with no way back except a different channel.
+
+      The loud one: the response carried no `registeredWithSlowLoop`, so the
+      console read `undefined`, took it for false, and raised "ECHO CANNOT
+      SPEAK — the Slow Loop never received the agent id" over an Echo that was
+      working perfectly. Reported live.
+
+      Registering again is cheap and idempotent — the Slow Loop skips the
+      greeting when the id is unchanged, so nobody hears Echo introduce itself
+      twice.
+    */
+    const registered = await registerWithSlowLoop(
+      existing.agentId,
+      channel,
+      Boolean(body.toolBaseUrl ?? serverEnv.agentToolBaseUrl),
+      // Reused, not created: Echo is already in the room and has already said
+      // so. Greeting again on every reload is the filler §14.1 forbids.
+      false,
+    );
     return NextResponse.json({
       agentId: existing.agentId,
       agentUid: AGENT_UID,
       channel,
       expiresAt: existing.expiresAt,
       reused: true,
+      registeredWithSlowLoop: registered,
+      toolsEnabled: Boolean(body.toolBaseUrl ?? serverEnv.agentToolBaseUrl),
     });
   }
 

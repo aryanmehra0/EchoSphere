@@ -1023,13 +1023,45 @@ run to end of line, which is why the file's box-drawing headers were never a
 problem. **Keep string literals in `.ps1` files pure ASCII**; there is now a
 comment in `start.ps1` saying so.
 
+**"ECHO CANNOT SPEAK - the Slow Loop never received the agent id".** Reported
+live, and it was two bugs sharing one missing line. Zone 2's invite is
+idempotent per channel and the reuse branch returned early without registering
+anything.
+
+The loud half: the response carried no `registeredWithSlowLoop`, so the
+console read `undefined`, took it for false, and raised that banner over an
+Echo that was working perfectly.
+
+The silent half is worse. The active-agent map lives in the Next.js process
+and the agent id lives in the Python one. Restart Python alone and it has
+forgotten the id while the map still says "already handled" - so every rejoin
+short-circuits, the Slow Loop never learns the id, and Echo is mute for the
+rest of the session with no cure but a different channel. `start.ps1 -Tunnel`
+restarts both services, so anyone who presses J in that two-second window
+walked straight into it.
+
+The reuse path re-registers now, with three retries over ~3s so a service
+coming back up does not cost the session. Re-registration is safe because the
+greeting is suppressed two ways: the Slow Loop skips it when the id is
+unchanged, and Zone 2 passes `greet: false` on reuse - which the Slow Loop
+cannot decide for itself, since it holds the id in memory and therefore treats
+every agent as new after a restart.
+
+**And the greeting was interrupting itself.** Agora recorded the arrival line
+truncated to the single word "Echo". `speak_now` interrupts before speaking,
+which is right for a contradiction pre-empting the room and wrong for the
+first thing said - there is nothing to pre-empt, so the interrupt raced its
+own utterance. Now plain `speak(force=True)`. Verified across three
+registrations including a mid-test backend restart: greeted exactly once, in
+full.
+
 **Still not verified by a human mouth.** Everything up to the microphone is
 proven: ASR runs (`source: "asr"` in Agora's history), tools are reachable
 when the tunnel is up, the LLM is wired to Groq, TTS speaks. Whether a real
 spoken question comes back as a spoken answer needs someone to say it out
 loud — `npm run demo speech`.
 
-**Tests: 191 backend + 118 frontend = 309.**
+**Tests: 195 backend + 118 frontend = 313.**
 
 ---
 

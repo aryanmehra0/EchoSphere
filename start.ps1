@@ -146,10 +146,32 @@ if ($Tunnel) {
     }
 
     Write-Step "opening a tunnel to the Slow Loop ..."
-    $tlog = Join-Path $env:TEMP "echosphere-cloudflared.log"
-    if (Test-Path $tlog) { Remove-Item $tlog -Force }
 
+    # STOP THE OLD TUNNEL FIRST. Two reasons, and the second is the dangerous
+    # one:
+    #
+    #   1. Windows will not delete a file another process holds open, and with
+    #      $ErrorActionPreference = "Stop" that failure aborted the whole
+    #      script. Reported live: "Cannot remove item ... because it is being
+    #      used by another process".
+    #
+    #   2. Worse, and silent if the delete is merely skipped: the URL scan
+    #      below takes the FIRST match in the log. A log left over from the
+    #      previous run still contains the previous URL, so the script would
+    #      announce "tunnel live" and write a DEAD hostname into .env.local -
+    #      configuring broken tools while reporting success.
     Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+
+    # A fresh log per run, so a stale URL cannot be read even if an old file
+    # survives. Cheaper and more certain than deleting and hoping.
+    $tlog = Join-Path $env:TEMP ("echosphere-cloudflared-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+
+    # Tidy up previous runs, best-effort. A log we cannot delete is harmless
+    # now that the filename is unique, so this must never be fatal.
+    Get-ChildItem -Path $env:TEMP -Filter "echosphere-cloudflared*.log" -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $tlog } |
+        ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
 
     Start-Process -FilePath $cf.Source `
         -ArgumentList "tunnel", "--url", "http://localhost:8000", "--logfile", $tlog `

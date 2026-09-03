@@ -98,22 +98,48 @@ export async function registerWithSlowLoop(
    * do at the start rather than when someone asks and gets a refusal.
    */
   toolsEnabled = false,
+  /**
+   * Whether Echo should announce itself. True only when this call CREATED the
+   * agent — the Slow Loop cannot work that out for itself, because it holds
+   * the agent id in memory and so treats every agent as new after a restart.
+   */
+  greet = true,
 ): Promise<boolean> {
-  try {
-    const response = await fetch(`${slowLoopBase()}/agent/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId, channel, toolsEnabled }),
-      // Registration now also composes and speaks the join line, which is a
-      // round trip to Agora's TTS — 4s was tight enough to time out on a
-      // healthy path and report Echo as mute when it was merely talking.
-      signal: AbortSignal.timeout(15000),
-    });
-    return response.ok;
-  } catch (error) {
-    console.warn("[agents] Slow Loop registration failed — Echo will be mute", error);
-    return false;
+  /*
+    ── RETRIED, BECAUSE ONE MISSED CALL USED TO MUTE ECHO FOR THE SESSION ────
+    Registration happens once, at invite. If it failed there was no second
+    chance: the console showed "ECHO CANNOT SPEAK" and the only cure was to
+    leave and rejoin.
+
+    And the window it can fail in is one people walk straight into. Starting
+    or restarting the tunnel restarts BOTH services, so anyone who presses J
+    in those two seconds gets a connection refused and a permanently silent
+    Echo. Reported live, exactly that way.
+
+    Three attempts over ~3s. Long enough to ride out a service coming back,
+    short enough that nobody is left watching a spinner.
+  */
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(`${slowLoopBase()}/agent/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId, channel, toolsEnabled, greet }),
+        // Registration also composes and speaks the join line, which is a
+        // round trip to Agora's TTS — 4s was tight enough to time out on a
+        // healthy path and report Echo as mute when it was merely talking.
+        signal: AbortSignal.timeout(15000),
+      });
+      if (response.ok) return true;
+      console.warn(`[agents] Slow Loop registration returned ${response.status} (attempt ${attempt}/3)`);
+    } catch (error) {
+      console.warn(`[agents] Slow Loop registration failed (attempt ${attempt}/3)`, error);
+    }
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
   }
+
+  console.warn("[agents] Slow Loop never accepted the agent id — Echo will be mute");
+  return false;
 }
 
 /**

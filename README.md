@@ -149,7 +149,7 @@ cd frontend
 npm run verify        # typecheck -> lint -> 118 tests -> build
 
 cd ..\backend
-.\.venv\Scripts\python -m unittest discover -s tests -t .    # 191 tests
+.\.venv\Scripts\python -m unittest discover -s tests -t .    # 195 tests
 ```
 
 **No slot is done until `npm run verify` passes.** And a green build says
