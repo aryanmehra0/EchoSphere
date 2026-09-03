@@ -65,6 +65,30 @@ SCRIPT = [
 SECRET = "Marcus is being performance managed out on Friday"
 
 
+def _no_split_entities(entities: list[dict]) -> bool:
+    """
+    True when no two entity ids name the same real-world thing.
+
+    Drift is the failure that hurts: contradiction scoping is by entity
+    equality (§7 Stage 0), so "redis" and "redis-primary" as separate ids means
+    the headline conflict is never even considered — silently, with a healthy
+    dashboard.
+
+    Detected by shared head token: `redis` vs `redis-primary` collide,
+    `checkout-service` vs `carts-client` do not.
+    """
+    heads: dict[str, str] = {}
+    for entity in entities:
+        eid = str(entity.get("id") or "")
+        if not eid:
+            continue
+        head = re.split(r"[-_ ]", eid.lower())[0]
+        if head in heads:
+            return False
+        heads[head] = eid
+    return True
+
+
 @dataclass
 class Check:
     name: str
@@ -140,9 +164,21 @@ async def one_run(client: httpx.AsyncClient, *, verbose: bool) -> list[Check]:
               "per-UID attribution collapsed to one speaker"),
 
         # ---- entity resolution --------------------------------------------
+        # DRIFT, not count.
+        #
+        # This used to assert `len(entities) <= 3` and failed a run that
+        # produced redis-primary / checkout-service / datadog-service /
+        # carts-client — four DISTINCT things, correctly separated. Counting
+        # entities measures how much the speakers mentioned, not whether
+        # resolution worked.
+        #
+        # The failure that actually matters is one real thing under two ids
+        # ("redis" and "redis-primary"), because contradiction scoping is by
+        # entity equality: split the entity and the headline conflict silently
+        # never fires. That is what this checks now.
         Check("entities converged (no drift)",
-              0 < len(entities) <= 3,
-              f"got {len(entities)}: {[e.get('id') for e in entities]}"),
+              _no_split_entities(entities),
+              f"same thing under two ids: {[e.get('id') for e in entities]}"),
 
         # ---- requirement 5, the quiet half --------------------------------
         Check("a gap was noticed", len(unchecked) > 0,

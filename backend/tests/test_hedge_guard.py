@@ -148,5 +148,65 @@ class OneAssertionOneRow(unittest.TestCase):
         self.assertEqual(len(out), 2)
 
 
+
+class LedgerDoesNotDoubleCount(unittest.TestCase):
+    """
+    Cross-window duplicates — the half `_dedupe_claims` cannot see.
+
+    Extraction dedupes within ONE window. The same sentence extracted from two
+    overlapping windows produced two Ledger rows, which a Tier 3 run caught
+    only on the third consecutive pass because it depends on where the window
+    boundary happens to fall.
+
+    Double-counting is not cosmetic: the Ledger is what Echo reads aloud and
+    what the contradiction engine scopes over, so a claim recorded twice is a
+    fact that looks corroborated when one person said it once.
+    """
+
+    def setUp(self):
+        from app.ledger import Ledger
+        from app.models import Claim
+
+        self.Claim = Claim
+        self.ledger = Ledger()
+
+    def claim(self, cid, text, role="DevOps Lead", status="OBSERVED", conf=1.0):
+        return self.Claim(
+            id=cid, text=text, entity="redis", epistemic_status=status,
+            speaker_role=role, confidence=conf, at=1,
+        )
+
+    def test_the_same_speaker_saying_it_twice_is_one_row(self):
+        self.ledger.upsert_claim(self.claim("c1", "The cache is fine"))
+        self.ledger.upsert_claim(self.claim("c2", "the cache is fine."))
+        self.assertEqual(len(self.ledger.claims), 1)
+
+    def test_two_speakers_agreeing_is_TWO_rows(self):
+        # Agreement between two people is a finding, and merging it would
+        # erase one person's attribution.
+        self.ledger.upsert_claim(self.claim("c1", "cache read timeouts", role="DevOps Lead"))
+        self.ledger.upsert_claim(self.claim("c2", "cache read timeouts", role="Support Engineer"))
+        self.assertEqual(len(self.ledger.claims), 2)
+
+    def test_a_repeat_cannot_promote_a_guess_to_a_fact(self):
+        self.ledger.upsert_claim(self.claim("c1", "Redis might be evicting keys",
+                                            status="HYPOTHESIS", conf=0.7))
+        self.ledger.upsert_claim(self.claim("c2", "Redis might be evicting keys",
+                                            status="OBSERVED", conf=1.0))
+        kept = next(iter(self.ledger.claims.values()))
+        self.assertEqual(kept.epistemic_status, "HYPOTHESIS")
+        self.assertLessEqual(kept.confidence, 0.7)
+
+    def test_different_claims_are_both_kept(self):
+        self.ledger.upsert_claim(self.claim("c1", "Memory is at 40 percent"))
+        self.ledger.upsert_claim(self.claim("c2", "The cache is fine"))
+        self.assertEqual(len(self.ledger.claims), 2)
+
+    def test_updating_a_known_row_by_id_still_works(self):
+        self.ledger.upsert_claim(self.claim("c1", "Memory is at 40 percent"))
+        self.ledger.upsert_claim(self.claim("c1", "Memory is at 95 percent"))
+        self.assertEqual(len(self.ledger.claims), 1)
+        self.assertIn("95", self.ledger.claims["c1"].text)
+
 if __name__ == "__main__":
     unittest.main()

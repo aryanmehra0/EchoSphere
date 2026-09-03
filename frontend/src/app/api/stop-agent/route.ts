@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { MissingEnvError, serverEnv } from "@/lib/server/env";
 import { agoraAuthHeader } from "@/lib/server/agora-tokens";
-import { forgetAgent } from "@/lib/server/active-agents";
+import { forgetAgent, unregisterWithSlowLoop } from "@/lib/server/active-agents";
 
 /**
  * POST /api/stop-agent — end Echo's session on a channel.
@@ -33,6 +33,12 @@ export async function POST(request: Request) {
   // permanently un-reinvitable agent. Worst case Agora times the orphan out;
   // the alternative is a channel nobody can put an agent back into.
   const agent = forgetAgent(channel);
+
+  // Always tell the Slow Loop, even when Zone 2 had nothing to forget: the
+  // registration outlives this process, so a dev-server restart would
+  // otherwise strand a dead agent id in the Bridge Controller forever.
+  await unregisterWithSlowLoop(channel);
+
   if (!agent) {
     return NextResponse.json({ stopped: false, reason: "no active agent" });
   }

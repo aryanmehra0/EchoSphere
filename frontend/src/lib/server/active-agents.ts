@@ -68,6 +68,13 @@ export function forgetAgent(channel: string): ActiveAgent | null {
   return found;
 }
 
+/** Where Zone 3 lives, as HTTP. */
+function slowLoopBase(): string {
+  return (process.env.NEXT_PUBLIC_SLOW_LOOP_WS ?? "ws://127.0.0.1:8000/ws/deltas")
+    .replace(/^ws/, "http")
+    .replace(/\/ws\/deltas$/, "");
+}
+
 /**
  * Tell the Slow Loop which agent to speak through.
  *
@@ -86,12 +93,8 @@ export async function registerWithSlowLoop(
   agentId: string,
   channel: string,
 ): Promise<boolean> {
-  const base = (process.env.NEXT_PUBLIC_SLOW_LOOP_WS ?? "ws://127.0.0.1:8000/ws/deltas")
-    .replace(/^ws/, "http")
-    .replace(/\/ws\/deltas$/, "");
-
   try {
-    const response = await fetch(`${base}/agent/register`, {
+    const response = await fetch(`${slowLoopBase()}/agent/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agentId, channel }),
@@ -101,5 +104,27 @@ export async function registerWithSlowLoop(
   } catch (error) {
     console.warn("[agents] Slow Loop registration failed — Echo will be mute", error);
     return false;
+  }
+}
+
+/**
+ * The other half of registration, and it is not optional bookkeeping.
+ *
+ * Without it a stopped agent stayed registered, so the Bridge Controller kept
+ * a dead id: `/speak` was issued against an agent that had left, failed, and
+ * raised the degradation banner for a reason invisible from the room. The
+ * pre-flight reported it as a leftover agent that no reset could clear,
+ * because only restarting the backend cleared it.
+ */
+export async function unregisterWithSlowLoop(channel: string): Promise<void> {
+  try {
+    await fetch(`${slowLoopBase()}/agent/unregister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel }),
+      signal: AbortSignal.timeout(4000),
+    });
+  } catch {
+    // Best-effort on the way out; a stale id is corrected by the next invite.
   }
 }

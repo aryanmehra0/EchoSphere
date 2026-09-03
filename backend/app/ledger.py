@@ -11,6 +11,8 @@ the wire answer the same questions the same way.
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass, field
 
 from .models import (
@@ -23,6 +25,20 @@ from .models import (
     Unchecked,
     now_ms,
 )
+
+
+log = logging.getLogger("echo.ledger")
+
+
+def _norm(text: str) -> str:
+    """
+    Normalise a claim for equality.
+
+    Punctuation and casing differ between extraction passes for the same
+    spoken sentence — "The cache is fine" and "the cache is fine." are one
+    claim, and comparing raw strings would keep both.
+    """
+    return re.sub(r"[^a-z0-9 ]+", "", (text or "").lower()).strip()
 
 
 @dataclass
@@ -51,6 +67,45 @@ class Ledger:
     # -- merge -------------------------------------------------------------
 
     def upsert_claim(self, claim: Claim) -> Claim:
+        """
+        Add a claim, unless this speaker already said it.
+
+        ── WHY DEDUPE LIVES HERE AND NOT ONLY IN EXTRACTION ────────────────
+        `extraction._dedupe_claims` collapses one assertion the model emitted
+        twice IN A SINGLE WINDOW. It cannot see the Ledger, so the same
+        sentence extracted from two overlapping windows produced two rows —
+        which a Tier 3 run caught as "duplicate rows in the Ledger" only on
+        the third consecutive pass, because it depends on where the window
+        boundary happens to fall.
+
+        Double-counting is not cosmetic here. The Ledger is what Echo reads
+        aloud and what the contradiction engine scopes over: a claim recorded
+        twice is a fact that looks corroborated when one person said it once.
+
+        Matching is by speaker + normalised text. Two DIFFERENT people saying
+        the same thing is agreement — a finding — and is deliberately kept.
+        """
+        incoming = _norm(claim.text)
+        if incoming:
+            for existing in self.claims.values():
+                if existing.id == claim.id:
+                    break  # a genuine update to a known row
+                if (
+                    existing.speaker_role == claim.speaker_role
+                    and _norm(existing.text) == incoming
+                ):
+                    # Keep the more cautious reading, exactly as the in-window
+                    # dedupe does: a claim recorded once as a fact and once as
+                    # a guess is a guess.
+                    if "HYPOTHESIS" in (existing.epistemic_status, claim.epistemic_status):
+                        existing.epistemic_status = "HYPOTHESIS"
+                        existing.confidence = min(existing.confidence, claim.confidence)
+                    log.info(
+                        "ledger: dropped a repeat of %r from %s",
+                        claim.text[:60], claim.speaker_role,
+                    )
+                    return existing
+
         self.claims[claim.id] = claim
         return claim
 

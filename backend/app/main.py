@@ -169,6 +169,30 @@ async def register_agent(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "agent": _agent}
 
 
+@app.post("/agent/unregister")
+async def unregister_agent(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    Forget the agent — the other half of `/agent/register`.
+
+    Without this, stopping an agent left the Bridge Controller holding a dead
+    id: `/speak` would be issued against an agent that had left the channel,
+    fail, and raise the degradation banner for a reason nobody could see. The
+    pre-flight caught it as "leftover agent from a previous run" that no reset
+    could clear, because only a backend restart cleared it.
+
+    Scoped by channel so a stop on one bridge cannot silence another.
+    """
+    channel = (body.get("channel") or "").strip()
+    if channel and _agent["channel"] not in (None, channel):
+        return {"ok": False, "reason": "different channel", "agent": _agent}
+
+    was = _agent["agent_id"]
+    _agent["agent_id"] = None
+    _agent["channel"] = None
+    log.info("agent unregistered: %s", was or "(none)")
+    return {"ok": True, "was": was}
+
+
 # ---------------------------------------------------------------------------
 # Observer ingress — the adapter seam (v6 §4.3)
 # ---------------------------------------------------------------------------
