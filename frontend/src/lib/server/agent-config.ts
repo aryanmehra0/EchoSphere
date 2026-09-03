@@ -469,6 +469,32 @@ export function buildAgentPayload(params: {
 }) {
   return {
     name: `echo-${params.channel}`,
+
+    /*
+      ── THE FIELD THAT ACTIVATES A MANAGED VENDOR ────────────────────────────
+      A managed provider is NOT selected by its vendor block alone. The SDK
+      composes a top-level `preset` string and sends it as a sibling of
+      `properties` — `agentkit/agent_session.py` builds
+
+          { appid, name, preset, pipeline_id, properties }
+
+      and `presets.py::resolve_session_presets` derives the value. For an
+      `asr` block naming deepgram with NO key, `infer_asr_preset` returns
+      `deepgram_nova_3`, and `strip_inferred_preset_fields` then REMOVES
+      `params.model`, because the preset already carries it.
+
+      We were sending the vendor block with no preset. Agora accepted it — it
+      accepts anything it does not recognise — and never activated the managed
+      recogniser. The agent joined, subscribed to the right participant, heard
+      loud audio, and transcribed none of it.
+
+      Only ASR is preset here. The LLM is Groq under our own key and the TTS
+      is ElevenLabs, and `infer_llm_preset` / `infer_tts_preset` both return
+      null the moment a key is present — a managed preset and a BYOK block are
+      mutually exclusive by construction.
+    */
+    preset: "deepgram_nova_3",
+
     properties: {
       channel: params.channel,
       token: params.agentRtcToken,
@@ -535,18 +561,46 @@ export function buildAgentPayload(params: {
       },
       turn_detection: TURN_DETECTION,
       llm: {
-        // No `vendor` field: this is Agora's CUSTOM LLM path, which is selected
-        // by giving a URL it does not recognise as a first-party vendor. The
-        // endpoint must be OpenAI-chat-completions compatible and support SSE.
+        /*
+          ── THE MODEL GOES IN `params`, NOT AT THE TOP LEVEL ────────────────
+          This block used to carry `model: FAST_LOOP_MODEL` as a sibling of
+          `url`. The SDK's own serialiser
+          (`agentkit/vendors/llm.py::OpenAI.to_config`) shows the wire shape is
+
+              { url, api_key, params: { model, ...}, style, input_modalities }
+
+          — the model lives inside `params`, and there is a `style` field
+          naming the request dialect. A top-level `model` is simply an unknown
+          key, and Agora forwards unknown keys untouched, so the request went
+          to Groq WITHOUT a model. Groq rejects that, the LLM turn never
+          completes, and a pipeline that never completes a turn emits no
+          transcript.
+
+          Which is exactly the shape of the bug: `/bridge/say` kept working
+          throughout, because speaking a supplied line bypasses the LLM
+          entirely. Echo could talk and could not listen.
+
+          `style: "openai"` selects the chat-completions dialect; Groq is
+          OpenAI-compatible, which is why this custom URL works at all.
+        */
         url: GROQ_CHAT_COMPLETIONS_URL,
         api_key: params.groqApiKey,
-        model: FAST_LOOP_MODEL,
+        params: {
+          model: FAST_LOOP_MODEL,
+          // Echo's turns are short by design (§14.1 DELIVERY: under 15
+          // seconds), and a long ceiling only buys latency on a live bridge.
+          max_tokens: 512,
+          temperature: 0.3,
+        },
+        style: "openai",
+        input_modalities: ["text"],
         system_messages: [
           { role: "system", content: FAST_LOOP_SYSTEM_PROMPT },
         ],
         ...buildToolsBlock(params.toolBaseUrl ?? null),
         max_history: 32,
         greeting_message: "",
+        failure_message: "One moment.",
       },
       // Echo's voice. MANDATORY in cascaded mode — an agent without a `tts`
       // block is rejected outright with `properties: tts.addon not found`.
@@ -574,7 +628,11 @@ export function buildAgentPayload(params: {
       asr: {
         vendor: "deepgram",
         params: {
-          model: "nova-3",
+          // NO `model` here — deliberately. The `deepgram_nova_3` preset above
+          // carries it, and the SDK's `strip_inferred_preset_fields` removes
+          // this key before the POST when the preset matches. Sending both is
+          // how you end up with a preset that silently does not apply.
+          //
           // `keyterm`, NOT `keywords` — the latter is not a Deepgram option and
           // was silently discarded. Biasing matters here: without it "Redis"
           // reliably becomes "read us", and extraction then invents an entity

@@ -312,7 +312,13 @@ describe("Agent configuration", () => {
     assert.equal(payload.properties.channel, "inc-4417");
     assert.equal(payload.properties.agent_rtc_uid, String(AGENT_UID));
     assert.equal(payload.properties.llm.url, GROQ_CHAT_COMPLETIONS_URL);
-    assert.equal(payload.properties.llm.model, FAST_LOOP_MODEL);
+    // The model lives inside `params`, not beside `url`. A top-level `model`
+    // is an unknown key that Agora forwards untouched, so the request reached
+    // Groq with no model at all — the LLM turn never completed and the
+    // pipeline emitted no transcript, while /bridge/say kept working because
+    // speaking a supplied line bypasses the LLM.
+    assert.equal(payload.properties.llm.params.model, FAST_LOOP_MODEL);
+    assert.equal(payload.properties.llm.style, "openai");
     assert.equal(
       payload.properties.turn_detection.config.start_of_speech.vad_config
         .interrupt_duration_ms,
@@ -408,9 +414,25 @@ describe("Agent configuration", () => {
       error on any surface. `vendor` is what selects a recogniser; everything
       else is forwarded to it unchecked.
     */
-    const asr = samplePayload("c").properties.asr;
-    assert.equal(asr.vendor, "deepgram", "ASR must name a vendor");
-    assert.ok(asr.params, "vendor options belong under params");
+    const payload = samplePayload("c");
+    assert.equal(payload.properties.asr.vendor, "deepgram", "ASR must name a vendor");
+    assert.ok(payload.properties.asr.params, "vendor options belong under params");
+
+    /*
+      A managed vendor is activated by the top-level `preset`, NOT by the
+      vendor block alone. The SDK sends { appid, name, preset, properties },
+      and for a keyless deepgram block it derives `deepgram_nova_3` and strips
+      `params.model` because the preset carries it.
+
+      Sending the block with no preset is what left the agent deaf: Agora
+      accepted the payload, never activated the recogniser, and transcribed
+      nothing while reporting healthy.
+    */
+    assert.equal(payload.preset, "deepgram_nova_3", "managed ASR needs its preset");
+    assert.ok(
+      !("model" in payload.properties.asr.params),
+      "the preset carries the model; sending both makes the preset not apply",
+    );
   });
 
   test("ASR keyterm biasing covers the demo's technical vocabulary", () => {

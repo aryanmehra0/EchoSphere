@@ -224,10 +224,40 @@ async function speech() {
     }
   }
 
+  /*
+    Ask Agora what IT heard, not just what reached the Ledger.
+
+    `/history` is the vendor's own record, and it separates three failures
+    that look identical from here: the recogniser never ran, it ran and
+    transcribed nothing, or it transcribed fine and the text was lost on
+    the way to us. Local instrumentation cannot tell those apart — it
+    reported "everything looks right" for days while producing nothing.
+  */
+  const st = await get(`${WEB}/api/agent-status?agentId=${api.agent.agent_id}`, 20000);
+  const turns = st?.history?.body?.contents ?? [];
+  const spoken = turns.filter((t) => (t?.content ?? "").trim());
+
+  console.log("");
+  console.log(d(`  Agora recorded ${turns.length} turn(s), ${spoken.length} with text.`));
+  for (const turn of spoken.slice(0, 4)) {
+    console.log(d(`    "${String(turn.content).slice(0, 80)}"`));
+  }
+
   console.log("");
   if (found > 0) {
     console.log(`  ${g(b("THE SPEECH PATH IS REAL"))} — ${found} claim(s) from your voice.\n`);
     return 0;
+  }
+
+  if (turns.length > 0 && spoken.length === 0) {
+    console.log(`  ${y(b("ASR RAN BUT TRANSCRIBED NOTHING"))}`);
+    console.log("");
+    console.log(d("  Agora segmented your speech into turns — so the agent hears you,"));
+    console.log(d("  VAD works and the recogniser is running — but the text came back"));
+    console.log(d("  empty. Check you are speaking into the microphone the browser"));
+    console.log(d("  actually captured, at a normal conversational level."));
+    console.log("");
+    return 1;
   }
 
   console.log(`  ${r(b("NOTHING ARRIVED"))} — speech did not reach the Ledger.\n`);
