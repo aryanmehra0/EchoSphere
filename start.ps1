@@ -64,6 +64,16 @@ function Write-Ok($text)   { Write-Host "  OK   $text" -ForegroundColor Green }
 function Write-Bad($text)  { Write-Host "  FAIL $text" -ForegroundColor Red }
 function Write-Note($text) { Write-Host "       $text" -ForegroundColor DarkGray }
 
+# KEEP STRING LITERALS IN THIS FILE PURE ASCII.
+#
+# PowerShell 5.1 reads a .ps1 without a BOM as ANSI. An em-dash then decodes
+# to CP1252 0x94, which IS a right curly quote - and PowerShell accepts curly
+# quotes as string delimiters, so the literal ends early and the parse
+# cascades into "missing closing }" errors dozens of lines away.
+#
+# Comments are safe (they run to end of line), which is why the box-drawing
+# above is fine and one em-dash inside a Write-Note broke the whole script.
+
 Write-Host ""
 Write-Host "  EchoSphere" -ForegroundColor White
 Write-Host ""
@@ -242,14 +252,61 @@ if ($console) {
 # Checked from OUTSIDE, through the tunnel, because that is the path Agora
 # takes. A tunnel process that started is not the same as a tunnel that
 # routes, and the difference only shows up as Echo silently having no tools.
-if ($tunnelUrl) {
+#
+# ── AND CHECKED EVERY RUN, NOT ONLY WHEN -Tunnel OPENED ONE ────────────────
+# This used to test `$tunnelUrl`, which is set only when THIS invocation
+# opened a tunnel. Two things went wrong with that:
+#
+#   1. Running plain `.\start.ps1` with a tunnel already live printed "Echo
+#      cannot read the Ledger" and told you to restart with -Tunnel. It could
+#      read the Ledger perfectly well. Reported live.
+#
+#   2. Worse and silent: cloudflared exits, .env.local keeps the dead URL, and
+#      the next invite creates an agent WITH tools pointed at a host that no
+#      longer resolves. Every tool call then fails — and a tool that always
+#      fails is worse than an absent one, because the model retries, collects
+#      errors, and falls back on its own memory. That is the exact
+#      hallucination this product exists to prevent, arriving through the
+#      component meant to prevent it.
+#
+# So: the configured URL is the source of truth, and it is probed. A URL that
+# does not answer is CLEARED rather than left to poison the next invite.
+$configuredTunnel = Get-EnvKey "AGENT_TOOL_BASE_URL"
+$tunnelLive = $false
+
+if ($configuredTunnel) {
     try {
-        $probe = Invoke-RestMethod "$tunnelUrl/health" -TimeoutSec 20
-        if ($probe.ready) { Write-Ok "Agora can reach the Ledger through the tunnel" }
-        else { Write-Bad "the tunnel routes, but the Slow Loop is not ready" }
+        $probe = Invoke-RestMethod "$configuredTunnel/health" -TimeoutSec 20
+        if ($probe.ready) {
+            $tunnelLive = $true
+            Write-Ok "Agora can reach the Ledger through the tunnel"
+        } else {
+            Write-Bad "the tunnel routes, but the Slow Loop is not ready"
+        }
     } catch {
-        Write-Bad "the tunnel is up but does not route to the Slow Loop"
-        Write-Note $_.Exception.Message
+        Write-Bad "the configured tunnel no longer answers"
+        Write-Note $configuredTunnel
+        Write-Note "clearing it - stale tool URLs are worse than none at all"
+        Set-EnvKey "AGENT_TOOL_BASE_URL" ""
+        Set-EnvKey "AGENT_TOOL_SECRET" ""
+        Write-Note "re-run with -Tunnel to open a fresh one"
+        # The console cached the dead value at boot; without this it keeps
+        # handing it to Agora until someone restarts it by hand.
+        $stale = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
+        if ($stale) {
+            Stop-Process -Id $stale[0].OwningProcess -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 1200
+            Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "npm run dev" `
+                -WorkingDirectory $frontend -WindowStyle Hidden
+            foreach ($i in 1..60) {
+                Start-Sleep -Milliseconds 900
+                try {
+                    $r = Invoke-WebRequest "http://localhost:3000" -UseBasicParsing -TimeoutSec 5
+                    if ($r.StatusCode -eq 200) { break }
+                } catch { }
+            }
+            Write-Note "console restarted without the dead tunnel"
+        }
     }
 }
 
@@ -266,15 +323,24 @@ try {
 
 Write-Host "  Next:" -ForegroundColor White
 Write-Host "    open http://localhost:3000 and press J"
-if ($tunnelUrl) {
+if ($tunnelLive) {
     Write-Host "    Echo will greet you out loud, then answer questions about the incident."
-    Write-Host "    Try saying:  " -NoNewline
+    Write-Host "    Feed it the incident first, then ask:"
+    Write-Host "                           cd frontend"
+    Write-Host "                           npm run demo feed"
+    Write-Host "    then say out loud:  " -NoNewline
     Write-Host '"Echo, what do we know so far?"' -ForegroundColor Cyan
+    Write-Host "    and push it:        " -NoNewline
+    Write-Host '"Echo, is Redis the cause?"' -ForegroundColor Cyan
+    Write-Host "                        it will refuse, and that refusal is the point."
+    Write-Host ""
+    Write-Host "    Watching the Ledger while you talk:  " -NoNewline
+    Write-Host "npm run demo speech" -ForegroundColor Cyan
 } else {
     Write-Host "    Echo will greet you out loud, but cannot read the Ledger."
     Write-Host "    For a real conversation, restart with:  " -NoNewline
     Write-Host ".\start.ps1 -Tunnel" -ForegroundColor Cyan
+    Write-Host "    then, in this window:  cd frontend"
+    Write-Host "                           npm run demo feed"
 }
-Write-Host "    then, in this window:  cd frontend"
-Write-Host "                           npm run demo feed"
 Write-Host ""

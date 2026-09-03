@@ -993,6 +993,36 @@ that Agora accepts it and the channel stays silent. A real outage is still
 visible through `voiceVerified` and the pre-flight, neither of which depends
 on someone noticing a phrase in a busy room.
 
+**The start script then lied about the tunnel, twice over.** Reported
+immediately: a plain `.\start.ps1` with a tunnel already live printed "Echo
+cannot read the Ledger, restart with -Tunnel". It could read it perfectly
+well. The closing message keyed off `$tunnelUrl`, which is set only when THAT
+invocation opened a tunnel, rather than off whether one is actually live.
+
+The same bug had a silent and worse half: cloudflared exits, `.env.local`
+keeps the dead URL, and the next invite creates an agent WITH tools pointed at
+a host that no longer resolves. Every tool call then fails, and a tool that
+always fails is worse than an absent one — the model retries, collects errors,
+and falls back on its own memory. That is the exact hallucination this product
+exists to prevent, arriving through the component meant to prevent it.
+
+The configured URL is now the source of truth and is probed every run. A URL
+that does not answer is cleared, both halves of the credential pair with it,
+and the console is restarted so it stops handing the dead value to Agora.
+Verified by killing cloudflared with the URL still configured: the script
+detected it, cleared it, and the next invite correctly reported
+`toolsEnabled: false` rather than pointing tools at nothing.
+
+**A PowerShell rule worth keeping.** Fixing the above broke the whole script
+with `Missing closing '}'` errors dozens of lines from the actual mistake. The
+cause was one em-dash inside a `Write-Note` string. PowerShell 5.1 reads a
+`.ps1` without a BOM as ANSI, so U+2014 decodes to CP1252 `0x94` — which is a
+right curly quote, and PowerShell accepts curly quotes as string delimiters.
+The literal ended early and the parse cascaded. Comments are safe because they
+run to end of line, which is why the file's box-drawing headers were never a
+problem. **Keep string literals in `.ps1` files pure ASCII**; there is now a
+comment in `start.ps1` saying so.
+
 **Still not verified by a human mouth.** Everything up to the microphone is
 proven: ASR runs (`source: "asr"` in Agora's history), tools are reachable
 when the tunnel is up, the LLM is wired to Groq, TTS speaks. Whether a real
