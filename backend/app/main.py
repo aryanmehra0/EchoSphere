@@ -141,6 +141,17 @@ async def health() -> JSONResponse:
             "agent": _agent,
             "seq": hub.seq,
             "subscribers": hub.subscriber_count,
+            # Whether analysis is still in flight.
+            #
+            # Exposed because "the claim count stopped changing" is NOT the
+            # same as "the pipeline finished" — under rate-limit backoff it
+            # sits still for seconds mid-window, and a harness that treats a
+            # pause as completion reports lost claims that are merely late.
+            # This is the authoritative answer: tasks running, frames waiting.
+            "pipeline": {
+                "inFlight": len(_pipeline_tasks),
+                "windowFrames": len(window.frames),
+            },
         },
         status_code=200 if ready else 503,
     )
@@ -222,7 +233,32 @@ async def run_pipeline_if_ready() -> dict[str, Any] | None:
         # Carry the Ledger's alias table so entity ids stay stable across
         # windows — "Redis" in window 3 must resolve to the id it got in
         # window 1, or contradiction scoping silently finds nothing.
-        result = await extract(text, compact(ledger), aliases=entity_aliases(ledger))
+        try:
+            result = await extract(text, compact(ledger), aliases=entity_aliases(ledger))
+        except Exception:  # noqa: BLE001 — see below; never lose an utterance
+            """
+            PUT THE WINDOW BACK.
+
+            `drain()` empties the window before extraction runs, so an
+            extraction that raised used to take those frames with it — the
+            words were spoken, and then simply were not in the record. Groq's
+            per-minute limit is per organisation, so a busy moment on the
+            bridge is exactly when this fires: the analysis matters most and
+            the claims vanish quietest.
+
+            That is not an acceptable failure for an evidence ledger. The
+            frames go back and the flush ticker retries them a second later,
+            by which time the per-minute budget has usually recovered.
+
+            `window.add` dedupes on message id, so a frame that partially
+            succeeded cannot be counted twice.
+            """
+            log.exception(
+                "pipeline: extraction failed on %d frame(s) — requeued", len(frames),
+            )
+            for frame in frames:
+                window.requeue(frame)
+            return None
 
         # -- merge ---------------------------------------------------------
         delta: dict[str, Any] = {}
@@ -402,7 +438,20 @@ async def model_health() -> dict[str, Any]:
             await groq_json(
                 "Reply with the JSON object {\"ok\":true} and nothing else.",
                 "Return that json now.",
-                max_tokens=64,
+                # ── THE SAME MISTAKE AS PANEL_MAX_TOKENS, MADE TWICE ────────
+                # 64 looks obviously generous for `{"ok":true}` and is wrong.
+                # These are REASONING models: they emit reasoning tokens before
+                # the JSON, so a tight ceiling truncates them mid-thought and
+                # Groq returns
+                #
+                #     400 json_validate_failed, failed_generation: ''
+                #
+                # which this endpoint then reported as the model being
+                # unavailable. The pre-flight spent a day insisting two healthy
+                # models were exhausted, and a check that cries wolf is worse
+                # than no check — it trains you to ignore the one time it is
+                # right. Matches PANEL_MAX_TOKENS for the same reason.
+                max_tokens=1536,
                 models=[model],
             )
             results.append({"model": model, "available": True})

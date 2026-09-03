@@ -181,6 +181,29 @@ class TurnWindow:
         self.last_final_at = time.monotonic()
         return True
 
+    def requeue(self, frame: Transcript) -> None:
+        """
+        Put a drained frame back after a failed extraction.
+
+        The frame is appended directly rather than through `add`, because
+        `add` would reject it: `drain` does NOT clear `_seen`, so the message
+        id is still there from the first time round.
+
+        And it STAYS there. Dropping the id to "let it back in" was the first
+        version, and a test caught it immediately — the transport can redeliver
+        an utterance, and with the id forgotten that redelivery would sit in
+        the window alongside the requeued copy, extracting one sentence twice.
+        Requeueing is OUR retry; the dedup set is about the transport's.
+
+        Restores the window's timers too: a requeued frame that kept an old
+        `last_final_at` would be considered stale and flushed instantly,
+        straight back into the failure it just came from.
+        """
+        if not self.frames:
+            self.opened_at = time.monotonic()
+        self.frames.append(frame)
+        self.last_final_at = time.monotonic()
+
     @property
     def chars(self) -> int:
         return sum(len(f.text) for f in self.frames)
@@ -730,11 +753,35 @@ async def groq_json(
     while budget sits unused is the failure this ordering prevents.
     """
     for model in models:
-        for key_index, api_key in enumerate(keys):
-            client = AsyncGroq(api_key=api_key)
-            delay = 1.0
-            for attempt in range(4):
+        # Keys exhausted for the DAY on this model. A per-minute limit clears
+        # on its own and must not disqualify a key; a daily one cannot.
+        spent: set[int] = set()
+        delay = 1.0
+
+        for attempt in range(4):
+            """
+            EVERY KEY IS TRIED BEFORE ANY SLEEP.
+
+            The previous shape looped keys on the outside and slept on the
+            inside, so a per-minute 429 waited on the SAME key while the other
+            key's separate per-minute budget sat untouched. Groq's TPM limit is
+            per key, exactly like the daily one.
+
+            The cost of getting that wrong was not just latency. Sleeping backs
+            the pipeline up, the Turn Window keeps accumulating while it waits,
+            and windows MERGE — a Tier 3 run showed "extracting a 3-frame
+            window" where there should have been three single-frame ones, and
+            extraction silently dropped claims from the middle of the batch.
+            The gate failed intermittently on a missing measurement, and this
+            was why.
+            """
+            rate_limited_everywhere = True
+
+            for key_index, api_key in enumerate(keys):
+                if key_index in spent:
+                    continue
                 try:
+                    client = AsyncGroq(api_key=api_key)
                     return await _groq_call(client, system, user, max_tokens, model)
                 except Exception as exc:  # noqa: BLE001 — the SDK raises several shapes
                     message = str(exc)
@@ -742,23 +789,31 @@ async def groq_json(
                         raise
                     last = exc
 
-                    # A DAILY cap cannot be waited out inside a request. Try
-                    # the next KEY on this same model before giving up on the
-                    # model — that key has its own untouched daily budget.
                     if "per day" in message.lower() or "TPD" in message:
                         log.error(
-                            "groq: %s daily quota exhausted on key %d/%d — rotating",
+                            "groq: %s daily quota exhausted on key %d/%d",
                             model, key_index + 1, len(keys),
                         )
-                        break
+                        spent.add(key_index)
+                        continue
 
-                    wait = _retry_after(message) or delay
-                    log.warning(
-                        "groq: %s rate limited on key %d (attempt %d), waiting %.1fs",
-                        model, key_index + 1, attempt + 1, wait,
-                    )
-                    await asyncio.sleep(wait)
-                    delay = min(delay * 2, 20.0)
+                    # Per-minute. Keep this key in play and try the next one
+                    # immediately — its budget is independent.
+                    rate_limited_everywhere = True
+
+            if len(spent) == len(keys):
+                break  # every key is out for the day; the next model may not be
+
+            if not rate_limited_everywhere:
+                break
+
+            wait = _retry_after(str(last)) or delay
+            log.warning(
+                "groq: %s rate limited on all %d key(s) (attempt %d), waiting %.1fs",
+                model, len(keys) - len(spent), attempt + 1, wait,
+            )
+            await asyncio.sleep(wait)
+            delay = min(delay * 2, 20.0)
 
     raise RuntimeError(
         f"every analysis model is rate limited across "

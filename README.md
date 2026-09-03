@@ -42,8 +42,25 @@ cp .env.local.example .env.local     # then fill it in — see Credentials
 npm run dev                          # http://localhost:3000
 ```
 
-Open **http://localhost:3000**, type a channel name, pick your role, and press
-**Join incident bridge** (or `J`).
+Then, from `frontend/`:
+
+```bash
+npm run demo reset     # clean board, stop any agent left running
+npm run demo           # pre-flight — refuses to print GO if anything is off
+```
+
+Open **http://localhost:3000**, press **`J`**, wait for the status bar to read
+**LIVE DATA**, then:
+
+```bash
+npm run demo feed      # speak Demo Script v2 into the live pipeline
+npm run demo speech    # or say a line yourself and watch the Ledger
+```
+
+`npm run demo` checks seven things that have each gone wrong here and none of
+which announce themselves: credentials, both services, a leftover agent from
+the last rehearsal, a dirty board, recording left off, a degradation banner,
+and whether there is any Groq budget left today.
 
 Check you are wired up before anything else:
 
@@ -70,6 +87,8 @@ values. The backend reads the same file, so you only fill it in once.
 | `AGORA_CUSTOMER_ID` / `AGORA_CUSTOMER_SECRET` | Console → **RESTful API** → Add a secret |
 | `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) |
 | `ELEVENLABS_API_KEY` | [elevenlabs.io](https://elevenlabs.io) → API keys (starts `sk_`) |
+| `GROQ_API_KEY_2` | *Optional.* A second Groq key. The daily cap is per key AND per model, so this doubles the budget outright — see `backend/app/config.py::groq_api_keys` |
+| `AGENT_TOOL_BASE_URL` | *Optional.* Public URL of the Slow Loop, for Agora's REST tools. Agora calls them from its own servers, so localhost does not work. Blank disables tools deliberately |
 
 Two traps that have each cost hours here:
 
@@ -86,8 +105,8 @@ Two traps that have each cost hours here:
 ## Running the tests
 
 ```bash
-cd frontend && npm run verify      # typecheck → lint → 95 tests → build
-cd backend && .venv/Scripts/python -m unittest discover -s tests -t .   # 155 tests
+cd frontend && npm run verify      # typecheck → lint → 106 tests → build
+cd backend && .venv/Scripts/python -m unittest discover -s tests -t .   # 172 tests
 ```
 
 **No slot is done until `npm run verify` passes.** And a green build says

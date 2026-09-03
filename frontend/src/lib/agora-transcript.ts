@@ -29,6 +29,20 @@ function firstText(record: UnknownRecord, keys: string[]): string {
 }
 
 /** Returns null for non-transcript RTM traffic instead of guessing. */
+/**
+ * ⚠️ NOT ON THE LIVE PATH since the Agora toolkit landed.
+ *
+ * Transcripts now arrive already parsed as `TranscriptHelperItem` from
+ * `agora-agent-client-toolkit` (see `lib/agora/voice-agent.ts`), which reads
+ * the RTC data stream rather than raw RTM frames. This function survives as
+ * the RTM wire-format parser and as the test helper that builds transcripts
+ * for `forwardDecision` — which IS live, and is what keeps two machines from
+ * double-forwarding or mis-attributing speech.
+ *
+ * Do not wire this back into the bridge without checking why it was replaced:
+ * a hand-rolled RTM listener received nothing for days, because Conversational
+ * AI transcripts do not travel on RTM.
+ */
 export function parseAgoraTranscript(raw: unknown, now = Date.now): AgoraTranscript | null {
   let payload = raw;
   if (typeof payload === "string") {

@@ -210,3 +210,64 @@ class LedgerDoesNotDoubleCount(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AFailedExtractionKeepsTheWords(unittest.TestCase):
+    """
+    An utterance must survive a failed extraction — §4.4 robustness.
+
+    `drain()` empties the window BEFORE extraction runs, so an extraction that
+    raised used to take the frames with it: the words were spoken and then
+    simply were not in the record. Groq's per-minute limit is per organisation,
+    so this fires exactly when the bridge is busiest — the analysis matters
+    most and the claims vanish quietest.
+
+    An evidence ledger that silently drops evidence under load is not one.
+    """
+
+    def setUp(self):
+        from app.extraction import TurnWindow
+        from app.models import Transcript
+
+        self.window = TurnWindow()
+        self.Transcript = Transcript
+
+    def frame(self, mid: str, text: str):
+        return self.Transcript(
+            message_id=mid, uid=1001, role="DevOps Lead", text=text,
+            is_final=True, at=1,
+        )
+
+    def test_requeued_frames_are_extracted_next_time(self):
+        self.window.add(self.frame("m1", "Memory is at 40 percent"))
+        drained = self.window.drain()
+        self.assertEqual(len(drained), 1)
+        self.assertEqual(self.window.frames, [])
+
+        for f in drained:
+            self.window.requeue(f)
+
+        self.assertEqual(len(self.window.frames), 1)
+        self.assertIn("40 percent", self.window.frames[0].text)
+
+    def test_a_requeue_does_not_double_count_on_redelivery(self):
+        # The transport can redeliver; a retry of ours must not make the
+        # window accept the same utterance twice on top of the requeued copy.
+        self.window.add(self.frame("m1", "Memory is at 40 percent"))
+        for f in self.window.drain():
+            self.window.requeue(f)
+
+        accepted = self.window.add(self.frame("m1", "Memory is at 40 percent"))
+        self.assertFalse(accepted, "the same message id was accepted twice")
+        self.assertEqual(len(self.window.frames), 1)
+
+    def test_requeue_restarts_the_silence_timer(self):
+        # A requeued frame carrying a stale timestamp would look overdue and
+        # flush instantly — straight back into the failure it came from.
+        self.window.add(self.frame("m1", "Memory is at 40 percent"))
+        for f in self.window.drain():
+            self.window.requeue(f)
+        self.assertFalse(
+            self.window.should_flush(),
+            "a just-requeued window must wait for its silence budget",
+        )

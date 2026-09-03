@@ -134,10 +134,51 @@ async def one_run(client: httpx.AsyncClient, *, verbose: bool) -> list[Check]:
         if verbose:
             print(f"{D}    {line.role:<17} {line.text[:52]}…{X}")
 
-    # The pipeline flushes on silence; give it the window it expects.
-    await asyncio.sleep(8)
+    """
+    WAIT FOR QUIESCENCE, NOT A FIXED DELAY.
 
-    state = (await client.post(f"{BASE}/tools/query_incident_state", json={})).json()
+    This used to sleep 8 seconds. The pipeline now runs in background tasks
+    (so `/observer/transcript` stops blocking the browser) and honours Groq's
+    rate-limit backoff, so the last window's claims can land well after that.
+    A run that "lost" Act 2 had simply not finished it yet — the gate sampled
+    early and reported a correctness regression that was a stopwatch problem.
+
+    Polls until the claim count stops moving for two consecutive seconds, or
+    45s passes. Quiescence is the real signal: the pipeline is done when it
+    stops producing, and how long that takes is not what S6 is measuring.
+    """
+    async def snapshot() -> dict:
+        return (await client.post(f"{BASE}/tools/query_incident_state", json={})).json()
+
+    async def busy() -> bool:
+        """
+        Is the pipeline still working? Asked, not inferred.
+
+        An earlier version watched the claim count and stopped when it held
+        steady for two seconds. Under rate-limit backoff the count sits still
+        mid-window for exactly that long, so the gate declared the run finished
+        while Act 2 was still being extracted — and then reported the missing
+        measurement as a correctness regression. It was a stopwatch problem
+        twice over.
+        """
+        try:
+            h = (await client.get(f"{BASE}/health")).json()
+            p = h.get("pipeline") or {}
+            return bool(p.get("inFlight")) or bool(p.get("windowFrames"))
+        except Exception:  # noqa: BLE001 — a probe failure must not end the wait
+            return True
+
+    quiet = 0
+    for _ in range(60):
+        await asyncio.sleep(1.0)
+        quiet = 0 if await busy() else quiet + 1
+        # Three idle seconds: a task can finish and the next flush start within
+        # one, and stopping between them would sample a half-done ledger.
+        if quiet >= 3:
+            break
+
+    state = await snapshot()
+
     established = state.get("established", [])
     hypotheses = state.get("openHypotheses", [])
     unchecked = state.get("unchecked", [])
@@ -153,9 +194,25 @@ async def one_run(client: httpx.AsyncClient, *, verbose: bool) -> list[Check]:
               any_text(hypotheses, "evict") and not any_text(established, "evict"),
               "'might be evicting keys' must be an open question, never a fact"),
 
+        # THE MEASUREMENT, NOT ITS PHRASING.
+        #
+        # This asserted the literal string "40 percent" and failed
+        # intermittently on runs where extraction wrote "40%" or
+        # "memory utilization at 40 percent" — the measurement was recorded
+        # correctly and the check called it a regression. Two separate
+        # explanations were offered for that flakiness before the check itself
+        # turned out to be the flaky part.
+        #
+        # What matters is that a MEASURED value landed in ESTABLISHED rather
+        # than being filed as a guess. The number and a unit is the test; the
+        # model's wording is not ours to fix.
         Check("measurements recorded as established",
-              any_text(established, "40 percent"),
-              "a measured value must not be filed as a guess"),
+              any(
+                  re.search(r"\b40\s*(percent|%)", c.get("text", ""), re.I)
+                  for c in established
+              ),
+              "established rows were: "
+              + " | ".join(c.get("text", "")[:48] for c in established[:6])),
 
         # The failure this catches shipped to a live dashboard: "Datadog
         # indicates Redis might be evicting keys" filed as OBSERVED at 100%,
@@ -239,6 +296,10 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--cooldown", type=int, default=120,
+                    help="seconds between runs; 0 disables. 120 is sized "
+                         "to Groq's free-tier 8000 tokens/MINUTE, which is "
+                         "per organisation — a second key does not raise it")
     args = ap.parse_args()
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -251,6 +312,25 @@ async def main() -> int:
 
         clean_streak = 0
         for run in range(1, args.runs + 1):
+            """
+            COOLDOWN BETWEEN RUNS, and it is not padding.
+
+            Groq's per-minute token limit is per ORGANISATION, so
+            back-to-back runs spend one budget three times over. When it
+            runs out the pipeline does not fail loudly: it retries, backs
+            up, and Turn Windows MERGE — at which point extraction drops
+            claims from the middle of a batch. The gate then reports a
+            missing measurement, which reads exactly like a correctness
+            regression and is not one.
+
+            A real demo does not run three times in three minutes. Waiting
+            makes this gate measure CORRECTNESS rather than throughput,
+            which is what S6 is for.
+            """
+            if run > 1 and args.cooldown:
+                print(f"{D}  cooling down {args.cooldown}s so the per-minute budget recovers…{X}")
+                await asyncio.sleep(args.cooldown)
+
             print(f"\n{'═' * 72}\n  RUN {run}/{args.runs}\n{'═' * 72}")
             started = time.time()
             checks = await one_run(client, verbose=not args.quiet)

@@ -116,10 +116,18 @@ SAME_UTTERANCE_SECONDS = 15.0
 # rehearsal on Aug 31 hit exactly that and lost the headline contradiction to
 # 429s — the reasoning was correct and never got to execute.
 #
-# The headline conflict has always been in the top two by similarity. Below
-# that the pairs are weak, and the single judge is a sound floor for them: it
-# was the entire system the day before.
-PANEL_PAIR_BUDGET = 2
+# Lowered from 2 to 1 after measuring the real constraint. Groq's per-MINUTE
+# limit is per ORGANISATION, not per key — the 429 names
+# `organization org_01m0...` — so a second key buys daily budget and no TPM
+# headroom at all. At 1536 reserved tokens a call, two pairs x two personas
+# is most of an 8000/minute budget for ONE claim, and the overflow did not
+# fail loudly: it backed the pipeline up until Turn Windows MERGED and
+# extraction silently dropped claims from the middle of a batch.
+#
+# The headline conflict has always been the TOP pair by similarity. The
+# second was costing more than it caught, and the single judge still covers
+# the tail — it was the entire system the day before the panel landed.
+PANEL_PAIR_BUDGET = 1
 
 _WORD = re.compile(r"[a-z0-9]+")
 # Words that carry no discriminating signal on an incident bridge.
