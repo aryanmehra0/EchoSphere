@@ -49,16 +49,26 @@ speech recognition having a good day.
 
 ### Before the mentor joins
 
-```bash
-# 1 — Slow Loop
-cd backend && .venv/Scripts/python -m uvicorn app.main:app --port 8000
+From the repository root, in **PowerShell**:
 
-# 2 — console
-cd frontend && npm run dev
+```powershell
+.\start.ps1 -Reset
+```
 
-# 3 — both healthy?  both must say ready:true
-curl localhost:3000/api/health
-curl 127.0.0.1:8000/health
+That starts both services, waits until each genuinely answers, clears the
+board, and runs the pre-flight. It exists because the two-terminal version was
+written with `&&`, which Windows PowerShell 5.1 treats as a **parse error** —
+the command does not run and does not say why, ninety seconds before a demo.
+
+Doing it by hand instead, two terminals:
+
+```powershell
+cd backend
+.\.venv\Scripts\python -m uvicorn app.main:app --port 8000
+```
+```powershell
+cd frontend
+npm run dev
 ```
 
 Then run the pre-flight from `frontend/`. It checks the six things that have

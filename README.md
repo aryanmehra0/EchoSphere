@@ -25,22 +25,47 @@ Two consequences of taking that seriously:
 
 ## Quick start
 
+### The short way
+
+From the repository root, in **PowerShell**:
+
+```powershell
+.\start.ps1
+```
+
+It starts both services, waits until each genuinely answers, and runs the
+pre-flight. Then open **http://localhost:3000**, press **`J`**, and run
+`npm run demo feed` from `frontend/`.
+
+> **Windows note.** Do not chain these with `&&`. Windows PowerShell 5.1 has
+> no `&&` operator and treats it as a *parse error* — the command does not run
+> and does not explain why, which reads as the project being broken. Use `;`,
+> separate lines, or `.\start.ps1`.
+
+### The long way
+
 Three processes. Two terminals plus a browser.
 
-```bash
-# 1 — Slow Loop (Python, Zone 3)
+**Terminal 1 — the Slow Loop (Python, Zone 3):**
+
+```powershell
 cd backend
 python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt          # Windows
-# .venv/bin/pip install -r requirements.txt            # macOS / Linux
-.venv/Scripts/python -m uvicorn app.main:app --port 8000
+.\.venv\Scripts\pip install -r requirements.txt
+.\.venv\Scripts\python -m uvicorn app.main:app --port 8000
+```
 
-# 2 — Console + Zone 2 API (Next.js)
+**Terminal 2 — the console (Next.js, Zone 2):**
+
+```powershell
 cd frontend
 npm install
-cp .env.local.example .env.local     # then fill it in — see Credentials
-npm run dev                          # http://localhost:3000
+copy .env.local.example .env.local    # then fill it in — see Credentials
+npm run dev                           # http://localhost:3000
 ```
+
+On macOS or Linux the venv binaries live in `.venv/bin/` instead, and `cp`
+replaces `copy`.
 
 Then, from `frontend/`:
 
@@ -104,9 +129,12 @@ Two traps that have each cost hours here:
 
 ## Running the tests
 
-```bash
-cd frontend && npm run verify      # typecheck → lint → 106 tests → build
-cd backend && .venv/Scripts/python -m unittest discover -s tests -t .   # 172 tests
+```powershell
+cd frontend
+npm run verify        # typecheck -> lint -> 106 tests -> build
+
+cd ..\backend
+.\.venv\Scripts\python -m unittest discover -s tests -t .    # 175 tests
 ```
 
 **No slot is done until `npm run verify` passes.** And a green build says
@@ -114,9 +142,9 @@ nothing about whether the UI works — screenshot the running app.
 
 ### Measuring quality, not just correctness
 
-```bash
+```powershell
 cd backend
-.venv/Scripts/python -m rig.tier2 --runs 5 --scenario full-demo
+.\.venv\Scripts\python -m rig.tier2 --runs 5 --scenario full-demo
 ```
 
 The Rehearsal Rig runs the real pipeline over fixed transcripts N times and
@@ -128,9 +156,16 @@ this number moving.
 **Tier 3** goes further and drives the running server the way the demo does —
 real endpoints, real Ledger, real deltas, at conversational pace:
 
-```bash
-.venv/Scripts/python -m rig.tier3 --runs 3    # needs the Slow Loop running
+```powershell
+.\.venv\Scripts\python -m rig.tier3 --runs 3     # needs the Slow Loop running
 ```
+
+⚠️ **The gate passes 2 runs in 3, not 3 in 3, on Groq's free tier.** The
+failing run is always the same: under rate-limit pressure one window returns a
+thin extraction and the measurement is missing. No exception, no dropped row —
+the model just answers thinly when the budget is thin. Groq's per-minute cap
+is per *organisation*, so a second key raises the daily budget and not that
+ceiling. A single run — which is what a demo is — passes reliably.
 
 Three *consecutive* clean runs, not an average: the failure it catches is
 state leaking between runs, and an average hides exactly that. Tiers 1 and 2
