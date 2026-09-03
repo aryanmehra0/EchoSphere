@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -402,7 +402,7 @@ async def _surface_contradiction(a: Claim, b: Claim, verdict: Any) -> dict[str, 
 
 
 @app.get("/health/model")
-async def model_health() -> dict[str, Any]:
+async def model_health(request: Request) -> dict[str, Any]:
     """
     Is there any analysis budget left today?
 
@@ -426,8 +426,26 @@ async def model_health() -> dict[str, Any]:
     # so "available" here means "reachable on at least one key" — which is the
     # question a pre-flight actually needs answered.
     keys = len(config.groq_api_keys())
+
+    """
+    PRIMARY ONLY, unless asked for everything.
+
+    Probing all three models serially means three calls, each with its own
+    rate-limit retries — which under load takes minutes and timed the
+    pre-flight out, reporting "could not probe the model — is the Slow Loop
+    up?" while the Slow Loop was plainly up and answering.
+
+    The question a pre-flight actually asks is "can we run a demo now", and
+    the primary model answers it: the fallbacks only matter once it is gone,
+    and `groq_json` reaches them on its own. `?all=1` still probes the chain
+    when the fuller picture is wanted.
+    """
+    probe_all = request.query_params.get("all") in ("1", "true", "yes")
+    chain = config.analysis_models()
+    models_to_probe = chain if probe_all else chain[:1]
+
     results: list[dict[str, Any]] = []
-    for model in config.analysis_models():
+    for model in models_to_probe:
         try:
             # The word "json" must appear literally in the messages — Groq
             # rejects `response_format: json_object` without it, with a 400.
