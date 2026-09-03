@@ -71,6 +71,35 @@ def groq_api_key() -> str:
     return _required("GROQ_API_KEY")
 
 
+def groq_api_keys() -> list[str]:
+    """
+    Every Groq key available, in preference order.
+
+    ── WHY MORE THAN ONE ──────────────────────────────────────────────────
+    The free tier's hard limit is 200,000 tokens per DAY, scoped per key AND
+    per model. A full demo run costs 15–20k, so a single key is roughly ten
+    rehearsals — and a day of debugging spends that before lunch. When it
+    goes, nothing announces it: the console joins, the dashboard fills with
+    transcripts, Echo sits in the channel, and no claims ever appear because
+    every extraction is failing behind the scenes on a 429 nobody is reading.
+
+    A second key doubles the budget outright. `GROQ_API_KEY_2` is optional —
+    absent, this returns exactly the single key and behaviour is unchanged.
+
+    Deduplicated because pasting the same key into both slots is an easy
+    mistake, and it would silently halve the apparent redundancy: the rotation
+    would "fall back" to the key that just failed and report a dead end.
+    """
+    keys: list[str] = []
+    for name in ("GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3"):
+        value = os.getenv(name, "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    if not keys:
+        raise RuntimeError("GROQ_API_KEY is required")
+    return keys
+
+
 def analysis_models() -> list[str]:
     """
     The Slow Loop model, plus fallbacks — v6 §13's degradation ladder applied

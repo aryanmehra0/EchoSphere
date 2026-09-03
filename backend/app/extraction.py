@@ -702,14 +702,13 @@ async def groq_json(
     """
     from groq import AsyncGroq
 
-    client = AsyncGroq(api_key=config.groq_api_key())
-
     # `models` lets one caller pin its own model while keeping the rest of the
     # chain as fallback. The Deliberation Panel (§7a) uses this to put each
     # persona on a DIFFERENT model — which buys genuine independence between
     # the personas and, because Groq's daily cap is scoped per model, costs
     # nothing extra in quota. Two problems, one parameter.
     models = models or config.analysis_models()
+    keys = config.groq_api_keys()
 
     # Patient on purpose. The free tier is 8000 TOKENS PER MINUTE, and a busy
     # window sends the transcript plus the Compacted State on every flush — so
@@ -718,32 +717,53 @@ async def groq_json(
     # is the window the limit is measured over.
     last: Exception | None = None
 
+    """
+    ── WHY MODEL IS THE OUTER LOOP AND KEY THE INNER ONE ───────────────────
+    Groq's daily cap is per KEY and per MODEL, so a second key is a second
+    full budget for every model. That gives two possible orderings, and the
+    choice is a quality decision rather than a bookkeeping one.
+
+    Model-outer means: exhaust every key on the BEST model before dropping to
+    a weaker one. Key-outer would drop to `gpt-oss-20b` while the strong model
+    still had a whole untouched budget on key two — and the smaller models are
+    measurably worse here. A demo that quietly degrades to a weaker model
+    while budget sits unused is the failure this ordering prevents.
+    """
     for model in models:
-        delay = 1.0
-        for attempt in range(4):
-            try:
-                return await _groq_call(client, system, user, max_tokens, model)
-            except Exception as exc:  # noqa: BLE001 — the SDK raises several shapes
-                message = str(exc)
-                if "429" not in message and "rate_limit" not in message.lower():
-                    raise
-                last = exc
+        for key_index, api_key in enumerate(keys):
+            client = AsyncGroq(api_key=api_key)
+            delay = 1.0
+            for attempt in range(4):
+                try:
+                    return await _groq_call(client, system, user, max_tokens, model)
+                except Exception as exc:  # noqa: BLE001 — the SDK raises several shapes
+                    message = str(exc)
+                    if "429" not in message and "rate_limit" not in message.lower():
+                        raise
+                    last = exc
 
-                # A DAILY cap cannot be waited out inside a request. Move to the
-                # next model immediately rather than sleeping through a demo.
-                if "per day" in message.lower() or "TPD" in message:
-                    log.error("groq: %s daily quota exhausted — falling back", model)
-                    break
+                    # A DAILY cap cannot be waited out inside a request. Try
+                    # the next KEY on this same model before giving up on the
+                    # model — that key has its own untouched daily budget.
+                    if "per day" in message.lower() or "TPD" in message:
+                        log.error(
+                            "groq: %s daily quota exhausted on key %d/%d — rotating",
+                            model, key_index + 1, len(keys),
+                        )
+                        break
 
-                wait = _retry_after(message) or delay
-                log.warning(
-                    "groq: %s rate limited (attempt %d), waiting %.1fs",
-                    model, attempt + 1, wait,
-                )
-                await asyncio.sleep(wait)
-                delay = min(delay * 2, 20.0)
+                    wait = _retry_after(message) or delay
+                    log.warning(
+                        "groq: %s rate limited on key %d (attempt %d), waiting %.1fs",
+                        model, key_index + 1, attempt + 1, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    delay = min(delay * 2, 20.0)
 
-    raise RuntimeError(f"every analysis model is rate limited: {last}")
+    raise RuntimeError(
+        f"every analysis model is rate limited across "
+        f"{len(config.groq_api_keys())} key(s): {last}"
+    )
 
 
 def _retry_after(message: str) -> float | None:

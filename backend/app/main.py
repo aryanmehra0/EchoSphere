@@ -386,6 +386,10 @@ async def model_health() -> dict[str, Any]:
     """
     from .extraction import groq_json
 
+    # Probes the model chain as a whole. `groq_json` rotates keys internally,
+    # so "available" here means "reachable on at least one key" — which is the
+    # question a pre-flight actually needs answered.
+    keys = len(config.groq_api_keys())
     results: list[dict[str, Any]] = []
     for model in config.analysis_models():
         try:
@@ -446,6 +450,9 @@ async def model_health() -> dict[str, Any]:
     return {
         "usable": len(usable),
         "primary": results[0]["model"] if results else None,
+        # Surfaced so the pre-flight can say "budget is tight" honestly: with
+        # two keys a single exhausted model is far less alarming than with one.
+        "keys": keys,
         "models": results,
     }
 

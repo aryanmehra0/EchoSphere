@@ -124,12 +124,15 @@ async function preflight() {
   } else {
     const usable = models.usable ?? 0;
     const dead = (models.models ?? []).filter((m) => !m.available);
+    const keys = models.keys ?? 1;
     const detail = usable
-      ? `${usable}/${models.models.length} models available`
+      ? `${usable}/${models.models.length} models × ${keys} key${keys === 1 ? "" : "s"}`
       : dead.map((m) => `${m.model}: ${m.reason}${m.retryAfter ? ` (retry in ${m.retryAfter})` : ""}`).join(" · ");
     say(usable > 0, "analysis budget available today", detail);
     if (usable > 0 && dead.length) {
-      console.log(d(`      ${dead.length} fallback model(s) already exhausted — budget is tight`));
+      // With two keys an exhausted model is far less alarming than with one,
+      // so the warning says how much rope is left rather than just "tight".
+      console.log(d(`      ${dead.length} model(s) exhausted across all keys`));
     }
   }
 

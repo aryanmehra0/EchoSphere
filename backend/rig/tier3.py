@@ -65,27 +65,49 @@ SCRIPT = [
 SECRET = "Marcus is being performance managed out on Friday"
 
 
+# Placeholder id stems the model falls back on when it has not named a thing.
+# `entity-1` and `entity-2` share a stem and are almost certainly DIFFERENT
+# things, so a stem check on ids alone reports drift that is not there — which
+# it did, on its first run.
+_GENERIC_STEMS = {"entity", "e", "item", "thing", "system", "unknown", "node"}
+
+
 def _no_split_entities(entities: list[dict]) -> bool:
     """
-    True when no two entity ids name the same real-world thing.
+    True when no two entities are the same real-world thing under two ids.
 
     Drift is the failure that hurts: contradiction scoping is by entity
     equality (§7 Stage 0), so "redis" and "redis-primary" as separate ids means
     the headline conflict is never even considered — silently, with a healthy
-    dashboard.
+    dashboard and nothing in the logs.
 
-    Detected by shared head token: `redis` vs `redis-primary` collide,
-    `checkout-service` vs `carts-client` do not.
+    Compared on LABEL, not id. The label is what the room actually calls the
+    thing, and it is what makes `redis` / `redis-primary` recognisable as one
+    system while `checkout-service` / `carts-client` stay two. Ids are a weaker
+    signal because the model sometimes emits placeholders, and an earlier
+    version of this check failed a perfectly good run over `entity-1` and
+    `entity-2` sharing a stem.
     """
-    heads: dict[str, str] = {}
+    seen: list[str] = []
     for entity in entities:
-        eid = str(entity.get("id") or "")
-        if not eid:
-            continue
-        head = re.split(r"[-_ ]", eid.lower())[0]
-        if head in heads:
-            return False
-        heads[head] = eid
+        label = re.sub(r"[^a-z0-9 ]+", " ", str(entity.get("label") or "").lower())
+        label = " ".join(label.split())
+
+        if not label:
+            # No label to compare — fall back to the id, unless it is one of
+            # the model's generic placeholders.
+            eid = str(entity.get("id") or "").lower()
+            stem = re.split(r"[-_ ]", eid)[0] if eid else ""
+            if not stem or stem in _GENERIC_STEMS:
+                continue
+            label = stem
+
+        for other in seen:
+            # Containment, not equality: "redis" is inside "redis primary",
+            # which is exactly the shape drift takes.
+            if label == other or label in other or other in label:
+                return False
+        seen.append(label)
     return True
 
 
