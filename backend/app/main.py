@@ -449,14 +449,42 @@ async def run_pipeline_if_ready() -> dict[str, Any] | None:
         # -- W3: does anything now conflict? -------------------------------
         spoken = None
         existing = list(ledger.claims.values())
+
+        """
+        ONE INTERRUPTION PER WINDOW - BUT THE RIGHT ONE.
+
+        This loop used to break on the first claim that produced ANY actionable
+        verdict. §5.1's single-slot queue says speak once per window, and that
+        is correct; what was wrong was letting arrival order decide WHICH.
+
+        Seen in validation: Act 1's "carts empty" and "latency is through the
+        roof" adjudicated INDEPENDENT - true, they are different properties -
+        and the loop stopped there. The pair the whole demo turns on, "the
+        cache is fine" against "cache read timeouts", was never reached.
+
+        OPPOSED short-circuits, since nothing outranks two claims that cannot
+        both be true. Anything else is held while the remaining claims are
+        checked. The extra evaluations land only when the first hit was the
+        weaker kind, and `ContradictionEngine.evaluate` still enforces its own
+        panel budget underneath, so the 429 ceiling is unchanged.
+        """
+        held: tuple[Claim, Claim, Any] | None = None
+
         for claim in new_claims:
             found = await engine.evaluate(claim, existing)
             if not found:
                 continue
 
             other, verdict = found
+            if verdict.relation == "OPPOSED":
+                held = (claim, other, verdict)
+                break
+            if held is None:
+                held = (claim, other, verdict)
+
+        if held is not None:
+            claim, other, verdict = held
             spoken = await _surface_contradiction(claim, other, verdict)
-            break  # one interruption per window; §5.1's single-slot queue
 
         return {"claims": len(new_claims), "delta": bool(delta), "spoken": spoken}
 

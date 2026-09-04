@@ -213,6 +213,71 @@ class TestFullPipeline(unittest.TestCase):
         self.assertEqual(called["n"], 0, "scoping should have prevented any LLM cost")
 
 
+
+class OpposedOutranksIndependent(unittest.TestCase):
+    """
+    A weakly-related pair must not pre-empt the pair that matters.
+
+    Found in end-to-end validation, not by a unit test. `retrieve` ranks by
+    similarity, and `evaluate` returned on the FIRST actionable verdict - so
+    "cache read timeouts" was paired with "latency is through the roof"
+    (INDEPENDENT, and correctly so), Echo announced that, and the loop stopped.
+    "The cache is fine" sat lower in the ranking, and those two genuinely
+    cannot both be true. The headline finding lost to a lesser one that merely
+    scored higher on token overlap.
+    """
+
+    def setUp(self) -> None:
+        self.eng = ContradictionEngine()
+
+    def _run(self, new, existing, responses):
+        """Feed a scripted verdict per adjudication call, in order."""
+        calls = {"n": 0}
+
+        async def fake(system, user):
+            i = min(calls["n"], len(responses) - 1)
+            calls["n"] += 1
+            rel, conf = responses[i]
+            return json.dumps({"relation": rel, "confidence": conf, "why": "test"})
+
+        return asyncio.run(
+            self.eng.evaluate(new, existing, call_llm=fake, use_panel=False)
+        )
+
+    def test_an_opposed_pair_wins_even_when_ranked_lower(self) -> None:
+        new = claim("c-new", "application logs show cache read timeouts on checkout",
+                    "redis", role="Support Engineer")
+        existing = [
+            claim("c-lat", "latency is through the roof", "redis"),
+            claim("c-fine", "the cache is fine", "redis"),
+        ]
+        # Whichever order retrieval returns them in, the first adjudication
+        # says INDEPENDENT and the second says OPPOSED.
+        found = self._run(new, existing, [("INDEPENDENT", 0.95), ("OPPOSED", 0.90)])
+        self.assertIsNotNone(found, "nothing surfaced at all")
+        _, v = found
+        self.assertEqual(v.relation, "OPPOSED",
+                         "an actionable INDEPENDENT pre-empted the OPPOSED pair")
+
+    def test_an_independent_still_surfaces_when_nothing_opposes(self) -> None:
+        """
+        The held verdict is a fallback, not a filter. Two people arguing past
+        each other is worth saying - just never worth saying INSTEAD.
+        """
+        new = claim("c-new", "application logs show cache read timeouts on checkout",
+                    "redis", role="Support Engineer")
+        existing = [claim("c-lat", "latency is through the roof", "redis")]
+        found = self._run(new, existing, [("INDEPENDENT", 0.95)])
+        self.assertIsNotNone(found, "an actionable INDEPENDENT was dropped")
+        self.assertEqual(found[1].relation, "INDEPENDENT")
+
+    def test_nothing_actionable_still_returns_none(self) -> None:
+        new = claim("c-new", "application logs show cache read timeouts on checkout",
+                    "redis", role="Support Engineer")
+        existing = [claim("c-lat", "latency is through the roof", "redis")]
+        self.assertIsNone(self._run(new, existing, [("AGREES", 0.99)]))
+
+
 if __name__ == "__main__":
     unittest.main()
 

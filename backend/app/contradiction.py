@@ -373,6 +373,9 @@ class ContradictionEngine:
             return None
 
         deliberated = 0
+        # The best non-OPPOSED verdict found so far, kept in case nothing
+        # stronger turns up. See the block at the end of this loop.
+        held: tuple[Claim, "Adjudication | PanelVerdict"] | None = None
 
         for claim, score in self.retrieve(new, candidates):
             if self.in_cooldown(new.id, claim.id, now=now):
@@ -412,9 +415,40 @@ class ContradictionEngine:
             )
 
             if verdict.is_actionable:
-                return claim, verdict
+                """
+                OPPOSED OUTRANKS INDEPENDENT, AND THE LOOP USED TO IGNORE THAT.
 
-        return None
+                This returned on the FIRST actionable verdict, whatever it was.
+                `retrieve` ranks by similarity, not by importance, so a weakly
+                related pair can outrank the pair that matters - and once an
+                actionable INDEPENDENT was found the loop stopped, leaving the
+                OPPOSED pair behind it unexamined.
+
+                Seen in validation: "cache read timeouts" was paired with
+                "latency is through the roof" (INDEPENDENT, correctly - they
+                are different properties), Echo announced that, and the run
+                ended. "The cache is fine" was sitting two places down the
+                ranking, and those two genuinely cannot both be true. The
+                headline finding was lost to a lesser one that merely scored
+                higher on token overlap.
+
+                The two relations are not peers. OPPOSED means two claims
+                cannot both be true, which is the thing a bridge most needs to
+                hear. INDEPENDENT means people are talking past each other -
+                worth saying, never worth saying INSTEAD.
+
+                So OPPOSED still short-circuits, and an INDEPENDENT is held
+                while the remaining candidates are checked. The extra spend
+                lands only when the first hit was the weaker kind, which is
+                exactly when it is worth spending; PANEL_PAIR_BUDGET still caps
+                the panels, so the ceiling that caused the 429 storm is intact.
+                """
+                if verdict.relation == "OPPOSED":
+                    return claim, verdict
+                if held is None:
+                    held = (claim, verdict)
+
+        return held
 
 
 def _strip_fences(raw: str) -> str:
