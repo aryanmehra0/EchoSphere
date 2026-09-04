@@ -1055,13 +1055,48 @@ own utterance. Now plain `speak(force=True)`. Verified across three
 registrations including a mid-test backend restart: greeted exactly once, in
 full.
 
+**Sep 4 - `validate.ps1`, and the defect it found on its first honest run.**
+"Is it working?" took five commands and five outputs that did not agree on
+what counts as working. `.alidate.ps1` now runs 28 checks against the LIVE
+system - real agent, real incident, Agora's own history, the tool endpoint
+called the way Agora calls it, the auth gate attacked from outside - and
+prints one verdict.
+
+Writing it cost three of my own harness bugs before it accused the product of
+anything, which is the lesson restated: `$web` and `$WEB` are the SAME
+variable in PowerShell, so assigning the parsed health JSON blanked the base
+URL and every later call built a hostless URI; `unittest discover` was run
+from the repo root instead of `backend/`; and the settle-loop stopped after 4
+seconds of `inFlight == 0`, which Demo Script v2 satisfies in each of its 9,
+11 and 17 second gaps - so it measured mid-feed and reported claims missing
+that arrived seconds later. **That last one is the third time this project has
+mistaken a pause for an ending.**
+
+Once the harness was honest it found a real one. `retrieve` ranks candidate
+pairs by similarity, and both the engine loop and the pipeline loop returned
+on the FIRST actionable verdict - so arrival order decided which finding the
+room heard. Act 1's "carts empty" vs "latency is through the roof"
+adjudicated INDEPENDENT (correctly: different properties), Echo announced
+that, and the loop stopped. The pair the demo turns on - "the cache is fine"
+vs "cache read timeouts" - was never reached. **The headline moment was being
+lost about one run in two, and it looked like model flakiness.**
+
+OPPOSED now short-circuits both loops; anything weaker is held while the
+remaining candidates are checked. The extra spend lands only when the first
+hit was the weaker kind. `PANEL_PAIR_BUDGET` still caps panels underneath, so
+the ceiling that caused the 429 storm is untouched, and §5.1's
+one-interruption-per-window still holds - what changed is which one.
+
+**Three consecutive 28/28 PASS runs afterwards**, the headline contradiction
+firing in every one, adjudicated by two different models each time.
+
 **Still not verified by a human mouth.** Everything up to the microphone is
 proven: ASR runs (`source: "asr"` in Agora's history), tools are reachable
 when the tunnel is up, the LLM is wired to Groq, TTS speaks. Whether a real
 spoken question comes back as a spoken answer needs someone to say it out
 loud — `npm run demo speech`.
 
-**Tests: 195 backend + 118 frontend = 313.**
+**Tests: 198 backend + 118 frontend = 316.**
 
 ---
 

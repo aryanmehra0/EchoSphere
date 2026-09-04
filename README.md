@@ -30,12 +30,19 @@ Two consequences of taking that seriously:
 From the repository root, in **PowerShell**:
 
 ```powershell
-.\start.ps1            # console + Slow Loop
-.\start.ps1 -Tunnel    # ...and let Echo answer questions
+.\start.ps1 -Tunnel    # console + Slow Loop + the tunnel Echo needs
+.alidate.ps1         # prove it works, end to end, against live Agora
 ```
 
-It starts both services, waits until each genuinely answers, and runs the
-pre-flight. Then open **http://localhost:3000**, press **`J`**, and run
+`start.ps1` brings everything up and waits until each service genuinely
+answers. `validate.ps1` then runs 28 checks against the LIVE system — it
+invites a real Agora agent, feeds a real incident, reads what Agora itself
+recorded, calls the tool endpoint the way Agora calls it, and tries to get
+past the auth gate. It prints one verdict.
+
+A green test suite is not a working product: four real UI defects here once
+passed typecheck, lint and build. That is why validation asserts against the
+vendor's own records rather than our logging. Then open **http://localhost:3000**, press **`J`**, and run
 `npm run demo feed` from `frontend/`. Echo announces itself out loud on
 joining — that greeting is your proof the voice path is live.
 

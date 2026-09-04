@@ -68,6 +68,7 @@ report `ready: true`. The pipeline runs end to end and is screenshotted.
 ```powershell
 # From the repo root — PowerShell 5.1 has NO `&&`; it is a parse error.
 .\start.ps1 -Tunnel -Reset   # everything, including Echo's tools
+.alidate.ps1               # 28 live checks -> one verdict   <- run this
 
 cd frontend
 npm run verify    # typecheck → lint → tests → build   ← the gate
@@ -78,7 +79,7 @@ npm run spike     # S0 Bridge Spike (needs credentials)
 
 ```bash
 cd backend
-.venv/Scripts/python -m unittest discover -s tests -t .   # 195 tests
+.venv/Scripts/python -m unittest discover -s tests -t .   # 198 tests
 .venv/Scripts/python -m uvicorn app.main:app --port 8000  # the Slow Loop
 .venv/Scripts/python -m rig.tier2 --runs 5 --scenario full-demo
 .venv/Scripts/python -m rig.tier3 --runs 3   # ← the S6 gate, needs the server up
