@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   buildAgentPayload,
+  buildLlmVendor,
+  MANAGED_FAST_LOOP_MODEL,
+  MANAGED_MODELS,
+  MANAGED_OPENAI_URL,
   buildSystemPrompt,
   buildToolsBlock,
   FAST_LOOP_MODEL,
@@ -165,5 +169,65 @@ describe("Echo does not fill silence", () => {
       payload({ groqModel: "openai/gpt-oss-20b" }).properties.llm.params.model,
       "openai/gpt-oss-20b",
     );
+  });
+});
+
+describe("the managed Fast Loop matches the official quickstart", () => {
+  /*
+    Read off `agora_agent/agentkit/vendors/llm.py`, `OpenAI.to_config()`:
+
+      config = { url: base_url or "https://api.openai.com/v1/chat/completions",
+                 params, style: "openai", input_modalities }
+      if api_key is not None: config["api_key"] = api_key
+
+    and its validator:
+
+      "OpenAI Agora-managed mode does not allow vendor"
+      "OpenAI requires api_key unless using a supported Agora-managed model"
+
+    The first attempt at managed mode sent `vendor: "openai"` with no url -
+    precisely the combination the SDK forbids. Agora answered 200 RUNNING and
+    the LLM leg never ran, which is this API's signature failure.
+  */
+  test("managed sends the OpenAI url and NO api_key", () => {
+    const llm = buildLlmVendor("managed", "unused-key", "unused-model");
+    assert.equal(llm.url, MANAGED_OPENAI_URL);
+    assert.equal("api_key" in llm, false, "a key on the managed path defeats the point");
+  });
+
+  test("managed never sends `vendor` - the SDK rejects that outright", () => {
+    const llm = buildLlmVendor("managed", "k", "m");
+    assert.equal("vendor" in llm, false);
+  });
+
+  test("the managed model is one Agora will supply a credential for", () => {
+    assert.ok(
+      MANAGED_MODELS.includes(MANAGED_FAST_LOOP_MODEL),
+      `${MANAGED_FAST_LOOP_MODEL} is not on the SDK allowlist; a key would be required`,
+    );
+  });
+
+  test("groq mode still carries url, key and style", () => {
+    const llm = buildLlmVendor("groq", "gsk-test", "openai/gpt-oss-120b");
+    assert.match(String(llm.url), /api\.groq\.com/);
+    assert.equal(llm.api_key, "gsk-test");
+    assert.equal(llm.style, "openai");
+    assert.equal(llm.params.model, "openai/gpt-oss-120b");
+  });
+
+  test("both modes keep the epistemic prompt and the tools", () => {
+    for (const mode of ["managed", "groq"] as const) {
+      const p = buildAgentPayload({
+        channel: "inc-4417", agentUid: 9000, userUid: 1001,
+        agentRtcToken: "t", groqApiKey: "k",
+        tts: { vendor: "elevenlabs", apiKey: "e" },
+        toolBaseUrl: "https://x.trycloudflare.com", toolSecret: "s",
+        llmMode: mode,
+      }) as { properties: { llm: { system_messages: Array<{ content: string }>; tools?: unknown[] } } };
+
+      assert.match(p.properties.llm.system_messages[0].content, /NEVER ASSERT CAUSATION/,
+                   `Rule 2 missing in ${mode} mode`);
+      assert.equal(p.properties.llm.tools?.length, 5, `tools missing in ${mode} mode`);
+    }
   });
 });

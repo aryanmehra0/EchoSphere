@@ -149,6 +149,7 @@ export async function POST(request: Request) {
       agentRtcToken: agentTokens.rtcToken,
       groqApiKey: fastLoop.apiKey,
       groqModel: fastLoop.model,
+      llmMode: serverEnv.llmMode,
       tts: {
         vendor,
         apiKey: serverEnv.ttsApiKey,
@@ -271,7 +272,8 @@ export async function POST(request: Request) {
         left. The Slow Loop rotates past that; the Fast Loop cannot.
       */
       fastLoop: {
-        model: fastLoop.model,
+        mode: serverEnv.llmMode,
+        model: serverEnv.llmMode === "managed" ? "gpt-4o-mini (Agora-managed)" : fastLoop.model,
         keyIndex: fastLoop.keyIndex,
         voiceVerified: fastLoop.verified,
         ...(fastLoop.detail ? { detail: fastLoop.detail } : {}),

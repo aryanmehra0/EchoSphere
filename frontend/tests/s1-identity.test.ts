@@ -304,6 +304,10 @@ describe("Agent configuration", () => {
       groqApiKey: "gsk-test",
       tts: { vendor: "elevenlabs", apiKey: "el-test" },
       toolBaseUrl,
+      // Explicit: these assertions are about the BYOK/Groq shape - `url`,
+      // `api_key` and `style` exist only on that path. The managed path is
+      // covered separately in agent-tools.test.ts.
+      llmMode: "groq" as const,
     });
 
   test("the payload carries the prompt, the tools and the VAD config", () => {

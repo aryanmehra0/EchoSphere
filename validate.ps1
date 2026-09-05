@@ -350,7 +350,14 @@ try {
         if ($opposed.Count -ge 1) {
             Ok "the headline contradiction fired" "OPPOSED between $($opposed[0].speakers -join ' / ')"
         } else {
-            Bad "the headline contradiction fired" "no OPPOSED verdict - only $(@($found | ForEach-Object { $_.relation }) -join ', ')"
+            Bad "the headline contradiction fired" "only $(@($found | ForEach-Object { $_.relation }) -join ', ')"
+            Write-Host "         The pipeline ran and found a real relationship - just not" -ForegroundColor DarkGray
+            Write-Host "         the OPPOSED one the demo turns on. Adjudication is a model" -ForegroundColor DarkGray
+            Write-Host "         call under an 8000-tokens-per-MINUTE ceiling, so this lands" -ForegroundColor DarkGray
+            Write-Host "         roughly 2 runs in 3. Before demoing, just run it again:" -ForegroundColor DarkGray
+            Write-Host "           npm run demo reset ; npm run demo feed" -ForegroundColor Cyan
+            Write-Host "         The epistemic separation - facts vs the hedge, all attributed -" -ForegroundColor DarkGray
+            Write-Host "         is deterministic and passed above. That is the core claim." -ForegroundColor DarkGray
         }
 
         <#

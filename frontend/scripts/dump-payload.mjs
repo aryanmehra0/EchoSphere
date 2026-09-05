@@ -13,6 +13,14 @@ import { buildAgentPayload } from "../src/lib/server/agent-config.ts";
 
 const withTools = process.argv.includes("--tools");
 
+/*
+  Read the mode the same way the invite route does, or this prints the default
+  rather than the truth. It showed the Groq block while the running console was
+  building managed, which is exactly the kind of quiet disagreement between a
+  diagnostic and the system it describes that this file exists to prevent.
+*/
+const llmMode = process.env.AGENT_LLM_MODE?.trim() === "groq" ? "groq" : "managed";
+
 const payload = buildAgentPayload({
   channel: "inc-4417",
   agentUid: 9000,
@@ -20,6 +28,7 @@ const payload = buildAgentPayload({
   agentRtcToken: "<RTC_TOKEN>",
   groqApiKey: "<GROQ_KEY>",
   tts: { vendor: "elevenlabs", apiKey: "<TTS_KEY>", voiceId: "<VOICE_ID>" },
+  llmMode,
   ...(withTools
     ? { toolBaseUrl: "https://example.trycloudflare.com", toolSecret: "<TOOL_SECRET>" }
     : {}),
@@ -31,4 +40,5 @@ if (shown?.properties?.llm?.system_messages) {
   const n = shown.properties.llm.system_messages[0].content.length;
   shown.properties.llm.system_messages = [`<SYSTEM PROMPT, ${n} chars>`];
 }
+console.log(`// AGENT_LLM_MODE=${llmMode}${llmMode === "managed" ? "  (Agora supplies the model - no api_key sent)" : ""}`);
 console.log(JSON.stringify(shown, null, 2));

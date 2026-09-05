@@ -341,6 +341,27 @@ export const GROQ_CHAT_COMPLETIONS_URL =
  */
 export const FAST_LOOP_MODEL = "openai/gpt-oss-120b";
 
+/**
+ * The model on the Agora-managed path.
+ *
+ * Copied from the official quickstart's `OpenAI(model="gpt-4o-mini")`, which
+ * carries no api_key - Agora supplies and bills it. Same string, so a reader
+ * comparing the two files sees they agree.
+ */
+export const MANAGED_FAST_LOOP_MODEL = "gpt-4o-mini";
+
+/**
+ * Sent even on the managed path. `OpenAI.to_config()` always emits a url and
+ * only conditionally emits `api_key`; omitting the url is not how managed
+ * mode is expressed.
+ */
+export const MANAGED_OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+
+/** Models Agora will supply a credential for. From the SDK's own allowlist. */
+export const MANAGED_MODELS = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-5-nano", "gpt-5-mini"];
+
+export type LlmMode = "managed" | "groq";
+
 export type TtsVendor = "elevenlabs" | "sarvam";
 
 export interface TtsSettings {
@@ -480,6 +501,88 @@ const TOOL_ROUTES: Record<string, { path: string; body: Record<string, unknown> 
  * DISABLED. Echo can still hear, speak and be interrupted; it simply cannot
  * read the Ledger, and the console says so rather than letting it improvise.
  */
+/**
+ * The vendor half of the `llm` block.
+ *
+ * Declared with one shape rather than a discriminated union so that callers -
+ * and the test suite - can read `llm.url` without narrowing first. The fields
+ * that do not apply to a mode are simply absent at runtime, which is what
+ * Agora expects.
+ */
+export interface LlmVendorBlock {
+  url?: string;
+  api_key?: string;
+  vendor?: string;
+  style?: string;
+  params: {
+    model: string;
+    max_tokens: number;
+    temperature: number;
+    top_p?: number;
+  };
+}
+
+export function buildLlmVendor(
+  mode: LlmMode,
+  groqApiKey: string,
+  groqModel: string,
+): LlmVendorBlock {
+  if (mode === "managed") {
+    /*
+      ── READ OFF THE SDK, NOT GUESSED ───────────────────────────────────────
+      `agora_agent/agentkit/vendors/llm.py`, `OpenAI.to_config()`. Managed mode
+      is NOT "omit the vendor block" and it is NOT `vendor: "openai"`:
+
+        config = { url: base_url or "https://api.openai.com/v1/chat/completions",
+                   params, style: "openai", input_modalities }
+        if api_key is not None: config["api_key"] = api_key
+
+      So the OpenAI URL is ALWAYS sent; managed differs only by leaving
+      `api_key` out, and Agora then supplies and bills the credential. The
+      validator is explicit about the two traps:
+
+        "OpenAI Agora-managed mode does not allow vendor"
+        "OpenAI requires api_key unless using a supported Agora-managed model"
+
+      The first version of this function sent `vendor: "openai"` with no url,
+      which is exactly the combination the SDK forbids - Agora returned 200
+      RUNNING and the LLM leg never ran, which is this API's signature
+      failure mode.
+
+      The allowlist is `{gpt-4o-mini, gpt-4.1-mini, gpt-5-nano, gpt-5-mini}`;
+      anything else needs a key of our own.
+    */
+    return {
+      url: MANAGED_OPENAI_URL,
+      style: "openai",
+      params: {
+        model: MANAGED_FAST_LOOP_MODEL,
+        max_tokens: 1024,
+        temperature: 0.7,
+        top_p: 0.95,
+      },
+    };
+  }
+
+  return {
+    url: GROQ_CHAT_COMPLETIONS_URL,
+    api_key: groqApiKey,
+    // `style` selects the chat-completions dialect; Groq is OpenAI-compatible,
+    // which is the only reason a custom URL works at all.
+    style: "openai",
+    params: {
+      // The model lives INSIDE params. A top-level `model` is an unknown key
+      // that Agora forwards untouched, so the request reached Groq with no
+      // model, the turn never completed, and no transcript was ever emitted.
+      model: groqModel,
+      // Echo's turns are short by design (§14.1 DELIVERY: under 15 seconds);
+      // a long ceiling only buys latency on a live bridge.
+      max_tokens: 512,
+      temperature: 0.3,
+    },
+  };
+}
+
 export function buildToolsBlock(
   toolBaseUrl: string | null,
   toolSecret: string | null = null,
@@ -535,6 +638,11 @@ export function buildAgentPayload(params: {
   toolBaseUrl?: string | null;
   /** Shared secret for the backend's tunnel gate. */
   toolSecret?: string | null;
+  /**
+   * Which Fast Loop to build. "managed" reproduces the quickstart chain
+   * (Agora supplies the model); "groq" keeps our own pinned model and key.
+   */
+  llmMode?: LlmMode;
 }) {
   return {
     name: `echo-${params.channel}`,
@@ -652,16 +760,28 @@ export function buildAgentPayload(params: {
           `style: "openai"` selects the chat-completions dialect; Groq is
           OpenAI-compatible, which is why this custom URL works at all.
         */
-        url: GROQ_CHAT_COMPLETIONS_URL,
-        api_key: params.groqApiKey,
-        params: {
-          model: params.groqModel ?? FAST_LOOP_MODEL,
-          // Echo's turns are short by design (§14.1 DELIVERY: under 15
-          // seconds), and a long ceiling only buys latency on a live bridge.
-          max_tokens: 512,
-          temperature: 0.3,
-        },
-        style: "openai",
+        /*
+          ── MANAGED vs BYOK, AND WHY BOTH EXIST ─────────────────────────────
+          `AGENT_LLM_MODE=managed` reproduces the official quickstart's chain
+          exactly: `OpenAI(model="gpt-4o-mini")` with NO api_key, which means
+          Agora supplies and bills the model. That removes the constraint that
+          sent this project to Groq in the first place - no OpenAI key was
+          obtainable, and on the managed path none is needed.
+
+          It matters because a custom `llm.url` is the one leg of the pipeline
+          that has never been observed to complete a turn here. Every line
+          Echo has ever spoken arrived through `/speak` with
+          `start_type: "api_speak"` - pushed by us. The single trace of the
+          Fast Loop model running was Agora's `failure_message`.
+
+          Keeping BOTH is deliberate. Managed is the known-good path and the
+          one the brief asks to demonstrate; Groq keeps the epistemic rules on
+          a model we pin ourselves, and costs nothing. Switch with one env var
+          and nothing else in this file changes - same prompt, same tools,
+          same VAD.
+        */
+        ...buildLlmVendor(params.llmMode ?? "groq", params.groqApiKey,
+                          params.groqModel ?? FAST_LOOP_MODEL),
         input_modalities: ["text"],
         system_messages: [
           {

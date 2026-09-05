@@ -158,6 +158,17 @@ export const serverEnv = {
    *
    * Null when unset. `start.ps1 -Tunnel` generates one and writes both halves.
    */
+  /**
+   * Which Fast Loop to build: "managed" (Agora supplies the model, exactly as
+   * the official quickstart does) or "groq" (our pinned model and key).
+   *
+   * Defaults to managed, because that is the path the brief asks to
+   * demonstrate and the only one whose LLM turn is known to complete here.
+   */
+  get llmMode(): "managed" | "groq" {
+    return process.env.AGENT_LLM_MODE?.trim() === "groq" ? "groq" : "managed";
+  },
+
   get agentToolSecret(): string | null {
     const v = process.env.AGENT_TOOL_SECRET?.trim();
     return v && v !== "" ? v : null;
