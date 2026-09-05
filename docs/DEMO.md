@@ -138,6 +138,25 @@ If the answer comes back "I can't read the incident record from here", the
 tunnel is not up. That sentence is deliberate — Echo tells you what it cannot
 do rather than inventing an answer.
 
+**Rehearse this with the check, not with hope:**
+
+```powershell
+cd frontend
+npm run demo converse
+```
+
+It streams Agora's own transcript while you talk and names which link broke —
+the four failure modes are indistinguishable from inside the room. It also
+marks Echo's proactive lines as *"(Echo speaking on its own)"* and refuses to
+count them, because an answer with no question in front of it proves nothing.
+
+**Why no script can do this for you.** Probed against the live API: Agora
+exposes no way to inject a user turn. `/agents/{id}/update` accepts
+`instruction`, `system_message` and `user_message`, returns `200` for all
+three, and voices nothing; `/chat`, `/message`, `/input_text` and a POST to
+`/history` are all `404`. A conversational turn starts with real audio or it
+does not start. Budget a minute for it in every rehearsal.
+
 ### Afterwards
 
 Press **`J`** again to leave. That stops the Agora agent. **This matters:** the

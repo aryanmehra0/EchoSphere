@@ -51,6 +51,12 @@ report `ready: true`. The pipeline runs end to end and is screenshotted.
   with **no tools** and Echo cannot answer anything (Rule 3 forbids memory).
   The tunnel exposes the whole Slow Loop, so a non-local Host must present
   `AGENT_TOOL_SECRET` — fail-closed.
+- **Agora cannot be given a user turn over the API.** `/update` takes
+  `instruction`/`system_message`/`user_message`, returns 200, and voices
+  nothing; `/chat`, `/message`, `/input_text`, POST `/history` are 404. A
+  conversational turn starts with real audio. `npm run demo converse` is the
+  human-in-the-loop check, and it discounts `start_type: "api_speak"` turns so
+  Echo's own proactive lines cannot be mistaken for an answer.
 - ⚠️ **Verify the probe before believing the finding.** Rule 7 says don't trust
   your own harness; four times now the "defect" was in the tool. Bash `curl`
   here goes through a sandbox proxy that 308s localhost. PowerShell 5.1's
@@ -69,6 +75,9 @@ report `ready: true`. The pipeline runs end to end and is screenshotted.
 # From the repo root — PowerShell 5.1 has NO `&&`; it is a parse error.
 .\start.ps1 -Tunnel -Reset   # everything, including Echo's tools
 .alidate.ps1               # 28 live checks -> one verdict   <- run this
+
+cd frontend
+npm run demo converse        # the ONE check that needs your voice
 
 cd frontend
 npm run verify    # typecheck → lint → tests → build   ← the gate

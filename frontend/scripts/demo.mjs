@@ -8,6 +8,7 @@
  *   npm run demo feed       speak Demo Script v2 at conversational pace
  *   npm run demo stop       stop the agent (also happens when you press J to leave)
  *   npm run demo speech     say a line out loud and watch the Ledger fill
+ *   npm run demo converse   talk TO Echo, and see which link breaks
  *
  * ── WHY A SCRIPT AND NOT A CHECKLIST ───────────────────────────────────────
  * Every item checked here is something that has actually gone wrong, and none
@@ -296,7 +297,155 @@ async function speech() {
   return 1;
 }
 
-const COMMANDS = { check: preflight, reset, feed, stop, speech };
+/**
+ * The conversational check - the one test a machine cannot run for you.
+ *
+ * -- WHY THIS NEEDS A HUMAN, AND ALWAYS WILL --------------------------------
+ * Probed against the live API on Sep 5: Agora exposes NO way to inject a user
+ * turn. `/agents/{id}/update` accepts `instruction`, `system_message` and
+ * `user_message` and returns 200 for all three, but voices nothing. `/chat`,
+ * `/message`, `/input_text` and a POST to `/history` are all 404, "no Route
+ * matched with those values".
+ *
+ * So a conversational turn can only be started by real audio. That is a
+ * property of the platform, not a gap in this project - which is exactly why
+ * the fastest possible human-in-the-loop check is worth building properly.
+ *
+ * This streams Agora's OWN history while you talk and names which link broke,
+ * because from inside the room the four failure modes look identical:
+ *   no turns at all        -> the audio never reached Agora
+ *   turns with no text     -> ASR ran and heard nothing
+ *   Echo refuses           -> it heard you but cannot read the Ledger
+ *   Echo answers           -> the loop is closed
+ */
+async function converse() {
+  const api = await get(`${API}/health`);
+  const web = await get(`${WEB}/api/health?voice=1`, 45000);
+
+  console.log(`\n\n  ${b("CONVERSATION CHECK")}\n`);
+
+  if (!api?.agent?.agent_id) {
+    console.log(r("  Echo is not in the channel."));
+    console.log(d("  Open http://localhost:3000, press J, wait for the greeting, then re-run.\n"));
+    return 1;
+  }
+  const agentId = api.agent.agent_id;
+
+  const state0 = await post(`${API}/tools/query_incident_state`, {});
+  const known = (state0?.established?.length ?? 0) + (state0?.openHypotheses?.length ?? 0);
+
+  console.log(d(`  agent    ${agentId}`));
+  console.log(d(`  model    ${web?.fastLoop?.model ?? "unknown"} (key #${web?.fastLoop?.keyIndex ?? "?"})`));
+  console.log(d(`  ledger   ${known} claim(s) to answer about`));
+
+  if (known === 0) {
+    console.log(y("\n  The board is empty - Echo will correctly say nothing is established."));
+    console.log(d("  Run `npm run demo feed` first if you want it to have something to say.\n"));
+  }
+
+  console.log(`\n  Say this out loud, into your microphone:\n`);
+  console.log(`    ${b('"Echo, what do we know so far?"')}\n`);
+  console.log(d("  Then, when it answers, push it:\n"));
+  console.log(`    ${b('"Echo, is Redis the cause?"')}\n`);
+  console.log(d("  Watching Agora's own transcript for 60 seconds. Ctrl-C to stop.\n"));
+
+  const seen = new Set();
+  let heard = 0;        // user turns WITH text
+  let empty = 0;        // user turns with no text
+  let answered = 0;     // assistant turns that are not the greeting
+  let refused = 0;      // Echo saying it cannot read the record
+
+  for (let i = 0; i < 30; i++) {
+    await sleep(2000);
+    const st = await get(`${WEB}/api/agent-status?agentId=${agentId}`, 20000);
+    const turns = st?.history?.body?.contents ?? [];
+
+    for (const [idx, turn] of turns.entries()) {
+      const key = `${idx}:${turn?.role}:${String(turn?.content ?? "").slice(0, 40)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const text = String(turn?.content ?? "").trim();
+
+      if (turn?.role === "user") {
+        if (text) { heard++; console.log(`  ${g("YOU ")} ${text}`); }
+        else { empty++; console.log(d("  ...  (a turn was detected but transcribed empty)")); }
+        continue;
+      }
+
+      if (!text) continue;
+
+      /*
+        ONLY AN LLM TURN COUNTS AS AN ANSWER.
+
+        The first version of this counted every assistant turn, and promptly
+        reported "THE CONVERSATION LOOP IS CLOSED" during a run where nobody
+        had said a word - it had counted Echo's own proactive contradiction
+        interventions, which the Slow Loop pushes through /speak.
+
+        Agora labels those: `metadata.start_type === "api_speak"`. Anything
+        Echo says because WE told it to carries that marker; a reply the model
+        composed after hearing someone does not. Filtering on it is the
+        difference between a check and a rubber stamp - and this repo has been
+        burned by a harness confirming what it was hoping for four times now.
+      */
+      const pushed = turn?.metadata?.start_type === "api_speak";
+      if (pushed) { console.log(d(`  ECHO ${text}`) + d("   (Echo speaking on its own)")); continue; }
+
+      if (/can.t read the incident record|cannot read the record/i.test(text)) refused++;
+      answered++;
+      console.log(`  ${b("ECHO")} ${text}`);
+    }
+  }
+
+  /* ---- the verdict, naming one failing link -------------------------- */
+  console.log("");
+  if (heard > 0 && answered > 0 && refused === 0) {
+    console.log(`  ${g(b("THE CONVERSATION LOOP IS CLOSED"))}`);
+    console.log(d("  You spoke, Agora transcribed it, Echo read the Ledger and answered aloud.\n"));
+    return 0;
+  }
+  if (answered > 0 && heard === 0) {
+    // Belt and braces on top of the api_speak filter: an answer with no
+    // question in front of it is not evidence of a conversation.
+    console.log(`  ${y(b("ECHO SPOKE, BUT NOTHING WAS HEARD FROM YOU"))}`);
+    console.log(d("  An answer with no question in front of it proves nothing about the"));
+    console.log(d("  loop. Say the line out loud and run this again.\n"));
+    return 1;
+  }
+  if (answered > 0 && refused > 0) {
+    console.log(`  ${y(b("ECHO HEARD YOU BUT CANNOT READ THE LEDGER"))}`);
+    console.log(d("  That refusal is correct behaviour, not a crash - it will not invent"));
+    console.log(d("  an answer. Give it the Ledger:  .\start.ps1 -Tunnel\n"));
+    return 1;
+  }
+  if (heard > 0) {
+    console.log(`  ${y(b("AGORA HEARD YOU, ECHO DID NOT ANSWER"))}`);
+    console.log(d("  Transcription works, so the break is in the LLM turn. Check:"));
+    console.log(d("    npm run demo     -> 'Echo can answer out loud' must pass"));
+    console.log(d("    a spent Groq daily budget shows up there and nowhere else\n"));
+    return 1;
+  }
+  if (empty > 0) {
+    console.log(`  ${y(b("ASR RAN BUT TRANSCRIBED NOTHING"))}`);
+    console.log(d("  Agora segmented your speech into turns, so the agent hears the"));
+    console.log(d("  channel and VAD works - the text came back empty. Check you are"));
+    console.log(d("  speaking into the microphone the BROWSER captured, not another"));
+    console.log(d("  device, at a normal conversational level.\n"));
+    return 1;
+  }
+  console.log(`  ${r(b("NOTHING REACHED AGORA"))}`);
+  console.log(d("  Echo's own proactive lines do not count here and are marked as such."));
+  console.log(d("  Not one turn was segmented, so the audio never arrived. Check:"));
+  console.log(d("    1. the browser tab is joined and the mic is not muted"));
+  console.log(d("    2. the browser console for [voice-agent] - zero updates means"));
+  console.log(d("       Agora published no transcript, so the fault is upstream of us"));
+  console.log(d("    3. Echo subscribes to ONE uid - with two people joined it hears"));
+  console.log(d("       whoever pressed J first\n"));
+  return 1;
+}
+
+const COMMANDS = { check: preflight, reset, feed, stop, speech, converse };
 const cmd = process.argv[2] ?? "check";
 
 if (!COMMANDS[cmd]) {

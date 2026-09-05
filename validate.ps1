@@ -440,6 +440,16 @@ if ($script:fail -eq 0) {
     Write-Host "  The pipeline is live: Agora created an agent, it spoke, speech" -ForegroundColor DarkGray
     Write-Host "  became attributed knowledge, a contradiction was adjudicated by" -ForegroundColor DarkGray
     Write-Host "  two models, and the auth gate refused everything it should." -ForegroundColor DarkGray
+    Write-Host ""
+    # Say what this CANNOT cover, every single time. A verdict that implies
+    # more than it tested is worse than no verdict - and 28/28 above says
+    # nothing about whether a spoken question comes back as a spoken answer.
+    Write-Host "  NOT COVERED HERE: you talking to Echo." -ForegroundColor Yellow
+    Write-Host "  Agora has no way to inject a user turn - /update returns 200 and" -ForegroundColor DarkGray
+    Write-Host "  voices nothing, /chat and /message are 404 - so a conversational" -ForegroundColor DarkGray
+    Write-Host "  turn can only start with real audio. One command, one minute:" -ForegroundColor DarkGray
+    Write-Host "      cd frontend" -ForegroundColor DarkGray
+    Write-Host "      npm run demo converse" -ForegroundColor Cyan
 } else {
     Write-Host "  VERDICT: FAIL" -ForegroundColor Red -NoNewline
     Write-Host "   $($script:fail) of $total checks failed" -ForegroundColor DarkGray

@@ -1090,6 +1090,39 @@ one-interruption-per-window still holds - what changed is which one.
 **Three consecutive 28/28 PASS runs afterwards**, the headline contradiction
 firing in every one, adjudicated by two different models each time.
 
+**Sep 5 - the conversational loop cannot be automated, and now we know why.**
+Probed every plausible shape against the live API. `/agents/{id}/update`
+accepts `instruction`, `system_message` and `user_message`, returns 200 for
+all three, and voices NOTHING - re-confirming the earlier finding, this time
+with tools enabled, so "the model had nothing it was allowed to say" is ruled
+out. `/chat`, `/message`, `/input_text` and POST `/history` are all 404, "no
+Route matched with those values".
+
+**A conversational turn starts with real audio or it does not start.** That is
+a property of the platform, not a gap here - so the right response was to make
+the human-in-the-loop check excellent rather than to keep hunting for an API.
+
+`npm run demo converse` streams Agora's own transcript while you talk and
+names which of four indistinguishable failures happened: no turns at all (the
+audio never arrived), turns with empty text (ASR ran and heard nothing), Echo
+refusing (heard you, cannot read the Ledger), or Echo answering.
+
+**It lied on its first run and had to be fixed.** It reported "THE
+CONVERSATION LOOP IS CLOSED" during a run where nobody had spoken - it had
+counted Echo's own proactive contradiction interventions as answers. Agora
+marks those `metadata.start_type == "api_speak"`; the check now discounts them
+and prints "(Echo speaking on its own)", and additionally refuses to declare
+the loop closed unless a USER turn was heard first. **Fifth time a harness
+here confirmed what it was hoping for.**
+
+`validate.ps1` now prints what it does NOT cover on every PASS. A verdict that
+implies more than it tested is worse than no verdict.
+
+**The referee fired live** on the Sep 5 run: SKEPTIC INDEPENDENT 0.71 vs
+SEEKER OPPOSED 0.95, split, and qwen/qwen3.8-27b settled it OPPOSED 0.95 -
+three models, which is the §7a design working exactly as intended and the best
+evidence yet that the panel is not decoration.
+
 **Still not verified by a human mouth.** Everything up to the microphone is
 proven: ASR runs (`source: "asr"` in Agora's history), tools are reachable
 when the tunnel is up, the LLM is wired to Groq, TTS speaks. Whether a real
