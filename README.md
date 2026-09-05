@@ -23,6 +23,96 @@ Two consequences of taking that seriously:
 
 ---
 
+## The problem
+
+A Sev-1 bridge call is twenty people talking at once. Within ten minutes
+nobody can tell you three things:
+
+1. **What has actually been observed**, as opposed to guessed. Somebody says
+   *"Datadog looks like Redis might be evicting keys"* and forty minutes later
+   the room is debugging Redis, because a hedge hardened into a fact the
+   moment it was repeated.
+2. **Who established what.** Claims lose their owner as they are relayed, so
+   nobody can go back and check.
+3. **What nobody has checked.** The gaps are invisible precisely because
+   nobody is looking at them.
+
+Meanwhile two engineers state things that cannot both be true — *"the cache is
+fine"* and *"cache read timeouts on checkout"* — and it goes unnoticed for
+twenty minutes, because they are describing different properties of the same
+component and each assumes the other is talking about something else.
+
+**Echo listens to the bridge and fixes exactly those three things.** It does
+not diagnose. The brief's own closing clause is *"without pretending to
+independently determine the root cause"*, and that is treated here as the
+grading rubric rather than a caveat.
+
+---
+
+## Agora Conversational AI integration
+
+Mandatory for this submission, so here is precisely what is used and where.
+
+| Agora capability | Where it runs | What it does here |
+|---|---|---|
+| **Conversational AI Engine** | `frontend/src/lib/server/agent-config.ts` | Builds and starts the cloud agent. Echo is a real participant with its own UID (9000). |
+| **Managed ASR** — Deepgram `nova-3` | `preset: deepgram_nova_3` | Transcribes the bridge. Domain terms boosted via `asr.params.keyterm`. |
+| **Managed LLM** — OpenAI `gpt-4o-mini` | `preset: openai_gpt_4o_mini` | The Fast Loop. Agora supplies and bills the model, so no OpenAI key is needed. |
+| **BYOK TTS** — ElevenLabs `eleven_flash_v2_5` | `properties.tts` | Echo's voice. The quickstart's documented BYOK path. |
+| **REST tools** | `properties.llm.tools` | Agora calls **our** endpoints mid-turn. This is what stops Echo inventing an incident. |
+| **`/agents/{id}/speak`** | `backend/app/bridge.py` | The Slow Loop puts exact, rule-validated words in Echo's mouth. |
+| **`/agents/{id}/interrupt`** | `backend/app/bridge.py` | Pre-empts Echo for a high-priority contradiction. |
+| **RTM data channel** | `parameters.data_channel: "rtm"` | Transcripts and agent state reach the browser. |
+| **Turn detection / VAD** | `properties.turn_detection` | Nested `start_of_speech` / `end_of_speech` config, tuned so Echo does not barge in on breaths. |
+| **Agent status + history** | `frontend/src/app/api/agent-status` | Every claim in this README is checked against Agora's **own** record, not our logging. |
+
+### The one that matters: REST tools
+
+Agora's Engine calls tool endpoints **from its own servers**. That single fact
+shapes the architecture:
+
+```
+  you speak  ->  Agora ASR  ->  Agora LLM  ->  calls OUR /tools/query_incident_state
+                                                        |
+                                          the same Ledger the dashboard renders
+                                                        |
+                                            <-  answer  <-  Agora TTS  ->  you hear it
+```
+
+Ask Echo what is happening and it performs a real HTTP read against the
+incident record. It cannot answer from memory, because the prompt forbids it
+and the tool is the only route to the facts.
+
+`127.0.0.1` resolves to *Agora's* machine, so a local run needs a public URL —
+`.\start.ps1 -Tunnel` opens one. The tunnel exposes the whole Slow Loop, so
+every tool call must present `AGENT_TOOL_SECRET`; the gate fails closed.
+
+### Conformance with the official quickstart
+
+Diffed field by field against `agent-quickstart-python/server/src/agent.py`,
+and where the REST shape is not obvious it was read out of the `agora-agents`
+SDK rather than guessed:
+
+- `remote_rtc_uids`, `enable_string_uid`, `advanced_features.enable_rtm`, all
+  four `parameters`, and the nested `turn_detection` shape **match**.
+- `preset` is composed the way `presets.py:resolve_session_presets` composes
+  it — one entry per managed category, comma-joined — and the fields that a
+  preset covers are omitted, because `strip_inferred_preset_fields` removes
+  them. Sending an `api_key` alongside a managed model silently drops the
+  agent off the managed path.
+- `asr.language` sits at the top level, equal to `turn_detection.language`:
+  *"turn detection is the single source of truth for the interaction
+  language, so a vendor-level language would be silently discarded."*
+
+Print the exact body we send at any time:
+
+```powershell
+cd frontend
+npm run payload
+```
+
+---
+
 ## Quick start
 
 ### The short way
@@ -257,6 +347,54 @@ and §17 (why the Bridge was proven before anything depended on it).
 
 ---
 
+## Validation
+
+One command. It asserts against the **live** Agora API rather than our own
+logging, because a green test suite is not a working product — four real UI
+defects here once passed typecheck, lint and build.
+
+```powershell
+.\validate.ps1
+```
+
+28 checks in seven groups, then a single verdict:
+
+1. **Test suites** — backend unit tests, typecheck, lint, frontend tests
+2. **Services** — both up, credentials present, no degradation banner
+3. **The tunnel** — routes, and the auth gate refuses unauthenticated,
+   wrong-token and `/bridge/say` calls from outside
+4. **A real Agora agent** — created, registered, tools enabled, `RUNNING`
+   per Agora's own status endpoint
+5. **Speech in, knowledge out** — claims extracted, the hedge kept out of the
+   facts, **every claim attributed**
+6. **The contradiction** — and whether the Deliberation Panel adjudicated it,
+   on two different models
+7. **What Agora actually voiced** — from its history: Echo spoke, greeted
+   exactly once, produced no filler, and **never asserted a cause**
+
+It also prints, on every pass, the one thing it *cannot* cover.
+
+### The human-in-the-loop check
+
+```powershell
+cd frontend
+npm run demo converse
+```
+
+Agora exposes **no way to inject a user turn** — probed against the live API:
+`/agents/{id}/update` accepts `instruction`, `system_message` and
+`user_message`, returns `200` for all three, and voices nothing; `/chat`,
+`/message`, `/input_text` and a POST to `/history` are all `404`. A
+conversational turn starts with real audio or it does not start.
+
+So `converse` streams Agora's own transcript while you talk and names which of
+four indistinguishable failures happened: nothing segmented, turns transcribed
+empty, Echo refusing because it cannot read the Ledger, or Echo answering. It
+discounts turns marked `start_type: "api_speak"` — Echo's own proactive lines
+— so they cannot be mistaken for an answer.
+
+---
+
 ## Demo requirements
 
 **Two machines, two UIDs, headsets.** Per-UID separation is the whole
@@ -280,6 +418,21 @@ Stated plainly rather than discovered by a reviewer.
   costs 15–20k, so roughly ten rehearsals a day. A fallback chain keeps the
   pipeline alive when the primary model is exhausted, but the smaller models are
   measurably worse at adjudication.
+- **The conversational turn is the one thing no script can verify.** Every
+  stage either side of it is checked by `validate.ps1` against Agora's own
+  records — agent lifecycle, ASR running, tools reachable, TTS speaking. The
+  join between them needs a person at a microphone, because Agora has no
+  text-injection endpoint (see Validation above). Budget a minute for
+  `npm run demo converse` in every rehearsal.
+- **Echo subscribes to exactly one UID.** `remote_rtc_uids` takes one
+  participant — the schema says *"currently, only one user ID is supported"* —
+  so Echo hears whoever joined first. Per-speaker audio for everyone else is
+  the Observer work below.
+- **The OPPOSED contradiction fires about two runs in three.** Adjudication is
+  a model call under an 8000-tokens-per-**minute** ceiling. The epistemic
+  separation underneath it — facts versus the hedge, all attributed — is
+  deterministic and passes every run. If the contradiction does not fire
+  before a demo, `npm run demo reset` and feed again.
 - **The Roster is in-memory in Next.js.** Fine for a single dev server; it will
   not survive serverless, and the Python Roster is the intended home.
 - **`frontend/public/listen.html` does not work on a fresh clone.** It loads the

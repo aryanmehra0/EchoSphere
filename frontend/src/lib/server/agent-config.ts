@@ -357,6 +357,25 @@ export const MANAGED_FAST_LOOP_MODEL = "gpt-4o-mini";
  */
 export const MANAGED_OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
+/** Terms this incident actually uses, boosted for the recogniser. */
+export const ASR_KEYTERMS =
+  "Redis Datadog checkout eviction latency replica failover Sev-1";
+
+/**
+ * The `preset` string, composed the way `presets.py:resolve_session_presets`
+ * composes it: one entry per managed category, comma-joined.
+ *
+ * ASR is always managed here (Agora supplies nova-3). The LLM entry appears
+ * only in managed mode - on the Groq path we send our own url and key, and
+ * `infer_llm_preset` returns null for anything carrying an `api_key`.
+ * ElevenLabs TTS is BYOK, so it never contributes a preset.
+ */
+export function buildPreset(mode: LlmMode): string {
+  const presets = ["deepgram_nova_3"];
+  if (mode === "managed") presets.push("openai_gpt_4o_mini");
+  return presets.join(",");
+}
+
 /** Models Agora will supply a credential for. From the SDK's own allowlist. */
 export const MANAGED_MODELS = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-5-nano", "gpt-5-mini"];
 
@@ -515,7 +534,12 @@ export interface LlmVendorBlock {
   vendor?: string;
   style?: string;
   params: {
-    model: string;
+    /**
+     * Absent on the managed path: `strip_inferred_preset_fields` removes it
+     * once the preset has been inferred from it, so the preset carries the
+     * model and sending it again would be redundant at best.
+     */
+    model?: string;
     max_tokens: number;
     temperature: number;
     top_p?: number;
@@ -552,11 +576,21 @@ export function buildLlmVendor(
       The allowlist is `{gpt-4o-mini, gpt-4.1-mini, gpt-5-nano, gpt-5-mini}`;
       anything else needs a key of our own.
     */
+    /*
+      No url, no api_key, no model - the preset carries all three.
+
+      `to_config()` emits the OpenAI url, but the session layer then runs
+      `strip_inferred_preset_fields()`, which removes `url`, `api_key` and
+      `params.model` once `openai_gpt_4o_mini` has been inferred from them.
+      What reaches the wire is only what the preset does NOT cover.
+
+      Sending them anyway is not harmless: `infer_llm_preset` returns null for
+      any llm block carrying an `api_key`, so a stray key silently drops the
+      agent off the managed path entirely.
+    */
     return {
-      url: MANAGED_OPENAI_URL,
       style: "openai",
       params: {
-        model: MANAGED_FAST_LOOP_MODEL,
         max_tokens: 1024,
         temperature: 0.7,
         top_p: 0.95,
@@ -670,7 +704,7 @@ export function buildAgentPayload(params: {
       null the moment a key is present — a managed preset and a BYOK block are
       mutually exclusive by construction.
     */
-    preset: "deepgram_nova_3",
+    preset: buildPreset(params.llmMode ?? "groq"),
 
     properties: {
       channel: params.channel,
@@ -704,8 +738,7 @@ export function buildAgentPayload(params: {
       enable_string_uid: false,
       idle_timeout: 300,
       advanced_features: {
-        enable_aivad: false,
-        enable_rtm: true,
+          enable_rtm: true,
         // Tracks whether tools were ACTUALLY attached. Declaring tools the
         // Engine cannot reach is worse than declaring none: the model retries,
         // collects errors, and falls back on its own memory — the exact
@@ -842,25 +875,59 @@ export function buildAgentPayload(params: {
         is what the hackathon organisers pointed at for teams without their own
         provider keys.
       */
+      /*
+        ── EVERY DEEPGRAM SETTING LIVES INSIDE `params` ────────────────────────
+        Read off the SDK, `vendors/stt.py`, `DeepgramSTT.to_config()`:
+
+            params = {}
+            if model:        params["model"]    = model
+            if language:     params["language"] = language
+            ...
+            return {"vendor": "deepgram", "params": params}
+
+        This block previously carried `language` as a SIBLING of `params` and
+        no `model` at all, relying on the top-level `preset` to supply the
+        model. Both are wrong, and both fail silently:
+
+          - Agora forwards unknown keys untouched, so a misplaced `language`
+            is not rejected - it is simply never given to Deepgram.
+          - `presets.py:infer_asr_preset()` DERIVES the preset FROM
+            `params.model`. The preset is a consequence of the model, not a
+            replacement for it.
+
+        The observed symptom is exactly what that predicts, and it is the one
+        a room notices: VAD segments the turn, Agora records a `user` turn
+        with `source: "asr"`, and `content` comes back EMPTY. The agent looks
+        like it is listening and hears nothing.
+
+        `strip_inferred_preset_fields()` then removes `params.model` once the
+        preset covers it, and explicitly KEEPS `params.language` - which is
+        why language belongs here and the model does not need to.
+
+        `en` rather than `en-US`, matching the quickstart's
+        `DeepgramSTT(model="nova-3", language="en")`.
+      */
       asr: {
         vendor: "deepgram",
         params: {
-          // NO `model` here — deliberately. The `deepgram_nova_3` preset above
-          // carries it, and the SDK's `strip_inferred_preset_fields` removes
-          // this key before the POST when the preset matches. Sending both is
-          // how you end up with a preset that silently does not apply.
-          //
-          // `keyterm`, NOT `keywords` — the latter is not a Deepgram option and
-          // was silently discarded. Biasing matters here: without it "Redis"
-          // reliably becomes "read us", and extraction then invents an entity
-          // nobody mentioned.
-          keyterm: "Redis Datadog checkout eviction latency replica failover Sev-1",
+          // Domain vocabulary. An incident bridge says "Redis" and "Datadog"
+          // far more often than general English does, and Deepgram scores
+          // these terms higher when they are named.
+          keyterm: ASR_KEYTERMS,
           smart_format: true,
           punctuation: true,
         },
-        // Kept in step with turn_detection deliberately. The SDK treats turn
-        // detection as the single source of truth for interaction language and
-        // OVERWRITES this field; a mismatch here would be silently discarded.
+        // TOP LEVEL, and equal to turn_detection.language. `agent.py`:
+        //
+        //   # Unconditional: turn detection is the single source of truth for
+        //   # the interaction language, so a vendor-level `language` would be
+        //   # silently discarded here.
+        //   asr_config["language"] = field(turn_detection_config, "language")
+        //
+        // A previous edit moved this into `params` on the strength of
+        // `DeepgramSTT.to_config()`, which does put it there - but the session
+        // layer overwrites it from turn detection afterwards, so params is
+        // exactly where it gets thrown away.
         language: TURN_DETECTION.language,
       },
     },

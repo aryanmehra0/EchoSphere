@@ -1123,6 +1123,46 @@ SEEKER OPPOSED 0.95, split, and qwen/qwen3.8-27b settled it OPPOSED 0.95 -
 three models, which is the §7a design working exactly as intended and the best
 evidence yet that the panel is not decoration.
 
+**Sep 5 (later) - the SDK is the spec, and reading it settled three things.**
+You reported the official quickstart working for both listening and talking,
+and `npm run demo converse` gave the first real signal from a human: a turn
+WAS segmented and came back **transcribed empty**. So I installed
+`agora-agents` and read the wire shape instead of inferring it.
+
+1. **Managed LLM.** `OpenAI(model="gpt-4o-mini")` carries no api_key - Agora
+   supplies and bills it, removing the constraint that sent this project to
+   Groq. `AGENT_LLM_MODE` now selects managed (default) or groq.
+
+2. **What managed actually looks like on the wire.** Not what I first wrote.
+   `to_config()` emits the OpenAI url, but `strip_inferred_preset_fields()`
+   then removes `url`, `api_key` and `params.model` once the preset has been
+   INFERRED from them. `preset` is composed per managed category and
+   comma-joined - `deepgram_nova_3,openai_gpt_4o_mini`. Sending an api_key
+   alongside a managed model makes `infer_llm_preset` return null and
+   silently drops the agent off the managed path.
+
+3. **The ASR "fix" that would have broken it.** `DeepgramSTT.to_config()` puts
+   `language` inside `params`, so I moved ours there. Then `agent.py`:
+
+       # Unconditional: turn detection is the single source of truth for the
+       # interaction language, so a vendor-level `language` would be silently
+       # discarded here.
+       asr_config["language"] = field(turn_detection_config, "language")
+
+   Top level, from turn detection - which is what we already had. **The ASR
+   config was correct all along and I reverted my own change.** `en-US` is the
+   SDK's own DEFAULT_TURN_DETECTION_LANGUAGE, so that is right too.
+
+   Dropped `advanced_features.enable_aivad`, which the quickstart does not
+   send and we had no reason to.
+
+**So the empty transcript is not a payload defect.** Everything Agora is given
+now matches the SDK's own output. The remaining candidates are the microphone
+the browser actually captured, speaking level, or speaking over Echo's
+greeting - which is what `converse` is built to tell apart.
+
+**Tests: 198 backend + 124 frontend = 322.** Validation 28/28.
+
 **Still not verified by a human mouth.** Everything up to the microphone is
 proven: ASR runs (`source: "asr"` in Agora's history), tools are reachable
 when the tunnel is up, the LLM is wired to Groq, TTS speaks. Whether a real

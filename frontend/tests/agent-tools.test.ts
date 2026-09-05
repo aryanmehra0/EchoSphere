@@ -6,7 +6,7 @@ import {
   buildLlmVendor,
   MANAGED_FAST_LOOP_MODEL,
   MANAGED_MODELS,
-  MANAGED_OPENAI_URL,
+  buildPreset,
   buildSystemPrompt,
   buildToolsBlock,
   FAST_LOOP_MODEL,
@@ -189,10 +189,29 @@ describe("the managed Fast Loop matches the official quickstart", () => {
     precisely the combination the SDK forbids. Agora answered 200 RUNNING and
     the LLM leg never ran, which is this API's signature failure.
   */
-  test("managed sends the OpenAI url and NO api_key", () => {
+  test("managed sends no url, no api_key and no model - the preset carries them", () => {
+    /*
+      `to_config()` emits the OpenAI url, but the session layer then runs
+      `strip_inferred_preset_fields()`, which removes `url`, `api_key` and
+      `params.model` once `openai_gpt_4o_mini` has been inferred from them.
+      Only what the preset does NOT cover reaches the wire.
+
+      Sending a key anyway is not harmless: `infer_llm_preset` returns null
+      for any llm block carrying `api_key`, which silently drops the agent
+      off the managed path.
+    */
     const llm = buildLlmVendor("managed", "unused-key", "unused-model");
-    assert.equal(llm.url, MANAGED_OPENAI_URL);
-    assert.equal("api_key" in llm, false, "a key on the managed path defeats the point");
+    assert.equal("url" in llm, false, "the preset carries the url");
+    assert.equal("api_key" in llm, false, "a key drops us off the managed path");
+    assert.equal(llm.params.model, undefined, "the preset carries the model");
+    assert.equal(llm.style, "openai");
+  });
+
+  test("the preset names every managed category, comma-joined", () => {
+    // `resolve_session_presets` composes one entry per managed category.
+    // ASR is always managed; the LLM entry appears only in managed mode.
+    assert.equal(buildPreset("managed"), "deepgram_nova_3,openai_gpt_4o_mini");
+    assert.equal(buildPreset("groq"), "deepgram_nova_3");
   });
 
   test("managed never sends `vendor` - the SDK rejects that outright", () => {
