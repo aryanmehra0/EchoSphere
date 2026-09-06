@@ -13,6 +13,7 @@ import json
 import unittest
 
 from app.extraction import (
+    resolve_links,
     SchemaError,
     TurnWindow,
     compact,
@@ -340,6 +341,76 @@ class PlaceholderAttribution(unittest.TestCase):
             {"claims": [self._claim("Unknown Systems Lead")]}, window_text=one
         )
         self.assertEqual(len(out["claims"]), 1)
+
+
+class GraphLinks(unittest.TestCase):
+    """
+    The canvas draws entities; the model was emitting claim-to-claim links.
+
+    Read off a live snapshot: four entity nodes and five links whose endpoints
+    were claim ids. React Flow drops an edge matching no node, silently, so the
+    graph rendered as unconnected boxes and looked unbuilt.
+    """
+
+    ENTITIES = [{"id": "e1", "label": "checkout"}, {"id": "e2", "label": "Redis"}]
+    CLAIMS = [
+        {"id": "c1", "entity": "e1"},
+        {"id": "c2", "entity": "e2"},
+        {"id": "c3", "entity": "e1"},
+    ]
+
+    def _links(self, *links: dict) -> list[dict]:
+        return resolve_links(list(links), self.ENTITIES, self.CLAIMS)
+
+    def test_an_entity_to_entity_link_is_kept(self) -> None:
+        out = self._links({"id": "l", "source": "e1", "target": "e2",
+                           "label": "reads from", "kind": "depends"})
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0]["source"], out[0]["target"]), ("e1", "e2"))
+
+    def test_claim_endpoints_resolve_to_their_entities(self) -> None:
+        """
+        A contradiction genuinely IS between two claims, so these are not
+        nonsense - they are the wrong id space. Resolving each claim to its
+        entity turns "these statements conflict" into "these systems are in
+        tension", which a graph of systems can honestly show.
+        """
+        out = self._links({"id": "l", "source": "c1", "target": "c2",
+                           "label": "contradiction", "kind": "suspected"})
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0]["source"], out[0]["target"]), ("e1", "e2"))
+
+    def test_a_self_loop_is_dropped(self) -> None:
+        # Two claims about the same system. Real, but a loop tells a reader
+        # nothing they can act on.
+        self.assertEqual(self._links({"id": "l", "source": "c1", "target": "c3",
+                                      "label": "x", "kind": "depends"}), [])
+
+    def test_an_unresolvable_endpoint_is_dropped(self) -> None:
+        self.assertEqual(self._links({"id": "l", "source": "nope", "target": "e2",
+                                      "label": "x", "kind": "depends"}), [])
+
+    def test_a_causal_KIND_never_reaches_the_graph(self) -> None:
+        """§6.2 Rule 2 does not care whether the assertion is a sentence or an
+        edge. An arrow labelled "causes" is a root cause drawn on screen."""
+        out = self._links({"id": "l", "source": "e1", "target": "e2",
+                           "label": "", "kind": "causal"})
+        self.assertEqual(out[0]["kind"], "suspected")
+
+    def test_a_causal_LABEL_is_stripped_even_on_a_legal_kind(self) -> None:
+        # The label is what a reader sees, so a compliant `kind` with a
+        # diagnosing label is the same violation wearing a disguise.
+        out = self._links({"id": "l", "source": "e1", "target": "e2",
+                           "label": "Redis causes the 500s", "kind": "depends"})
+        self.assertEqual(out[0]["kind"], "suspected")
+        self.assertEqual(out[0]["label"], "")
+
+    def test_duplicate_edges_are_collapsed(self) -> None:
+        out = self._links(
+            {"id": "a", "source": "e1", "target": "e2", "label": "a", "kind": "depends"},
+            {"id": "b", "source": "e1", "target": "e2", "label": "b", "kind": "depends"},
+        )
+        self.assertEqual(len(out), 1)
 
 
 if __name__ == "__main__":

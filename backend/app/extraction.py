@@ -101,6 +101,8 @@ Return JSON with exactly these keys:
 {
   "entities":  [{"id","label","kind","status","detail","metric","aliases"}],
   "links":     [{"id","source","target","label","kind"}],
+               // source and target are ENTITY ids from the list above
+               // ("e1", "e2"), never claim ids. A link joins two SYSTEMS.
   "claims":    [{"id","text","entity","epistemicStatus","speakerRole","confidence"}],
   "tasks":     [{"id","assigneeRole","description","status","evidence"}],
   "timeline":  [{"id","kind","text","actor"}],
@@ -109,7 +111,13 @@ Return JSON with exactly these keys:
 
 kind for entities: service|datastore|network|gateway|region|client
 status for entities: CRITICAL|WARNING|OK|UNKNOWN
-kind for links: causal|suspected|depends
+kind for links: depends|suspected
+
+NEVER emit a causal link. "A causes B" is the one assertion this system does
+not make, and an edge labelled that way puts it on screen where a reader takes
+it as a finding. Use `depends` for a structural relationship somebody stated
+("checkout reads from Redis") and `suspected` for one somebody proposed but
+nobody has confirmed.
 status for tasks: OPEN|IN_PROGRESS|BLOCKED|DONE
 kind for timeline: signal|decision|action|contradiction|resolution
 
@@ -267,6 +275,100 @@ _PLACEHOLDER_ROLE = re.compile(
 
 # "[DevOps Lead] Latency is through the roof" — TurnWindow.render()'s shape.
 _WINDOW_SPEAKER = re.compile(r"^\[([^\]]+)\]", re.M)
+
+
+# Link kinds that may reach the graph. `causal` is deliberately absent: an
+# edge labelled "causes" is a root-cause assertion drawn on screen, and §6.2
+# Rule 2 does not care whether the claim is made in a sentence or a picture.
+_LINK_KINDS = {"depends", "suspected"}
+
+# The words a model reaches for when it means "causes" but was told not to
+# say it. Checked on the LABEL, which is what a reader actually sees.
+_CAUSAL_LABEL = re.compile(
+    r"\b(caus\w*|because|due\s+to|results?\s+in|leads?\s+to|triggers?|"
+    r"responsible\s+for|root)\b",
+    re.I,
+)
+
+
+def resolve_links(
+    links: list[dict[str, Any]],
+    entities: list[dict[str, Any]],
+    claims: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Keep only links the graph can actually draw, and none that assert a cause.
+
+    ── WHY THIS EXISTS ─────────────────────────────────────────────────────
+    Read off a live snapshot: the canvas had four entity nodes (`e1`..`e4`)
+    and five links whose endpoints were CLAIM ids (`c7`, `c6`, `c9`...).
+    React Flow drops an edge whose endpoints match no node, silently, so the
+    graph rendered as unconnected boxes and looked like a feature that had
+    not been built.
+
+    Claim endpoints are not nonsense, though - a contradiction genuinely is
+    between two claims. So rather than discard them, each claim is resolved to
+    the entity it is about, which turns "these two statements conflict" into
+    "these two systems are in tension", which is what a graph of systems can
+    honestly show.
+
+    The causal filter is structural for the same reason the Panel's tripwire
+    is: the prompt asks the model not to, and models comply unevenly. A
+    picture makes the assertion just as loudly as a sentence.
+    """
+    entity_ids = {str(e.get("id")) for e in entities if e.get("id")}
+    claim_entity = {
+        str(c.get("id")): str(c.get("entity"))
+        for c in claims
+        if c.get("id") and c.get("entity")
+    }
+
+    def to_entity(ref: Any) -> str | None:
+        ref = str(ref or "")
+        if ref in entity_ids:
+            return ref
+        mapped = claim_entity.get(ref)
+        return mapped if mapped in entity_ids else None
+
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for link in links:
+        source = to_entity(link.get("source"))
+        target = to_entity(link.get("target"))
+
+        if not source or not target:
+            log.info("links: dropped %r -> %r (no entity either side)",
+                     link.get("source"), link.get("target"))
+            continue
+        if source == target:
+            # Two claims about the SAME system. Real and worth knowing, but a
+            # self-loop says nothing a reader can use.
+            continue
+
+        kind = str(link.get("kind", "")).lower()
+        label = str(link.get("label", "")).strip()
+
+        if kind not in _LINK_KINDS or _CAUSAL_LABEL.search(label):
+            log.warning(
+                "links: %r/%r asserts causation - kept as suspected, unlabelled",
+                kind, label,
+            )
+            kind = "suspected"
+            # The label is what a reader sees, so a causal one is removed
+            # rather than softened. An unlabelled dashed edge says "these are
+            # related and nobody has confirmed how", which is true.
+            label = ""
+
+        key = (source, target, kind)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        out.append({**link, "source": source, "target": target,
+                    "kind": kind, "label": label})
+
+    return out
 
 
 def validate_extraction(
@@ -706,6 +808,10 @@ async def extract(
         out["claims"] = resolve_entities(
             out["claims"], out["entities"], aliases, window_text=window_text
         )
+        # AFTER resolve_entities: claim.entity is only trustworthy once the
+        # join has run, and resolve_links reads it to turn claim-to-claim
+        # links into the entity-to-entity edges the canvas can draw.
+        out["links"] = resolve_links(out["links"], out["entities"], out["claims"])
         return out
 
     raw = await llm(EXTRACTION_PROMPT, user)
