@@ -109,6 +109,7 @@ console.log(`  rtm subscribed         ${count(/\[agora rtm\] subscribed/i) ? "YE
 console.log(`  toolkit subscribed     ${count(/transcript layer ready/i) ? "YES" : "NO"}`);
 console.log(`  TRANSCRIPT_UPDATED     ${count(/\[voice-agent\] update /i)} update(s)`);
 console.log(`  NO TRANSCRIPT warnings ${count(/NO TRANSCRIPT/i)}`);
+console.log(`  forwarded to Slow Loop  ${count(/\[voice-agent\] forwarded/i)}`);
 console.log(`  toolkit state          ${JSON.stringify(toolkit)}`);
 console.log("  ───────────────────────────────────────────────────────\n");
 

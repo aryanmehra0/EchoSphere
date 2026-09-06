@@ -179,3 +179,45 @@ describe("the transcript subscription is actually opened", () => {
     );
   });
 });
+
+describe("the toolkit's uid-0 sentinel", () => {
+  /*
+    The toolkit stamps the LOCAL user's transcriptions with a hardcoded
+    `uid: "0"` (SELF_USER_ID in dist/index.mjs) rather than the real uid, and
+    exposes no setter for it. Unmapped, every human turn failed the
+    `uid !== selfUid` check and was silently dropped as "skip:not-mine" — the
+    transcript panel stayed empty while the RTC stream was demonstrably alive.
+
+    `voice-agent.ts::drain` now resolves 0 -> selfUid before this runs. These
+    assert the decision either side of that mapping.
+  */
+  test("uid 0 unmapped is not mine — the bug", () => {
+    assert.equal(
+      forwardDecision(
+        { uid: 0, text: "Redis is at 40 percent", isFinal: true, messageId: "m1", object: "" },
+        1001,
+      ),
+      "skip:not-mine",
+    );
+  });
+
+  test("mapped to the real uid it forwards — the fix", () => {
+    assert.equal(
+      forwardDecision(
+        { uid: 1001, text: "Redis is at 40 percent", isFinal: true, messageId: "m1", object: "" },
+        1001,
+      ),
+      "forward",
+    );
+  });
+
+  test("the agent's own turns are still excluded (G2)", () => {
+    assert.equal(
+      forwardDecision(
+        { uid: 9000, text: "Echo is on the bridge", isFinal: true, messageId: "m2", object: "" },
+        1001,
+      ),
+      "skip:agent",
+    );
+  });
+});

@@ -246,8 +246,37 @@ export class VoiceAgent {
       const text = (item.text ?? "").trim();
       if (!text) continue;
 
+      /*
+        ── THE TOOLKIT STAMPS YOUR OWN SPEECH AS uid "0" ─────────────────────
+        Not your real uid — a hardcoded sentinel meaning "the local user".
+        From `dist/index.mjs`:
+
+            var SELF_USER_ID = 0;
+            uid: message.object === "user.transcription"
+                   ? `${CovSubRenderController.self_uid}`   // always "0"
+                   : `${uid}`
+
+        There is no setter for it; `self_uid` is a module constant.
+
+        So every human turn arrived as uid 0, `forwardDecision` compared
+        0 !== 1001, returned "skip:not-mine", and dropped it. The agent's own
+        turns carried a real uid (9000) and were correctly skipped as
+        "skip:agent" — which is why the RTC stream was demonstrably alive
+        (TRANSCRIPT_UPDATED fired, text streamed in) while NOTHING ever
+        reached the Ledger or the transcript panel.
+
+        The official quickstart does exactly this mapping:
+            const nextUid = item.uid === '0' ? localUid : item.uid
+        — see `web/src/lib/conversation.ts::normalizeTranscript`.
+      */
+      const rawUid = String(item.uid);
+      const resolvedUid =
+        rawUid === "0" && item.metadata?.object !== MessageType.AGENT_TRANSCRIPTION
+          ? selfUid
+          : Number(item.uid);
+
       const transcript: AgoraTranscript = {
-        uid: Number(item.uid),
+        uid: resolvedUid,
         text,
         isFinal: true,
         messageId: key,
@@ -266,6 +295,9 @@ export class VoiceAgent {
       if (forwardDecision(transcript, selfUid) !== "forward") continue;
 
       this.forwarded += 1;
+      console.info(
+        `[voice-agent] forwarded uid=${transcript.uid} "${transcript.text.slice(0, 60)}"`,
+      );
       this.events.onUtterance(transcript, role);
     }
   }
