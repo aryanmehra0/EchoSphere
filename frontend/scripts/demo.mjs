@@ -90,6 +90,21 @@ async function preflight() {
   say(!strayAgent, "no leftover agent from a previous run",
       strayAgent ? `${strayAgent} still registered — run: npm run demo reset` : "");
 
+  /*
+    3b — if one IS registered, is it actually alive?
+
+    Agora stops an agent after `idle_timeout` seconds of CHANNEL silence, and
+    nothing tells us. The id stays registered, health keeps reporting it, and
+    the banner keeps saying voice is fine while Echo is gone. A pre-flight
+    that cannot tell those apart is the one that says GO before a dead demo.
+  */
+  if (strayAgent) {
+    const live = await get(`${WEB}/api/agent-status?agentId=${strayAgent}`, 25000);
+    const state = live?.status?.body?.status;
+    say(state === "RUNNING", "the registered agent is alive on Agora",
+        state === "RUNNING" ? "" : `Agora says ${state ?? "unknown"} — run: npm run demo reset`);
+  }
+
   // 4 — a board with yesterday's incident on it derails the opening line
   const state = await post(`${API}/tools/query_incident_state`, {});
   const claims = (state?.established?.length ?? 0) + (state?.openHypotheses?.length ?? 0);
@@ -330,6 +345,58 @@ async function converse() {
     return 1;
   }
   const agentId = api.agent.agent_id;
+
+  /*
+    A REGISTERED AGENT ID IS NOT A LIVE AGENT.
+
+    `idle_timeout` is 300s, and Agora counts idleness in the CHANNEL - not in
+    our pipeline. The documented flow walks straight into that: press J, run
+    `demo feed` (which posts transcripts to the Slow Loop over HTTP and puts
+    no audio in the channel at all), read the prompt, then speak. Five minutes
+    of channel silence is easy to reach before the first word.
+
+    Agora then STOPS the agent. The Slow Loop still holds its id, `/health`
+    still reports it, and the degradation banner still says voice is fine - so
+    everything looks healthy and Echo is simply gone. Observed exactly that
+    way, which is what "why is it not speaking" turned out to mean.
+
+    So: ask Agora, not ourselves. And recover rather than just complaining,
+    because being told to press J again is a worse answer than a fresh agent.
+  */
+  const live = await get(`${WEB}/api/agent-status?agentId=${agentId}`, 25000);
+  const agoraState = live?.status?.body?.status;
+
+  if (agoraState !== "RUNNING") {
+    console.log(y(`  Agora reports this agent as ${agoraState ?? "unknown"}.`));
+    console.log(d("  idle_timeout is 300s and Agora counts silence in the CHANNEL,"));
+    console.log(d("  which 'demo feed' does not break: it posts over HTTP.\n"));
+
+    /*
+      CLEARED, NOT RE-INVITED FROM HERE.
+
+      The first version of this re-invited with `userUid: 1001` and looked
+      like it worked. It does not: the Roster allocates UIDs sequentially and
+      hands the browser whatever is next, so an earlier probe is enough to put
+      the real listener on 1002. Agora subscribes to exactly ONE uid, so an
+      agent invited against a guessed one joins, reports RUNNING, and hears
+      nobody - which is the silently-deaf failure that has already cost this
+      project days.
+
+      Only the browser knows its own UID, so only the browser can invite an
+      agent that will hear it. Clearing the stale entry is the part a script
+      CAN do correctly: without it the invite is idempotent per channel and
+      pressing J would just hand back the same dead agent.
+    */
+    const cleared = await post(`${WEB}/api/stop-agent`, { channel: CHANNEL });
+    console.log(d(`  cleared the stale agent${cleared?.stopped ? "" : " (none was running)"}`));
+    console.log("");
+    console.log(`  ${b("Press J in the browser")} - twice if you are already joined, so it`);
+    console.log(`  leaves and rejoins - then run this again.`);
+    console.log(d("  The browser holds the UID Echo must subscribe to; inviting from"));
+    console.log(d("  here would guess it, and a wrong guess is an agent that hears"));
+    console.log(d("  nobody while reporting RUNNING.\n"));
+    return 1;
+  }
 
   const state0 = await post(`${API}/tools/query_incident_state`, {});
   const known = (state0?.established?.length ?? 0) + (state0?.openHypotheses?.length ?? 0);

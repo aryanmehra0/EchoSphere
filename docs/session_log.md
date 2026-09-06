@@ -1163,6 +1163,34 @@ greeting - which is what `converse` is built to tell apart.
 
 **Tests: 198 backend + 124 frontend = 322.** Validation 28/28.
 
+**Sep 6 - "why is it not speaking": the agent was dead and nothing said so.**
+Checked the live state rather than theorising. `/health` reported agent
+`A44CT84...` on `inc-4417`, `degraded.voice: false`, everything green - and
+Agora's own status endpoint said **STOPPED**.
+
+`idle_timeout` is 300s and Agora counts idleness in the CHANNEL, not in our
+pipeline. The documented demo flow walks straight into it: press J (a few
+seconds of audio), run `demo feed` - which posts transcripts to the Slow Loop
+over HTTP and puts NO audio in the channel - then read the prompt, then speak.
+Five minutes of channel silence is easy to reach before the first word.
+
+Agora stops the agent, and every surface we own keeps saying it is fine: the
+id stays registered, `/health` reports it, the degradation banner stays clear.
+**Echo was not refusing to speak. Echo was not there.**
+
+The pre-flight now asks Agora rather than itself - "the registered agent is
+alive on Agora" - and `demo converse` checks before asking anyone to talk.
+
+**And a bug in my own fix, caught before it shipped.** The first version
+auto-re-invited with `userUid: 1001`. The Roster allocates sequentially and
+hands the browser whatever is next; one earlier probe puts the real listener
+on 1002. Agora subscribes to exactly ONE uid, so that agent would join, report
+RUNNING, and hear nobody - the silently-deaf failure that has already cost
+this project days. Only the browser knows its own UID, so `converse` now
+CLEARS the stale agent (which the idempotent invite would otherwise hand back)
+and tells the operator to press J. Clearing is the part a script can do
+correctly; inviting is not.
+
 **Still not verified by a human mouth.** Everything up to the microphone is
 proven: ASR runs (`source: "asr"` in Agora's history), tools are reachable
 when the tunnel is up, the LLM is wired to Groq, TTS speaks. Whether a real
