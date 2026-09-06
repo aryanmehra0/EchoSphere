@@ -37,6 +37,7 @@ from .extraction import (
 )
 from .proxy import ProxyActionLayer
 from .rti import ParticipantFrame, RTIMonitor
+from . import voice_agent
 from .ledger import Ledger
 from .privacy import PrivacyGate
 from .models import (
@@ -115,10 +116,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="EchoSphere — Slow Loop", version="0.1.0", lifespan=lifespan)
 
-# The dashboard is served from :3000 in development.
+# The dashboard is served from :3000 in development, but the console may run on
+# any port (e.g. :3001 when something else owns 3000). CORS_ORIGINS lets a host
+# override the dev defaults without editing source; the browser must be allowed
+# to POST /observer/transcript or the voice path dies silently.
+_cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    *[
+        o.strip()
+        for o in config.cors_origins().split(",")
+        if o.strip()
+    ],
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -206,6 +221,102 @@ async def health() -> JSONResponse:
         },
         status_code=200 if ready else 503,
     )
+
+
+# ---------------------------------------------------------------------------
+# Agent creation — the SDK path (see app/voice_agent.py)
+# ---------------------------------------------------------------------------
+
+@app.post("/agent/start")
+async def start_agent(body: dict[str, Any]) -> JSONResponse:
+    """
+    Create the Agora agent through the official SDK, then register it here.
+
+    ── WHY ZONE 2 NO LONGER BUILDS THE PAYLOAD ────────────────────────────
+    It built it by hand, and Agora returns 200 for a payload it only partly
+    understands. Every misplaced field failed silently, and the failure that
+    survived longest was the one that matters most: the recogniser never ran,
+    so `content` came back EMPTY for turns carrying seconds of real speech.
+
+    The SDK derives the vendor presets instead of asserting them, and refuses
+    to construct an invalid recogniser at all. See `voice_agent.py`.
+
+    This endpoint deliberately also does the REGISTER step, because the two
+    were previously separate calls from Zone 2 and a lost second call left
+    Echo mute for the session with no way back. One call, one outcome.
+    """
+    channel = (body.get("channel") or "").strip()
+    prompt = body.get("systemPrompt") or ""
+    if not channel or not prompt:
+        return JSONResponse(
+            {"error": "channel and systemPrompt are required"}, status_code=400,
+        )
+
+    try:
+        result = await voice_agent.start(
+            channel=channel,
+            agent_uid=int(body.get("agentUid") or 0),
+            user_uid=int(body.get("userUid") or 0),
+            system_prompt=prompt,
+            tts=body.get("tts") or {},
+            greeting=body.get("greeting"),
+            llm_mode=(body.get("llmMode") or "managed"),
+            groq_api_key=body.get("groqApiKey"),
+            groq_model=body.get("groqModel"),
+            tools=body.get("tools"),
+        )
+    except voice_agent.VoiceAgentError as exc:
+        # Degradation (§13): a failed invite must not take the dashboard with
+        # it. Reported, not raised.
+        log.warning("agent start failed: %s", exc)
+        return JSONResponse(
+            {"error": str(exc), "degraded": True}, status_code=502,
+        )
+
+    agent_id = result["agent_id"]
+    already_known = _agent["agent_id"] == agent_id
+    _agent["agent_id"] = agent_id
+    _agent["channel"] = channel
+    log.info("agent started and registered: %s on %s", agent_id, channel)
+
+    greeting = None
+    if not already_known and bool(body.get("greet", True)):
+        try:
+            line = joined(can_read_ledger=bool(body.get("tools")))
+            # `async with`, matching /agent/register: the context manager owns
+            # the HTTP client the controller speaks through. And `speak`, not
+            # `speak_now` — there is nothing to interrupt on a fresh join.
+            async with BridgeController(channel, agent_id, client=_http) as br:
+                result = await br.speak(line, priority="high", force=True)
+            greeting = {"spoken": bool(result and result.ok), "text": line}
+        except Exception as exc:
+            # A hoarse TTS vendor must not fail the whole invite.
+            log.warning("greeting failed", exc_info=True)
+            greeting = {"spoken": False, "error": str(exc)}
+
+    return JSONResponse({
+        "ok": True,
+        "agentId": agent_id,
+        "channel": channel,
+        "agent": _agent,
+        "greeting": greeting,
+    })
+
+
+@app.post("/agent/stop")
+async def stop_agent_endpoint(body: dict[str, Any]) -> dict[str, Any]:
+    """Stop the agent through the SDK and forget it here."""
+    agent_id = (body.get("agentId") or _agent["agent_id"] or "").strip()
+    if not agent_id:
+        return {"ok": False, "reason": "no agent registered"}
+    try:
+        await voice_agent.stop(agent_id)
+    except voice_agent.VoiceAgentError as exc:
+        log.warning("agent stop failed: %s", exc)
+        return {"ok": False, "reason": str(exc)}
+    _agent["agent_id"] = None
+    _agent["channel"] = None
+    return {"ok": True, "stopped": agent_id}
 
 
 # ---------------------------------------------------------------------------

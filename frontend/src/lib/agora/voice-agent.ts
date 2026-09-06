@@ -95,10 +95,50 @@ export class VoiceAgent {
   updates = 0;
   forwarded = 0;
 
+  /**
+   * Fires if the data stream stays silent after we have subscribed.
+   *
+   * ── WHY A TIMER AND NOT JUST THE CATCH BLOCK ────────────────────────────
+   * `start()` already reports the LOUD failure — subscribe threw, and the
+   * operator is told. The expensive failure is the quiet one: subscribe
+   * succeeds, `TRANSCRIPT_UPDATED` never fires, and the transcript panel sits
+   * on "No speech captured" forever. That is indistinguishable from nobody
+   * having spoken, so nobody reports it as a fault; it reads as the product
+   * being broken in some unspecified way.
+   *
+   * This has now happened twice from different causes (wrong transport, then a
+   * dead agent being reused), and both times it was diagnosed by reading
+   * Agora's REST history from a shell rather than by looking at the console.
+   * A subscribed stream that has carried nothing for this long is worth saying
+   * out loud.
+   */
+  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private armSilenceWatchdog(channel: string, selfUid: number): void {
+    if (this.silenceTimer !== null) clearTimeout(this.silenceTimer);
+    this.silenceTimer = setTimeout(() => {
+      if (this.updates > 0) return;
+      this.events.onError(
+        `NO TRANSCRIPT DATA — subscribed to "${channel}" as uid ${selfUid}, ` +
+          "but the RTC data stream has carried nothing. Check that the agent " +
+          "is RUNNING and joined this same channel.",
+      );
+    }, 45_000);
+  }
+
+  /** Stop the watchdog — called on the first update and on teardown. */
+  private disarmSilenceWatchdog(): void {
+    if (this.silenceTimer !== null) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+  }
+
   constructor(private readonly events: VoiceAgentEvents) {}
 
   async start(
     rtcClient: IAgoraRTCClient,
+    channel: string,
     selfUid: number,
     role: ParticipantRole,
     rtmClient?: unknown,
@@ -116,6 +156,8 @@ export class VoiceAgent {
       });
 
       this.ai.on(AgoraVoiceAIEvents.TRANSCRIPT_UPDATED, (items) => {
+        // The stream is alive; the watchdog has nothing to report.
+        this.disarmSilenceWatchdog();
         this.updates += 1;
         /*
           Logged on every update, not sampled.
@@ -142,7 +184,40 @@ export class VoiceAgent {
         this.events.onError(`Agent error: ${String(error?.message ?? error)}`);
       });
 
-      console.info(`[voice-agent] transcript layer ready for uid ${selfUid}`);
+      /*
+        ── `init()` BINDS NOTHING. THIS LINE IS THE SUBSCRIPTION. ────────────
+        This was the whole failure, and it is invisible from the outside.
+
+        `AgoraVoiceAI.init()` only STORES config — it validates the engines,
+        stashes them on the singleton and returns. Read `_doInit` in
+        `dist/index.mjs`: it assigns `rtcEngine`, `rtmEngine`, `renderMode`
+        and returns. It attaches no listener to anything.
+
+        `subscribeMessage(channel)` is what calls `bindRtcEvents()`, which is
+        the ONLY place the toolkit does
+
+            rtcEngine.on("stream-message", this._boundHandleRtcStreamMessage)
+
+        and it also starts the render controller that turns those frames into
+        TRANSCRIPT_UPDATED. The toolkit's own documented example shows both
+        calls, in this order:
+
+            const api = AgoraVoiceAI.init({...});
+            api.subscribeMessage('channel-id');
+
+        Without it, `on(TRANSCRIPT_UPDATED, ...)` registers a handler on an
+        emitter that nothing will ever emit into. Every symptom follows: the
+        agent joins, the mic publishes, Agora transcribes — and the console
+        shows zero `[voice-agent] update` lines, because the RTC data stream
+        was never being read. No error, no warning, no failed promise. The
+        previous fix moved to the right TRANSPORT and then never opened it.
+      */
+      this.ai.subscribeMessage(channel);
+      this.armSilenceWatchdog(channel, selfUid);
+
+      console.info(
+        `[voice-agent] subscribed to ${channel} — transcript layer ready for uid ${selfUid}`,
+      );
     } catch (error) {
       // Losing transcripts costs the incident record, not the call. The
       // operator can still hear and be heard; they are told which capability

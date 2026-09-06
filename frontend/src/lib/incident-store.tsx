@@ -118,7 +118,32 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     const transport = new AgoraBridge({
       onAgentTrack: setAgentTrack,
       onAgentState: (agent) => dispatch({ type: "AGENT", state: agent }),
-      onError: (detail) => console.warn(`[agora bridge] ${detail}`),
+      /*
+        ── ON SCREEN, NOT ONLY IN THE DEVTOOLS CONSOLE ─────────────────────
+        This was `console.warn` alone, which meant the transport's loudest
+        message — "NO TRANSCRIPTS — <reason>" — reached nobody. The operator
+        saw an empty transcript panel and no explanation, and both times this
+        failed for real it was diagnosed by reading Agora's REST history from
+        a shell rather than by looking at the product.
+
+        The degradation banner already exists for exactly this: one short line
+        naming the CONSEQUENCE. Voice is marked degraded because that is what
+        losing transcripts costs — the incident record, not the call.
+      */
+      onError: (detail) => {
+        console.warn(`[agora bridge] ${detail}`);
+        dispatch({
+          type: "DELTA",
+          payload: {
+            degraded: {
+              voice: true,
+              extraction: false,
+              model: null,
+              banner: detail.slice(0, 140),
+            },
+          },
+        });
+      },
     });
     agora.current = transport;
 

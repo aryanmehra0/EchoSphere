@@ -78,6 +78,36 @@ export class AgoraBridge {
 
     const AgoraRTC = (await import("agora-rtc-sdk-ng")).default;
     const AgoraRTM = (await import("agora-rtm-sdk")).default;
+
+    /*
+      ── REQUIRED BY THE TRANSCRIPT TOOLKIT, AND WE NEVER SET IT ─────────────
+      The official quickstart calls this before initialising the toolkit:
+
+          setParameter("ENABLE_AUDIO_PTS", true);
+
+      and `bindRtcEvents()` subscribes to `audio-pts` alongside
+      `stream-message`. PTS is how the render controller aligns transcript
+      chunks to the audio timeline; without it the controller has no clock to
+      order turns against and never emits TRANSCRIPT_UPDATED.
+
+      That is the whole symptom: subscribe succeeds, the agent converses
+      perfectly (Agora's REST history proves it), and the console's transcript
+      panel stays on "No speech captured" with no error anywhere.
+
+      Wrapped because it is a private-ish knob — a version that no longer
+      recognises it must not take the join down with it.
+    */
+    try {
+      // Named export from the ESM entry, exactly as the quickstart imports it
+      // (`import { setParameter } from "agora-rtc-sdk-ng/esm"`). It is not a
+      // method on the default AgoraRTC object.
+      const { setParameter } = await import("agora-rtc-sdk-ng/esm");
+      setParameter("ENABLE_AUDIO_PTS", true);
+      console.info("[agora rtc] audio PTS enabled — transcript timing available");
+    } catch (error) {
+      console.warn("[agora rtc] could not enable audio PTS", error);
+    }
+
     const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
     this.client = client;
     this.channel = channel;
@@ -214,12 +244,29 @@ export class AgoraBridge {
       rtmClient = rtm;
       console.info(`[agora rtm] subscribed to ${channel} as uid ${credentials.uid}`);
     } catch (error) {
-      // Non-fatal by design. Transcripts do not come from here.
+      /*
+        ── NOT "NON-FATAL" ANY MORE, BECAUSE THE AGENT IS STARTED WITH
+           `data_channel: "rtm"` ────────────────────────────────────────────
+        The old comment here said "Transcripts do not come from here." That
+        was true of the hand-rolled RTM listener this replaced, and it is
+        false of the current configuration: `voice_agent.py` starts every
+        agent with `parameters={"data_channel": "rtm", ...}`, exactly as the
+        quickstart does, so Agora publishes the transcript feed over RTM and
+        the toolkit reads it through `rtmConfig`.
+
+        Losing RTM therefore loses every transcript — silently, because the
+        toolkit falls back to RTC stream-messages that Agora is not sending.
+        Say so instead of swallowing it.
+      */
       this.rtm = null;
-      console.warn("[agora rtm] unavailable — continuing without it", error);
+      console.warn("[agora rtm] unavailable — transcripts will not arrive", error);
+      this.events.onError(
+        `NO TRANSCRIPTS — RTM is unavailable, and the agent publishes its ` +
+          `transcript feed over RTM: ${message(error)}`,
+      );
     }
 
-    await this.voice.start(this.client!, credentials.uid, credentials.role, rtmClient);
+    await this.voice.start(this.client!, channel, credentials.uid, credentials.role, rtmClient);
   }
 
 

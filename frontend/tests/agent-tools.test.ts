@@ -5,6 +5,10 @@ import {
   buildAgentPayload,
   buildLlmVendor,
   MANAGED_FAST_LOOP_MODEL,
+  MANAGED_OPENAI_URL,
+  inferAsrPreset,
+  inferLlmPreset,
+  resolveSessionPresets,
   MANAGED_MODELS,
   buildPreset,
   buildSystemPrompt,
@@ -34,17 +38,17 @@ describe("the system prompt adapts to whether the Ledger is readable", () => {
   test("with tools, the prompt is exactly the reviewed constant", () => {
     // Not "starts with" — the epistemic rules must not acquire an invisible
     // tail in the normal case.
-    assert.equal(buildSystemPrompt(true), FAST_LOOP_SYSTEM_PROMPT);
+    assert.equal(buildSystemPrompt(true, "incident"), FAST_LOOP_SYSTEM_PROMPT);
   });
 
   test("without tools, it says so rather than leaving the model stuck", () => {
-    const prompt = buildSystemPrompt(false);
+    const prompt = buildSystemPrompt(false, "incident");
     assert.ok(prompt.startsWith(FAST_LOOP_SYSTEM_PROMPT));
     assert.ok(prompt.includes(NO_TOOLS_ADDENDUM.trim().split("\n")[0]));
   });
 
   test("the addendum does not relax Rule 3, it reports it cannot be met", () => {
-    const prompt = buildSystemPrompt(false);
+    const prompt = buildSystemPrompt(false, "incident");
     // \s+ not a literal space: the addendum hard-wraps, and a test that
     // breaks on rewrapping is a test nobody keeps.
     assert.ok(/does\s+NOT\s+relax\s+Rule\s+3/i.test(prompt));
@@ -56,7 +60,7 @@ describe("the system prompt adapts to whether the Ledger is readable", () => {
   test("Rule 3 survives in both forms", () => {
     for (const enabled of [true, false]) {
       assert.ok(
-        /NEVER ANSWER FROM MEMORY/.test(buildSystemPrompt(enabled)),
+        /NEVER ANSWER FROM MEMORY/.test(buildSystemPrompt(enabled, "incident")),
         `Rule 3 missing with tools ${enabled}`,
       );
     }
@@ -200,11 +204,42 @@ describe("the managed Fast Loop matches the official quickstart", () => {
       for any llm block carrying `api_key`, which silently drops the agent
       off the managed path.
     */
+    /*
+      ASSERTED ON THE FINAL PAYLOAD, NOT ON `buildLlmVendor`.
+
+      Those are two different stages and only the second is the wire. The
+      builder now emits a FULL block — url and params.model present — because
+      `inferLlmPreset` derives `openai_gpt_4o_mini` FROM those fields, and
+      `resolveSessionPresets` strips them immediately afterwards.
+
+      This test used to assert the stripped shape at the builder, which forced
+      the builder to pre-strip; nothing could then be inferred, and the
+      hardcoded preset was asserted against a block that never justified it.
+      That is the joined-but-deaf agent. Assert the outcome, not the midpoint.
+    */
     const llm = buildLlmVendor("managed", "unused-key", "unused-model");
-    assert.equal("url" in llm, false, "the preset carries the url");
     assert.equal("api_key" in llm, false, "a key drops us off the managed path");
-    assert.equal(llm.params.model, undefined, "the preset carries the model");
     assert.equal(llm.style, "openai");
+    assert.equal(llm.url, MANAGED_OPENAI_URL, "inference needs the url");
+    assert.equal(llm.params.model, MANAGED_FAST_LOOP_MODEL, "inference needs the model");
+
+    const payload = buildAgentPayload({
+      channel: "c",
+      agentUid: 9000,
+      userUid: 1001,
+      agentRtcToken: "t",
+      groqApiKey: "unused",
+      llmMode: "managed",
+      tts: { vendor: "elevenlabs", apiKey: "k", voiceId: "v" },
+    }) as unknown as {
+      preset: string;
+      properties: { llm: Record<string, unknown> & { params: { model?: string } } };
+    };
+    const wire = payload.properties.llm;
+    assert.equal(payload.preset, "deepgram_nova_3,openai_gpt_4o_mini");
+    assert.equal("url" in wire, false, "the preset carries the url");
+    assert.equal("api_key" in wire, false, "a key drops us off the managed path");
+    assert.equal(wire.params.model, undefined, "the preset carries the model");
   });
 
   test("the preset names every managed category, comma-joined", () => {
@@ -248,5 +283,62 @@ describe("the managed Fast Loop matches the official quickstart", () => {
                    `Rule 2 missing in ${mode} mode`);
       assert.equal(p.properties.llm.tools?.length, 5, `tools missing in ${mode} mode`);
     }
+  });
+});
+
+describe("preset resolution — ported from the SDK's presets.py", () => {
+  /*
+    THE REGRESSION THESE LOCK DOWN.
+
+    A preset is derived from a vendor block and then replaces the fields it
+    covers. Hand-writing both halves let them disagree: we claimed
+    `deepgram_nova_3,openai_gpt_4o_mini` while sending an asr block with no
+    model and an llm block with no url — so neither preset was ever justified,
+    Agora returned 200, and the agent joined the channel deaf and mute.
+  */
+  test("nova-3 in params is what yields the ASR preset", () => {
+    assert.equal(inferAsrPreset({ vendor: "deepgram", params: { model: "nova-3" } }), "deepgram_nova_3");
+    // No model -> nothing to infer. This was the deaf agent.
+    assert.equal(inferAsrPreset({ vendor: "deepgram", params: {} }), null);
+    // BYOK and managed are mutually exclusive by construction.
+    assert.equal(inferAsrPreset({ vendor: "deepgram", params: { model: "nova-3", key: "k" } }), null);
+  });
+
+  test("an api_key silently drops the LLM off the managed path", () => {
+    const managed = { url: MANAGED_OPENAI_URL, params: { model: "gpt-4o-mini" } };
+    assert.equal(inferLlmPreset(managed), "openai_gpt_4o_mini");
+    assert.equal(inferLlmPreset({ ...managed, api_key: "sk-x" }), null);
+  });
+
+  test("the Groq path yields no LLM preset and keeps its url and key", () => {
+    const props = {
+      asr: { vendor: "deepgram", params: { model: "nova-3" } },
+      llm: buildLlmVendor("groq", "gsk-test", "openai/gpt-oss-120b"),
+    };
+    const { preset, properties } = resolveSessionPresets(props);
+    assert.equal(preset, "deepgram_nova_3", "Groq must not claim a managed LLM preset");
+    assert.equal(properties.llm.api_key, "gsk-test");
+    assert.match(String(properties.llm.url), /api\.groq\.com/);
+    assert.equal(properties.llm.params.model, "openai/gpt-oss-120b");
+  });
+
+  test("stripping removes only what the preset covers", () => {
+    const { properties } = resolveSessionPresets({
+      asr: {
+        vendor: "deepgram",
+        params: { model: "nova-3", keyterm: "Redis", punctuation: true },
+        language: "en-US",
+      },
+      llm: { url: MANAGED_OPENAI_URL, params: { model: "gpt-4o-mini", max_tokens: 1024 } },
+    });
+    // Covered by the preset -> gone.
+    assert.equal(properties.asr.params.model, undefined);
+    assert.equal(properties.llm.params.model, undefined);
+    assert.equal("url" in properties.llm, false);
+    // NOT covered -> kept. `language` in particular is kept by the SDK too.
+    assert.equal(properties.asr.params.keyterm, "Redis");
+    assert.equal(properties.asr.params.punctuation, true);
+    assert.equal(properties.asr.language, "en-US");
+    assert.equal(properties.llm.params.max_tokens, 1024);
   });
 });

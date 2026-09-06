@@ -247,8 +247,34 @@ $console = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction Silen
 if ($console) {
     Write-Ok "console already running on :3000"
 } else {
+    # ── KILL A STALE DEV SERVER BEFORE STARTING ONE ─────────────────────────
+    #
+    # Next 16 does NOT fail when :3000 is taken by another `next dev` - it
+    # takes the next free port and says so only in a window this script hides.
+    # The probe below then polls :3000 forever, reports "the console did not
+    # start", and exits 1 while the console is up and serving on :3001.
+    #
+    # Observed exactly that: PID 23112 on :3001, script exit 1, app fine.
+    #
+    # Worse than the wasted minute: the invite path mints tokens against an
+    # origin the browser is not on, so CORS silently drops the transcript
+    # POSTs and Echo goes deaf in the one way this project keeps rediscovering.
+    # A single console on a known port is not a nicety here.
+    $stale = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+             Where-Object { $_.CommandLine -like "*next*dev*" -and $_.CommandLine -like "*$($frontend.Replace('','\'))*" }
+    foreach ($proc in $stale) {
+        Write-Note "stopping a stale dev server (PID $($proc.ProcessId))"
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($stale) { Start-Sleep -Milliseconds 1200 }
+
     Write-Step "starting the console on :3000 ..."
-    Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "npm run dev" `
+    # `--port 3000` so a busy port is an ERROR we can see rather than a silent
+    # move to 3001. Logged to a file because the window is hidden and a
+    # failure with no output is the thing that wasted the most time here.
+    $clog = Join-Path $env:TEMP ("echosphere-console-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+    Start-Process -FilePath "cmd.exe" `
+        -ArgumentList "/c", "npm run dev -- --port 3000 > `"$clog`" 2>&1" `
         -WorkingDirectory $frontend -WindowStyle Hidden
 
     $up = $false
@@ -262,6 +288,10 @@ if ($console) {
     if ($up) { Write-Ok "console is up" }
     else {
         Write-Bad "the console did not start"
+        if (Test-Path $clog) {
+            Write-Note "last lines of $clog"
+            Get-Content $clog -Tail 15 | ForEach-Object { Write-Note "  $_" }
+        }
         Write-Host "  Run it in the foreground to see why:" -ForegroundColor Yellow
         Write-Host "    cd frontend"
         Write-Host "    npm run dev"

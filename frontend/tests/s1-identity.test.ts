@@ -229,6 +229,23 @@ describe("Fast Loop prompt — §14.1 epistemic rules must survive edits", () =>
   test("the prompt names itself a recording secretary, not a diagnostician", () => {
     assert.match(FAST_LOOP_SYSTEM_PROMPT, /recording secretary, not a diagnostician/i);
   });
+
+  test("the prompt forbids placeholder text for silence", () => {
+    // Sep 05: on the managed path (gpt-4o-mini), an empty ASR turn produced
+    // the literal response "[Silence] ", which Agora's TTS read ALOUD for a
+    // minute straight. The prompt must forbid narrating silence — that text is
+    // spoken, not suppressed.
+    assert.match(
+      FAST_LOOP_SYSTEM_PROMPT,
+      /contains no recognisable/i,
+      "the empty-input rule is missing from the prompt",
+    );
+    assert.match(
+      FAST_LOOP_SYSTEM_PROMPT,
+      /\[Silence\]/i,
+      "the prompt must name the exact placeholder it forbids",
+    );
+  });
 });
 
 /* ========================================================================== */

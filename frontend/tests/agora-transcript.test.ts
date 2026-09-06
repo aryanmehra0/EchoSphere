@@ -1,5 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   forwardDecision,
@@ -128,5 +129,53 @@ describe("Who forwards what — the two-machine rule", () => {
     // Order matters for diagnosis: an operator reading "skip:not-mine" against
     // uid 9000 would go hunting for a roster bug that does not exist.
     assert.equal(forwardDecision(speech(9000, "Echo"), DEVOPS), "skip:agent");
+  });
+});
+
+/**
+ * ── THE SUBSCRIPTION THAT WAS NEVER OPENED ──────────────────────────────────
+ * `AgoraVoiceAI.init()` binds NO listeners. It validates the engines, stores
+ * them on the singleton, and returns — read `_doInit` in the toolkit's
+ * `dist/index.mjs`. The only call that reaches `bindRtcEvents()`, and so the
+ * only call that ever attaches
+ *
+ *     rtcEngine.on("stream-message", ...)
+ *
+ * is `subscribeMessage(channel)`. Without it, `on(TRANSCRIPT_UPDATED, ...)`
+ * listens to an emitter nothing emits into: the agent joins, the mic
+ * publishes, Agora transcribes, and the console stays empty with no error
+ * anywhere.
+ *
+ * That failure is silent by construction, so it is pinned in source rather
+ * than left to a human noticing an empty dashboard. `voice-agent.ts` is
+ * browser-only — it imports the RTC SDK at module scope — so this asserts on
+ * the source text instead of importing it.
+ */
+describe("the transcript subscription is actually opened", () => {
+  const source = readFileSync(
+    new URL("../src/lib/agora/voice-agent.ts", import.meta.url),
+    "utf8",
+  );
+
+  test("subscribeMessage is called — init() alone binds nothing", () => {
+    assert.match(
+      source,
+      /this\.ai\.subscribeMessage\(/,
+      "VoiceAgent.start() must call subscribeMessage(channel); init() attaches no listeners",
+    );
+  });
+
+  test("it subscribes with the channel, never a hardcoded string", () => {
+    assert.match(source, /this\.ai\.subscribeMessage\(channel\)/);
+  });
+
+  test("subscription happens after the handlers are registered", () => {
+    const handler = source.indexOf("TRANSCRIPT_UPDATED");
+    const subscribe = source.indexOf("subscribeMessage(channel)");
+    assert.ok(handler > -1 && subscribe > -1);
+    assert.ok(
+      handler < subscribe,
+      "register TRANSCRIPT_UPDATED before subscribing, or the first frames land with no listener",
+    );
   });
 });

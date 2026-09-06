@@ -296,16 +296,63 @@ export async function requestBridgeCredentials(
   channel: string,
   role: ParticipantRole,
 ): Promise<BridgeCredentials> {
+  /*
+    ── STICKY UID PER TAB, AND WHY TRANSCRIPTS DIE WITHOUT IT ────────────────
+    Agora's Conversational AI Engine subscribes to exactly ONE participant,
+    fixed when the agent is created (`remote_rtc_uids`). The Roster allocates
+    uids sequentially and never releases them, so every reload of this page
+    took the NEXT one: 1001, then 1002, then 1003.
+
+    The agent stays pinned to the uid that invited it. From the second reload
+    onward the console publishes audio as a participant the agent is not
+    listening to — so Agora runs no recogniser on it, emits no transcript, and
+    the panel sits on "No speech captured" while the agent is demonstrably
+    healthy and mid-conversation with a uid nobody is using any more.
+
+    Measured, not reasoned: a headless run joined as 1002 while the live agent
+    was subscribed to 1001. Zero TRANSCRIPT_UPDATED events in 60 seconds, and
+    `AUDIO_INPUT_LEVEL_TOO_LOW` from the SDK because nothing consumed the
+    stream. Three POSTs to /api/token on one channel returned 1001, 1002, 1003.
+
+    So the tab remembers its uid and asks for that one back. `renew: true` is
+    the token route's existing path for exactly this. sessionStorage rather
+    than localStorage: a SECOND tab is a second participant and must get its
+    own uid, but a reload is the same person and must not.
+  */
+  let remembered: number | null = null;
+  const storageKey = `echo:uid:${channel}`;
+  try {
+    const raw = sessionStorage.getItem(storageKey);
+    const parsed = raw === null ? Number.NaN : Number(raw);
+    if (Number.isInteger(parsed) && parsed > 0) remembered = parsed;
+  } catch {
+    // Private mode, or storage disabled. Fall through to a fresh allocation —
+    // the first join of a session is correct either way.
+  }
+
   const response = await fetch("/api/token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel, role }),
+    body: JSON.stringify(
+      remembered === null
+        ? { channel, role }
+        : { channel, role, uid: remembered, renew: true },
+    ),
   });
   const body = (await response.json()) as Partial<BridgeCredentials> & { error?: string };
   if (!response.ok) throw new Error(body.error ?? `Token request failed (${response.status})`);
   if (!body.appId || !body.rtcToken || !body.rtmToken || !body.uid) {
     throw new Error("Token response was incomplete");
   }
+  // Remember it for the next reload, so the agent's one subscribed uid keeps
+  // pointing at this tab.
+  try {
+    sessionStorage.setItem(storageKey, String(body.uid));
+  } catch {
+    // Not fatal: without storage the next reload allocates a new uid and the
+    // console re-invites, which is the pre-existing behaviour.
+  }
+
   return {
     appId: body.appId,
     rtcToken: body.rtcToken,

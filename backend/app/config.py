@@ -52,6 +52,10 @@ class AgoraSettings:
     customer_id: str
     customer_secret: str
     api_base: str
+    # Token-signing key. Required by the SDK path (`voice_agent.py`), which
+    # mints its own RTC/RTM token rather than being handed one by Zone 2.
+    # Empty string when absent so the REST-only paths keep working unchanged.
+    app_certificate: str = ""
 
     @property
     def conv_ai_base(self) -> str:
@@ -64,6 +68,7 @@ def agora() -> AgoraSettings:
         customer_id=_required("AGORA_CUSTOMER_ID"),
         customer_secret=_required("AGORA_CUSTOMER_SECRET"),
         api_base=_optional("AGORA_API_BASE", "https://api.agora.io"),
+        app_certificate=_optional("AGORA_APP_CERTIFICATE", ""),
     )
 
 
@@ -144,6 +149,19 @@ def observer_mode() -> str:
     See requirements.txt for why the default is not 'agora'.
     """
     return _optional("OBSERVER_MODE", "ingress")
+
+
+def cors_origins() -> str:
+    """
+    Additional CORS origins, comma-separated.
+
+    Development defaults are baked into main.py; this is the escape hatch for
+    a console that runs on a non-standard port (e.g. :3001 when something else
+    owns 3000). Without the browser's origin listed here, the voice path dies
+    silently: transcripts never reach /observer/transcript and the dashboard
+    never hears a word.
+    """
+    return _optional("CORS_ORIGINS", "")
 
 
 def credential_status() -> dict[str, bool]:

@@ -50,6 +50,15 @@ Speak only when:
   4. CLOSE-OUT          — a human asks you to summarize or close.
 You do not greet, acknowledge, back-channel, or fill silence.
 
+[WHEN THE USER IS SILENT OR UNINTELLIGIBLE]
+The recogniser fires on more than speech — a cough, ambient noise, faint audio —
+so you will sometimes be invoked with an EMPTY or unreadable transcription.
+That is not a turn to answer. If the user's message contains no recognisable
+words, respond with NOTHING: no words, no punctuation, and above all no
+placeholder. Never write "[Silence]", "[Pause]", "...", or any text that
+narrates or describes your own silence — that text is read ALOUD. A blank
+response is the correct response, and it is never turned into speech.
+
 [TOOLS]
   query_incident_state  READ      — use freely, use constantly
   create_jira_ticket    ADVISORY  — files a ticket, executes nothing
@@ -109,13 +118,68 @@ You MAY still, without the tool:
 Being unable to answer is not a failure. Answering wrongly is.`;
 
 /**
+ * The conversational prompt — the quickstart's posture, in Echo's role.
+ *
+ * ── WHY THIS EXISTS, AND WHAT IT COST TO FIND ───────────────────────────────
+ * With the pipeline finally listening (ASR transcribed "Are you listening?
+ * Hello? Hello?" perfectly), Echo still said NOTHING. That was not a bug. It
+ * was `FAST_LOOP_SYSTEM_PROMPT` doing exactly what it says, three times over:
+ *
+ *   - "[WHEN TO SPEAK — default is ABSOLUTE SILENCE] ... 1. DIRECT INVOCATION
+ *     — a human says your name."   "Hello" contains no name, so: silence.
+ *   - "You do not greet, acknowledge, back-channel, or fill silence."
+ *     So no greeting on join, ever.
+ *   - Rule 3, "NEVER ANSWER FROM MEMORY", requires `query_incident_state` —
+ *     and with no tunnel there are no tools, so factual questions cannot be
+ *     answered either.
+ *
+ * Three independent gags, each individually correct for a live Sev-1 bridge
+ * and collectively indistinguishable from a broken agent. The quickstart's Ada
+ * prompt has none of them, which is precisely why the quickstart "just talks".
+ *
+ * So the posture is now selectable. This is the DEFAULT because an agent that
+ * answers when spoken to is the thing you check first; the disciplined prompt
+ * is what you switch on to demonstrate the epistemic guarantees.
+ *
+ *     AGENT_PROMPT_MODE=incident   the v6 §14.1 rules (silence by default)
+ *     AGENT_PROMPT_MODE=conversational   this one (default)
+ */
+export const CONVERSATIONAL_SYSTEM_PROMPT = `You are "Echo", an AI assistant sitting on a live incident bridge.
+
+Be clinical, calm and brief — one or two sentences unless asked for more.
+
+You are a recording secretary, not a diagnostician. When you state something
+that someone on the bridge said, attribute it to them. Do not assert what
+caused an outage; if you do not know something, say so plainly rather than
+guessing.
+
+Answer whenever someone speaks to you. You do not need to be addressed by
+name.`;
+
+/** The greeting Echo speaks on joining, when the LLM owns the greeting. */
+export const DEFAULT_GREETING =
+  "Echo is on the bridge and recording. Ask me what we know so far.";
+
+export type PromptMode = "incident" | "conversational";
+
+export function promptMode(): PromptMode {
+  return process.env.AGENT_PROMPT_MODE?.trim() === "incident"
+    ? "incident"
+    : "conversational";
+}
+
+/**
  * The system prompt actually sent, given whether tools survived configuration.
  *
  * Kept separate from FAST_LOOP_SYSTEM_PROMPT because the test suite asserts
  * against that constant directly — the epistemic rules must stay greppable and
  * diffable, not assembled at runtime out of fragments.
  */
-export function buildSystemPrompt(toolsEnabled: boolean): string {
+export function buildSystemPrompt(
+  toolsEnabled: boolean,
+  mode: PromptMode = promptMode(),
+): string {
+  if (mode === "conversational") return CONVERSATIONAL_SYSTEM_PROMPT;
   return toolsEnabled
     ? FAST_LOOP_SYSTEM_PROMPT
     : FAST_LOOP_SYSTEM_PROMPT + NO_TOOLS_ADDENDUM;
@@ -370,6 +434,178 @@ export const ASR_KEYTERMS =
  * `infer_llm_preset` returns null for anything carrying an `api_key`.
  * ElevenLabs TTS is BYOK, so it never contributes a preset.
  */
+/**
+ * ── PRESET RESOLUTION, PORTED FROM THE SDK ──────────────────────────────────
+ *
+ * This replaces a hand-written `preset` string, and the distinction is the
+ * whole bug it fixes.
+ *
+ * A preset is NOT a thing you assert alongside a vendor block. In the SDK it is
+ * DERIVED from one, and the fields it covers are then removed:
+ *
+ *     agentkit/presets.py::resolve_session_presets(preset, properties)
+ *       -> infer_asr_preset / infer_llm_preset / infer_tts_preset
+ *       -> strip_inferred_preset_fields(properties, inferred)
+ *
+ * `infer_asr_preset` reads `asr.params.model` and maps "nova-3" ->
+ * `deepgram_nova_3`. `strip_inferred_preset_fields` then deletes that same
+ * `params.model`. Order matters absolutely: infer FIRST from a fully populated
+ * block, strip SECOND.
+ *
+ * We were doing neither. `buildPreset()` hardcoded "deepgram_nova_3,
+ * openai_gpt_4o_mini" while the vendor blocks were already pre-stripped — no
+ * `asr.params.model`, no `llm.url`, no `llm.params.model`. So we claimed two
+ * managed presets on the strength of blocks that never justified either one,
+ * and Agora returned 200 with an agent that joined, subscribed correctly, and
+ * neither transcribed nor answered.
+ *
+ * Below is a faithful port. Build blocks FULL, then resolve. The exported
+ * helpers keep their old signatures so existing tests and `dump-payload.mjs`
+ * keep working.
+ * ────────────────────────────────────────────────────────────────────────────
+ */
+
+const OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
+
+const DEEPGRAM_MODEL_TO_PRESET: Record<string, string> = {
+  "nova-2": "deepgram_nova_2",
+  "nova-3": "deepgram_nova_3",
+};
+
+const OPENAI_MODEL_TO_PRESET: Record<string, string> = {
+  "gpt-4o-mini": "openai_gpt_4o_mini",
+  "gpt-4.1-mini": "openai_gpt_4_1_mini",
+  "gpt-5-nano": "openai_gpt_5_nano",
+  "gpt-5-mini": "openai_gpt_5_mini",
+};
+
+const PRESET_CATEGORY: Record<string, "asr" | "llm" | "tts"> = {
+  deepgram_nova_2: "asr",
+  deepgram_nova_3: "asr",
+  openai_gpt_4o_mini: "llm",
+  openai_gpt_4_1_mini: "llm",
+  openai_gpt_5_nano: "llm",
+  openai_gpt_5_mini: "llm",
+  minimax_speech_2_6_turbo: "tts",
+  minimax_speech_2_8_turbo: "tts",
+  openai_tts_1: "tts",
+};
+
+type Block = Record<string, unknown>;
+
+function normalizeModelName(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function paramsOf(block: Block | undefined): Block {
+  const p = block?.params;
+  return p && typeof p === "object" ? (p as Block) : {};
+}
+
+/**
+ * `presets.py::infer_asr_preset`. Returns null when a `key` is present —
+ * BYOK and a managed preset are mutually exclusive by construction.
+ */
+export function inferAsrPreset(asr: Block | undefined): string | null {
+  if (!asr || asr.vendor !== "deepgram") return null;
+  const params = paramsOf(asr);
+  if (params.key) return null;
+  return DEEPGRAM_MODEL_TO_PRESET[normalizeModelName(params.model)] ?? null;
+}
+
+/**
+ * `presets.py::infer_llm_preset`. Note the `api_key` guard: a stray key drops
+ * the agent off the managed path silently, which is why the Groq branch never
+ * yields an LLM preset.
+ */
+export function inferLlmPreset(llm: Block | undefined): string | null {
+  if (!llm || llm.api_key) return null;
+  if (llm.vendor !== undefined && llm.vendor !== "openai") return null;
+  if (llm.url !== undefined && llm.url !== OPENAI_CHAT_COMPLETIONS_URL) return null;
+  return OPENAI_MODEL_TO_PRESET[normalizeModelName(paramsOf(llm).model)] ?? null;
+}
+
+function omitNone(value: Block): Block | undefined {
+  const next: Block = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (v !== null && v !== undefined) next[k] = v;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+/**
+ * `presets.py::strip_inferred_preset_fields`, ASR + LLM only (our TTS is
+ * always BYOK, so it contributes no preset and keeps every field).
+ *
+ * Removes exactly what the inferred preset already carries — and NOTHING
+ * else. `params.language` is deliberately kept for ASR, matching the SDK.
+ */
+function stripInferredPresetFields(
+  properties: Block,
+  inferred: readonly string[],
+): Block {
+  const categories = new Set(
+    inferred.map((p) => PRESET_CATEGORY[p]).filter(Boolean),
+  );
+  const next: Block = { ...properties };
+
+  const asr = properties.asr as Block | undefined;
+  if (asr && categories.has("asr")) {
+    const params: Block = { ...paramsOf(asr) };
+    if (inferAsrPreset(asr) === DEEPGRAM_MODEL_TO_PRESET[normalizeModelName(params.model)]) {
+      delete params.model;
+    }
+    delete params.api_key;
+    next.asr = { ...asr, params: omitNone(params) };
+  }
+
+  const llm = properties.llm as Block | undefined;
+  if (llm && categories.has("llm")) {
+    const params: Block = { ...paramsOf(llm) };
+    if (inferLlmPreset(llm) === OPENAI_MODEL_TO_PRESET[normalizeModelName(params.model)]) {
+      delete params.model;
+    }
+    const rest: Block = { ...llm };
+    delete rest.api_key;
+    delete rest.url;
+    delete rest.params;
+    // The OpenAI url is implied by the preset; a non-default url is kept.
+    const url = llm.url;
+    if (url && url !== OPENAI_CHAT_COMPLETIONS_URL) rest.url = url;
+    const kept = omitNone(params);
+    if (kept) rest.params = kept;
+    next.llm = rest;
+  }
+
+  return next;
+}
+
+/**
+ * `presets.py::resolve_session_presets`. Explicit presets win per category;
+ * anything not named explicitly is inferred from the vendor blocks.
+ */
+export function resolveSessionPresets<T extends Block>(properties: T): {
+  preset: string | null;
+  properties: T;
+} {
+  const inferred: string[] = [];
+  const asrPreset = inferAsrPreset(properties.asr as Block | undefined);
+  if (asrPreset) inferred.push(asrPreset);
+  const llmPreset = inferLlmPreset(properties.llm as Block | undefined);
+  if (llmPreset) inferred.push(llmPreset);
+
+  return {
+    preset: inferred.length > 0 ? inferred.join(",") : null,
+    // The strip only ever deletes preset-covered vendor sub-fields, so the
+    // caller's shape is preserved for type purposes.
+    properties: stripInferredPresetFields(properties, inferred) as T,
+  };
+}
+
+/**
+ * Kept for callers that only want the string (tests, dump-payload). The
+ * payload builder no longer uses it — see `resolveSessionPresets`.
+ */
 export function buildPreset(mode: LlmMode): string {
   const presets = ["deepgram_nova_3"];
   if (mode === "managed") presets.push("openai_gpt_4o_mini");
@@ -417,7 +653,11 @@ export function buildTtsConfig(tts: TtsSettings) {
         // Flash over multilingual_v2: quality is a little lower, but we just
         // spent our latency budget on the cascade and cannot afford more.
         model_id: "eleven_flash_v2_5",
-        voice_id: tts.voiceId ?? "pNInz6obpgDQGcFmaJgB",
+        // `||`, not `??`. A blank ELEVENLABS_VOICE_ID reaches here as "" on
+        // any path that does not go through `optional()`, and an empty
+        // voice_id is another silent-agent failure of exactly the kind this
+        // function's header warns about.
+        voice_id: tts.voiceId || "pNInz6obpgDQGcFmaJgB",
         sample_rate: 24000,
       },
     };
@@ -588,9 +828,21 @@ export function buildLlmVendor(
       any llm block carrying an `api_key`, so a stray key silently drops the
       agent off the managed path entirely.
     */
+    /*
+      FULL block, NOT pre-stripped. `resolveSessionPresets` needs `url` and
+      `params.model` present to infer `openai_gpt_4o_mini`; it removes both
+      immediately afterwards. Omitting them here (the previous behaviour)
+      meant nothing could be inferred, so the hardcoded preset was asserted
+      against a block that did not support it and the LLM leg never ran.
+
+      Still no `api_key` — that is what "managed" means, and `infer_llm_preset`
+      returns null for any block carrying one.
+    */
     return {
+      url: MANAGED_OPENAI_URL,
       style: "openai",
       params: {
+        model: MANAGED_FAST_LOOP_MODEL,
         max_tokens: 1024,
         temperature: 0.7,
         top_p: 0.95,
@@ -678,35 +930,7 @@ export function buildAgentPayload(params: {
    */
   llmMode?: LlmMode;
 }) {
-  return {
-    name: `echo-${params.channel}`,
-
-    /*
-      ── THE FIELD THAT ACTIVATES A MANAGED VENDOR ────────────────────────────
-      A managed provider is NOT selected by its vendor block alone. The SDK
-      composes a top-level `preset` string and sends it as a sibling of
-      `properties` — `agentkit/agent_session.py` builds
-
-          { appid, name, preset, pipeline_id, properties }
-
-      and `presets.py::resolve_session_presets` derives the value. For an
-      `asr` block naming deepgram with NO key, `infer_asr_preset` returns
-      `deepgram_nova_3`, and `strip_inferred_preset_fields` then REMOVES
-      `params.model`, because the preset already carries it.
-
-      We were sending the vendor block with no preset. Agora accepted it — it
-      accepts anything it does not recognise — and never activated the managed
-      recogniser. The agent joined, subscribed to the right participant, heard
-      loud audio, and transcribed none of it.
-
-      Only ASR is preset here. The LLM is Groq under our own key and the TTS
-      is ElevenLabs, and `infer_llm_preset` / `infer_tts_preset` both return
-      null the moment a key is present — a managed preset and a BYOK block are
-      mutually exclusive by construction.
-    */
-    preset: buildPreset(params.llmMode ?? "groq"),
-
-    properties: {
+  const properties = {
       channel: params.channel,
       token: params.agentRtcToken,
       agent_rtc_uid: String(params.agentUid),
@@ -819,7 +1043,17 @@ export function buildAgentPayload(params: {
         system_messages: [
           {
             role: "system",
-            content: buildSystemPrompt(Boolean(params.toolBaseUrl)),
+            /*
+              PINNED to the incident prompt, deliberately.
+
+              `buildAgentPayload` is the legacy hand-built path; the live agent
+              is now created by the SDK in `backend/app/voice_agent.py`, which
+              takes its prompt from the invite route. This function survives
+              only for the tests that assert the v6 §14.1 rules are intact and
+              greppable, so it must keep returning them regardless of what
+              AGENT_PROMPT_MODE says about the running console.
+            */
+            content: buildSystemPrompt(Boolean(params.toolBaseUrl), "incident"),
           },
         ],
         ...buildToolsBlock(params.toolBaseUrl ?? null, params.toolSecret ?? null),
@@ -849,6 +1083,17 @@ export function buildAgentPayload(params: {
           still visible — `voiceVerified` on the invite response and the
           pre-flight's "Echo can answer out loud" both report it, and neither
           requires anyone to notice a phrase in a busy room.
+
+          ⚠️ THE SAME HOLE, MOVED INTO THE MODEL. Sep 05: the managed path
+          (gpt-4o-mini) answered an empty ASR turn with the literal text
+          "[Silence] " — and Agora's history shows it read that placeholder
+          ALOUD, on repeat, for a full minute (turns 2, 3, 4, 5, 7, 8, 9, 11…18,
+          each preceded by a `user` turn of `content: ""` from VAD noise). The
+          engine's filler was closed, and the model grew its own. Countered in
+          the prompt's "[WHEN THE USER IS SILENT OR UNINTELLIGIBLE]" section:
+          a blank response on empty input is never read aloud. Keep that rule;
+          if Echo "repeats silence" again, check this empty-completion path
+          first.
         */
         failure_message: "",
       },
@@ -910,6 +1155,17 @@ export function buildAgentPayload(params: {
       asr: {
         vendor: "deepgram",
         params: {
+          /*
+            REQUIRED so `inferAsrPreset` can map nova-3 -> `deepgram_nova_3`.
+            `stripInferredPresetFields` deletes it again straight afterwards,
+            so it never reaches the wire — but without it here, nothing is
+            inferred and the managed recogniser is never activated. That was
+            the deaf agent: VAD segmented turns, `source: "asr"`, content "".
+
+            No `key`: nova-3 is Agora-managed, and a key would make
+            `inferAsrPreset` return null.
+          */
+          model: "nova-3",
           // Domain vocabulary. An incident bridge says "Redis" and "Datadog"
           // far more often than general English does, and Deepgram scores
           // these terms higher when they are named.
@@ -930,6 +1186,19 @@ export function buildAgentPayload(params: {
         // exactly where it gets thrown away.
         language: TURN_DETECTION.language,
       },
-    },
+  };
+
+  /*
+    DERIVE the preset from the blocks above, then strip what it covers.
+    This is `resolve_session_presets` — the step the SDK runs and we used
+    to skip. Asserting a preset next to pre-stripped blocks is what left
+    Echo joined-but-deaf on a 200 response.
+  */
+  const resolved = resolveSessionPresets(properties);
+
+  return {
+    name: `echo-${params.channel}`,
+    ...(resolved.preset ? { preset: resolved.preset } : {}),
+    properties: resolved.properties,
   };
 }
