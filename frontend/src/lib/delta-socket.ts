@@ -217,9 +217,44 @@ export function openDeltaSocket({
  * endpoint in deployment.
  */
 export function slowLoopUrl(): string {
-  return (
-    process.env.NEXT_PUBLIC_SLOW_LOOP_WS ?? "ws://127.0.0.1:8000/ws/deltas"
-  );
+  const configured = process.env.NEXT_PUBLIC_SLOW_LOOP_WS?.trim();
+  if (configured) return configured;
+
+  /*
+    ── A GUEST'S 127.0.0.1 IS THEIR OWN LAPTOP, NOT THE HOST'S ───────────────
+    This used to fall straight through to `ws://127.0.0.1:8000/ws/deltas`,
+    which is correct on the machine running the stack and catastrophically
+    wrong everywhere else. Share the console over a tunnel and every guest
+    browser tries to open a socket to port 8000 on THEIR OWN computer, where
+    nothing is listening.
+
+    Nothing then works, and none of it says why: the delta socket never opens,
+    `/api/token` is fine (it is same-origin), but joining the bridge needs the
+    Slow Loop, so the guest presses J and simply never joins. Measured with
+    the transcript probe against a trycloudflare URL — no PTS, no RTM, no
+    toolkit subscribe, mic n/a.
+
+    When the page is not being served from localhost, default to the SAME
+    origin it was loaded from. A shared deployment then works with no
+    configuration at all, and `NEXT_PUBLIC_SLOW_LOOP_WS` remains the explicit
+    override for a Slow Loop that lives somewhere else entirely.
+
+    Note this requires the console tunnel to proxy /ws/deltas and the other
+    Slow Loop paths to :8000 — `start.ps1 -Share` does not do that today, so
+    it also sets NEXT_PUBLIC_SLOW_LOOP_WS to the backend tunnel and this
+    branch is the fallback rather than the primary path.
+  */
+  if (typeof window !== "undefined") {
+    const { hostname, protocol, host } = window.location;
+    const isLocal =
+      hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+    if (!isLocal) {
+      const scheme = protocol === "https:" ? "wss:" : "ws:";
+      return `${scheme}//${host}/ws/deltas`;
+    }
+  }
+
+  return "ws://127.0.0.1:8000/ws/deltas";
 }
 
 /** Same approved boundary as the delta socket, expressed as HTTP for ingress. */

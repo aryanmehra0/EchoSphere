@@ -84,9 +84,26 @@ export function forgetAgent(channel: string): ActiveAgent | null {
 
 /** Where Zone 3 lives, as HTTP. */
 function slowLoopBase(): string {
-  return (process.env.NEXT_PUBLIC_SLOW_LOOP_WS ?? "ws://127.0.0.1:8000/ws/deltas")
-    .replace(/^ws/, "http")
-    .replace(/\/ws\/deltas$/, "");
+  /*
+    ── THIS IS SERVER-SIDE, SO IT MUST NOT USE THE PUBLIC URL ────────────────
+    `NEXT_PUBLIC_SLOW_LOOP_WS` exists for the BROWSER: once the console is
+    shared over a tunnel, a guest's `127.0.0.1` is their own laptop. But this
+    module runs inside the Next.js server, on the same machine as the Slow
+    Loop, and routing it through the tunnel breaks it in a way that is easy to
+    misread.
+
+    The tunnel gate in `main.py` refuses any request arriving with a non-local
+    Host unless it carries AGENT_TOOL_SECRET. These calls do not carry it — it
+    is meant for Agora's tool invocations — so `/agent/start` came back 401 and
+    the invite failed with "the Slow Loop never created the agent", while the
+    exact same call to 127.0.0.1:8000 succeeded immediately.
+
+    So: an explicit server-side override if one is ever needed, otherwise
+    always loopback. Never the public URL.
+  */
+  const serverSide = process.env.SLOW_LOOP_INTERNAL_URL?.trim();
+  if (serverSide) return serverSide.replace(/\/+$/, "");
+  return "http://127.0.0.1:8000";
 }
 
 /**
