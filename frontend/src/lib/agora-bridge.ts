@@ -43,6 +43,27 @@ export class AgoraBridge {
   private mic: ILocalAudioTrack | null = null;
   private rtm: RTMClient | null = null;
   private silenceTimer: number | null = null;
+
+  /**
+   * UIDs with a `subscribe` call in flight or already satisfied.
+   *
+   * ── WHY A SET AND NOT JUST A TRY/CATCH ──────────────────────────────────
+   * `user-published` is not a once-per-user event. Agora re-fires it whenever
+   * a remote republishes — which Echo does on every reconnect, interrupt and
+   * TTS restart — and the handler is `async`, so two firings overlap: the
+   * second `subscribe` is issued while the first is still on the wire, and the
+   * server rejects the pair with
+   *
+   *     ERR_SUBSCRIBE_REQUEST_INVALID: Repeat subscribe request (code 2021)
+   *
+   * Nothing is actually wrong when that happens — the first subscribe
+   * succeeds and audio plays — but it throws, so it surfaced as a red console
+   * error on a working bridge.
+   *
+   * Cleared per-uid on `user-unpublished` and `user-left`, and wholesale on
+   * `leave()`, so a genuine resubscribe after a republish still goes through.
+   */
+  private readonly subscribing = new Set<number>();
   private channel: string | null = null;
   private credentials: BridgeCredentials | null = null;
 
@@ -137,6 +158,36 @@ export class AgoraBridge {
 
     const AgoraRTC = (await import("agora-rtc-sdk-ng")).default;
     const AgoraRTM = (await import("agora-rtm-sdk")).default;
+
+    /*
+      ── REQUIRED BY THE TRANSCRIPT TOOLKIT, AND WE NEVER SET IT ─────────────
+      The official quickstart calls this before initialising the toolkit:
+
+          setParameter("ENABLE_AUDIO_PTS", true);
+
+      and `bindRtcEvents()` subscribes to `audio-pts` alongside
+      `stream-message`. PTS is how the render controller aligns transcript
+      chunks to the audio timeline; without it the controller has no clock to
+      order turns against and never emits TRANSCRIPT_UPDATED.
+
+      That is the whole symptom: subscribe succeeds, the agent converses
+      perfectly (Agora's REST history proves it), and the console's transcript
+      panel stays on "No speech captured" with no error anywhere.
+
+      Wrapped because it is a private-ish knob — a version that no longer
+      recognises it must not take the join down with it.
+    */
+    try {
+      // Named export from the ESM entry, exactly as the quickstart imports it
+      // (`import { setParameter } from "agora-rtc-sdk-ng/esm"`). It is not a
+      // method on the default AgoraRTC object.
+      const { setParameter } = await import("agora-rtc-sdk-ng/esm");
+      setParameter("ENABLE_AUDIO_PTS", true);
+      console.info("[agora rtc] audio PTS enabled — transcript timing available");
+    } catch (error) {
+      console.warn("[agora rtc] could not enable audio PTS", error);
+    }
+
     const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
     this.client = client;
     this.channel = channel;
@@ -149,6 +200,13 @@ export class AgoraBridge {
       // first sentence, or that sentence is dropped as unattributable — which
       // is safe but is still a lost line from a colleague who just joined.
       if (!this.roles.has(Number(user.uid))) void this.refreshRoster();
+
+      // Already subscribed, or a subscribe is on the wire. A second call now
+      // is the "Repeat subscribe request" the server rejects.
+      const uid = Number(user.uid);
+      if (this.subscribing.has(uid)) return;
+      this.subscribing.add(uid);
+
       try {
         await client.subscribe(user, "audio");
         const track = user.audioTrack;
@@ -159,11 +217,49 @@ export class AgoraBridge {
           this.events.onAgentState("listening");
         }
       } catch (error) {
-        this.events.onError(`Could not subscribe to remote audio: ${message(error)}`);
+        /*
+          ── A LOST RACE IS NOT A FAULT ──────────────────────────────────────
+          `user-published` and `subscribe` are two round trips apart, and the
+          publisher can be gone in between. Agora then throws
+
+              UNEXPECTED_ERROR: can not find remote track in user object
+
+          which is not unexpected at all here: Echo is torn down and recreated
+          constantly (a reset, a re-invite, an idle timeout), so the console
+          routinely learns about a track that no longer exists by the time it
+          asks for it. `user-left` fires immediately after and the UI settles
+          correctly on its own.
+
+          Reporting it through `onError` was actively harmful once that hook
+          started raising the degradation banner: a transient race put
+          "NO VOICE" on screen over a bridge that was working, and the banner
+          does not clear itself. So this one is logged and swallowed, and only
+          genuine subscribe failures are surfaced.
+        */
+        // The subscribe did not take, so this uid must be eligible again —
+        // otherwise a track that republishes later would never be picked up.
+        this.subscribing.delete(uid);
+
+        const detail = message(error);
+        if (/can not find remote track|UNEXPECTED_ERROR|Repeat subscribe request/i.test(detail)) {
+          console.info(
+            `[agora rtc] subscribe to uid ${user.uid} did not take (${detail.slice(0, 80)}) — ignoring`,
+          );
+          return;
+        }
+        this.events.onError(`Could not subscribe to remote audio: ${detail}`);
       }
     });
 
+    // A republish must be resubscribable, so the guard is released the moment
+    // the track goes away rather than being held until leave().
+    client.on("user-unpublished", (user, mediaType) => {
+      if (mediaType !== "audio") return;
+      this.subscribing.delete(Number(user.uid));
+    });
+
     client.on("user-left", (user) => {
+      this.subscribing.delete(Number(user.uid));
       if (Number(user.uid) === AGENT_UID) this.clearAgentTrack();
     });
 
@@ -215,6 +311,9 @@ export class AgoraBridge {
     this.clearAgentTrack();
     // The next bridge may be a different channel with different people.
     this.roles.clear();
+    // And without this a rejoin would see every uid as "already subscribing"
+    // and silently never subscribe to anyone.
+    this.subscribing.clear();
     await this.voice.stop();
 
     const mic = this.mic;
@@ -228,7 +327,25 @@ export class AgoraBridge {
     this.rtm = null;
     if (rtm) {
       try {
+        /*
+          ── AWAITED, AND THEN GIVEN A BEAT ──────────────────────────────────
+          `logout()` resolves before the SDK has released its instance slot,
+          so a join that begins immediately afterwards constructs a SECOND RTM
+          client for the same uid and Agora warns:
+
+              <RTM> Ins id is 2 ... avoid mutual kick issues
+
+          The two instances then kick each other, and because the transcript
+          feed arrives over RTM (`data_channel: "rtm"`) the loser goes silent
+          for the rest of the session — the "it stops listening to the other
+          person" that never recovered on its own.
+
+          The real guard is `joining` in `incident-store.tsx`, which stops two
+          joins overlapping at all. This is the belt to that braces: a short
+          settle so a legitimate rejoin does not race the SDK's own teardown.
+        */
         await rtm.logout();
+        await new Promise((resolve) => setTimeout(resolve, 150));
       } catch {
         // A half-open RTM connection is already being discarded.
       }
@@ -279,9 +396,26 @@ export class AgoraBridge {
       rtmClient = rtm;
       console.info(`[agora rtm] subscribed to ${channel} as uid ${credentials.uid}`);
     } catch (error) {
-      // Non-fatal by design. Transcripts do not come from here.
+      /*
+        ── NOT "NON-FATAL" ANY MORE, BECAUSE THE AGENT IS STARTED WITH
+           `data_channel: "rtm"` ────────────────────────────────────────────
+        The old comment here said "Transcripts do not come from here." That
+        was true of the hand-rolled RTM listener this replaced, and it is
+        false of the current configuration: `voice_agent.py` starts every
+        agent with `parameters={"data_channel": "rtm", ...}`, exactly as the
+        quickstart does, so Agora publishes the transcript feed over RTM and
+        the toolkit reads it through `rtmConfig`.
+
+        Losing RTM therefore loses every transcript — silently, because the
+        toolkit falls back to RTC stream-messages that Agora is not sending.
+        Say so instead of swallowing it.
+      */
       this.rtm = null;
-      console.warn("[agora rtm] unavailable — continuing without it", error);
+      console.warn("[agora rtm] unavailable — transcripts will not arrive", error);
+      this.events.onError(
+        `NO TRANSCRIPTS — RTM is unavailable, and the agent publishes its ` +
+          `transcript feed over RTM: ${message(error)}`,
+      );
     }
 
     // Learn the room before the transcript layer starts handing us turns.
@@ -289,7 +423,7 @@ export class AgoraBridge {
     // but ourselves would drop the opening exchange of the incident.
     await this.refreshRoster();
 
-    await this.voice.start(this.client!, credentials.uid, credentials.role, rtmClient);
+    await this.voice.start(this.client!, channel, credentials.uid, credentials.role, rtmClient);
   }
 
 

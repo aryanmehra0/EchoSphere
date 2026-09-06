@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { MessageSquareText } from "lucide-react";
+import { Maximize2, MessageSquareText, X } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
 import { clock, initials } from "@/lib/format";
@@ -9,6 +9,7 @@ import { cn } from "@/lib/cn";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { PanelHeader } from "@/components/ui/Panel";
 import { Badge } from "@/components/ui/Signal";
+import { Button, Kbd } from "@/components/ui/Button";
 import type { Transcript } from "@/lib/types";
 
 /**
@@ -25,7 +26,8 @@ import type { Transcript } from "@/lib/types";
  * rather than as invisible plumbing.
  */
 
-function Row({ t }: { t: Transcript }) {
+/** One diarised turn. Shared by the live feed and the full-transcript review. */
+export function TranscriptRow({ t }: { t: Transcript }) {
   const isEcho = t.role === "Echo";
 
   return (
@@ -110,6 +112,34 @@ export function TranscriptFeed() {
    */
   const [pinned, setPinned] = useState(true);
 
+  const [showReview, setShowReview] = useState(false);
+
+  /**
+   * Keyboard transport. `T` pulls the full transcript of everything Echo has
+   * heard so far into a review surface, because on a live bridge the operator
+   * is holding the keyboard, not on it. Guarded against firing while typing
+   * into a field, same as J/M — see BridgeControls.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (
+        el &&
+        (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName))
+      ) {
+        return;
+      }
+      if (e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        setShowReview((v) => !v);
+      }
+    };
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
@@ -136,8 +166,21 @@ export function TranscriptFeed() {
         title="Transcript"
         icon={<MessageSquareText size={11} strokeWidth={2.2} />}
         aside={
-          <span className="tnum font-mono text-2xs text-ink-4">
-            {finals}/{state.transcripts.length}
+          <span className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowReview(true)}
+              title="Show the full transcript of everything heard so far"
+              aria-label="Show the full transcript"
+              className="h-5 gap-1 px-1.5"
+              icon={<Maximize2 size={11} strokeWidth={2.2} />}
+            >
+              <Kbd>t</Kbd>
+            </Button>
+            <span className="tnum font-mono text-2xs text-ink-4">
+              {finals}/{state.transcripts.length}
+            </span>
           </span>
         }
       />
@@ -157,7 +200,7 @@ export function TranscriptFeed() {
               aria-relevant="additions"
             >
               {state.transcripts.map((t) => (
-                <Row key={t.messageId} t={t} />
+                <TranscriptRow key={t.messageId} t={t} />
               ))}
             </ul>
           )}
@@ -182,6 +225,97 @@ export function TranscriptFeed() {
           </button>
         ) : null}
       </div>
+
+      {showReview ? (
+        <TranscriptReview onClose={() => setShowReview(false)} />
+      ) : null}
     </>
+  );
+}
+
+/**
+ * The full-transcript review surface.
+ *
+ * Everything Echo has heard so far, in one tall scrollable read — the fixed
+ * 352px voice column cannot carry a long conversation legibly, and an operator
+ * arriving mid-incident has no other way to establish what happened before
+ * them. It is a copy of the reducer's feed, not a re-derivation, so a turn the
+ * live pane shows is exactly what review shows.
+ */
+function TranscriptReview({ onClose }: { onClose: () => void }) {
+  const { state } = useIncident();
+  const dialog = useRef<HTMLDivElement>(null);
+  const endRef = useRef<HTMLDivElement>(null);
+
+  const finals = state.transcripts.filter((t) => t.isFinal).length;
+
+  // Esc closes, like every other transient surface in this console; arriving
+  // with keyboard focus in the dialog keeps the operator's hands on the board.
+  useEffect(() => {
+    dialog.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Tail-follow in review too: new turns land while the operator reads, and
+  // they should appear rather than wait for a scroll.
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end" });
+  }, [state.transcripts.length]);
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-void/70 p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Full transcript"
+      onMouseDown={(e) => {
+        if (e.target === dialog.current?.parentElement) onClose();
+      }}
+    >
+      <div
+        ref={dialog}
+        tabIndex={-1}
+        className="enter-up flex max-h-[76vh] w-full max-w-[760px] flex-col overflow-hidden rounded-md border border-line-strong bg-raised outline-none"
+      >
+        <div className="flex items-center gap-2 border-b border-line-faint px-4 py-2">
+          <MessageSquareText size={13} strokeWidth={2.2} className="text-ink-3" />
+          <span className="eyebrow">Everything Echo has heard so far</span>
+          <span className="tnum ml-auto font-mono text-2xs text-ink-4">
+            {finals} final / {state.transcripts.length} total
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onClose}
+            aria-label="Close transcript review"
+            className="h-5 px-1.5"
+            icon={<X size={12} strokeWidth={2.2} />}
+          />
+        </div>
+
+        <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
+          {state.transcripts.length === 0 ? (
+            <div className="p-6">
+              <EmptyState
+                icon={<MessageSquareText size={13} strokeWidth={2} />}
+                title="Nothing heard yet"
+                hint="Join the bridge and speak — every diarised turn lands in the ledger of speech."
+              />
+            </div>
+          ) : (
+            <ul className="divide-y divide-line-faint">
+              {state.transcripts.map((t) => (
+                <TranscriptRow key={t.messageId} t={t} />
+              ))}
+            </ul>
+          )}
+          <div ref={endRef} />
+        </div>
+      </div>
+    </div>
   );
 }

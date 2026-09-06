@@ -7,6 +7,26 @@ frontend/CLAUDE.md
 # the scrub script is a one-time local tool, not part of the project
 scrub-history.sh
 
-# Official Agora quickstart, kept locally as REFERENCE only.
-# The product is not built around it — see docs/session_log.md.
-agent-quickstart-python/
+# Official Agora quickstart.
+#
+# No longer "reference only": the SDK path in backend/app/voice_agent.py is
+# adapted from server/src/agent.py, the vendor chain (Deepgram nova-3 +
+# gpt-4o-mini + MiniMax, all Agora-managed) is copied from it, and
+# web/src/lib/conversation.ts is what identified the uid-"0" sentinel that was
+# dropping every human transcript. Committing the source keeps that provenance
+# checkable.
+#
+# The SOURCE is small — server/ is 14 files, web/ is 55. What is not committed
+# is the installed dependency tree: my-python-demo alone is 1,084 MB across
+# 33,620 files, which GitHub would reject and every future clone would pay for.
+agent-quickstart-python/my-python-demo/
+agent-quickstart-python/**/venv/
+agent-quickstart-python/**/.venv/
+agent-quickstart-python/**/node_modules/
+
+# Root env file. This held a LIVE AGORA_APP_CERTIFICATE and reached GitHub
+# in commit e122b5f - see docs/session_log.md. The certificate mints tokens
+# for the whole Agora project, so it is rotated, not merely deleted.
+.env
+.env.local
+.env.*.local

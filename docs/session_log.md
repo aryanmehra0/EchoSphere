@@ -1201,6 +1201,108 @@ loud — `npm run demo speech`.
 
 ---
 
+### Sep 5, 2026 — "not listening, not speaking" was a ghost in the registry
+
+User report mid-session: Echo neither listened nor spoke, then later "I just
+hear myself back." Both traced to ONE root cause and one secondary.
+
+**The ghost agent (the whole signal).** Every live symptom since ~17:19
+came from the invite path reusing a corpse. The channel's agent had been
+ended by Agora (idle timeout / vendor failure); the Next-process map and the
+Slow Loop's registry both kept its id, and Agora's own read surface said so
+loudly if anyone asked — it did not, so nobody did. `/bridge/say` ultimately
+proved it: Agora answered `404 TaskNotFound` for the id `/health` reported as
+live. Every later "invite" logged `200 in 23ms`: that is the reused-corpses
+signature (a real create takes ~13s).
+
+Command used to reproduce: `POST /bridge/say` then read Agora history —
+one blank turn (`content: ""`, the % silence rule holding; see the
+`"[Silence]"` entry) and zero speech, on an agent `health` called live.
+
+**The fix (frontend, `invite-agent` route).** Before reusing the map entry,
+the route now probes Agora: `GET /agents/{id}`. 200 = reuse; 404 matching
+`TaskNotFound|has already ended|failed to start|not found` = evict and create
+a fresh agent; anything else (network error, 5xx, non-404) = fail closed and
+KEEP reusing, because evicting on ambiguity risks two consoles summoning two
+Echoes in one room (§18). A mute Echo is recoverable; two Echoes argue. The
+liveness probe lives in the route, not `active-agents.ts`, because that module
+is loaded by plain `node --test` and must stay free of `@/` aliases.
+
+**The secondary (unresolved): "hearing myself back."** With the corpse as the
+only "Echo", the room contained no agent — two of the user's own consoles
+(console on :3001 + the tunnel-exposed URL) would each play the other's mic,
+which is exactly "everything I say, I hear back." Not confirmed, because a
+live Echo was not in the room at the time. Next symptom-gate: once a fresh
+agent greets, if loopback persists WITH a live agent subscribed, trace audio
+with the volume indicator + Agora history rather than theorising. Also: this
+machine's network reaches `api.agora.io:443` but the RTC media-plane
+bootstrap failed with `multi unilbs network error, retry NETWORK_TIMEOUT` on
+every browser join until the Fortinet SSL-VPN was dropped — REST and media
+take different paths, and `validate.ps1` passes on REST alone.
+
+**352px voice column cannot carry a long conversation.** Added T / expand
+button (`TranscriptFeed`): full-chronological transcript overlay of
+everything heard so far, closes on Esc / X / backdrop. Same renderer as the
+live feed, so review == live.
+
+**Tests: 198 backend + 125 frontend = 323.** Frontend gates green.
+
+---
+
+### Sep 06 — the transcript subscription was never opened
+
+**Symptom:** the agent did not react to the mic. Zero `[voice-agent] update`
+lines in the browser console. Everything else looked healthy — the agent
+joined, the mic published, Agora's own `/history` segmented turns.
+
+**Cause, and it is one line.** `AgoraVoiceAI.init()` **binds no listeners.**
+Read `_doInit` in `node_modules/agora-agent-client-toolkit/dist/index.mjs`: it
+validates the engines, assigns `rtcEngine` / `rtmEngine` / `renderMode` to the
+singleton, and returns. That is all it does.
+
+The only call that reaches `bindRtcEvents()` — and therefore the only call
+that ever attaches
+
+```js
+rtcEngine.on("stream-message", this._boundHandleRtcStreamMessage)
+```
+
+— is **`subscribeMessage(channel)`**. It also starts the render controller
+that turns those frames into `TRANSCRIPT_UPDATED`. We never called it.
+
+So `on(TRANSCRIPT_UPDATED, ...)` was registering a handler on an emitter that
+nothing would ever emit into. No error, no warning, no rejected promise. The
+toolkit's own documented example shows both calls in order:
+
+```ts
+const api = AgoraVoiceAI.init({ rtcEngine, rtmEngine, renderMode });
+api.subscribeMessage('channel-id');   // ← this line
+```
+
+**Why the previous fix looked right and still failed.** The session before
+this one correctly diagnosed the *transport*: transcripts travel on the RTC
+data stream, not RTM, and it moved off the hand-rolled RTM listener onto the
+toolkit for exactly that reason. That diagnosis was right. But moving to the
+correct transport and then never opening it produces the identical symptom —
+which is why the second failure hid so cleanly behind the first.
+
+**Fix:** `voice-agent.ts::start()` now takes the channel and calls
+`this.ai.subscribeMessage(channel)` after the handlers are registered.
+`agora-bridge.ts` threads the channel through.
+
+**Pinned in source**, since the failure is silent by construction:
+three tests in `tests/agora-transcript.test.ts` assert `subscribeMessage` is
+called, is called with `channel`, and is called *after* the
+`TRANSCRIPT_UPDATED` handler is registered. Verified by reverting the fix and
+watching two of them fail.
+
+> **The general lesson, and it has now cost this project twice:** with this
+> toolkit, "configured" and "subscribed" are separate steps, and skipping the
+> second is indistinguishable from a deaf product. If transcripts are missing,
+> check that `subscribeMessage` ran **before** re-examining the agent payload.
+
+**Tests: 198 backend + 128 frontend = 326.** Typecheck, lint and build green.
+
 ### Session 7 — the headline contradiction was silently not firing (Sep 6)
 
 **Ask:** get the project demo-ready against the hackathon problem statement.
@@ -1618,6 +1720,11 @@ Last session's tunnel: `https://attitude-air-cartridges-warned.trycloudflare.com
 4. **Don't relax the trust-zone tests** to make a build pass. Move the code
    instead.
 5. **Don't trust a green build.** Screenshot the running app.
+6. **Don't assume `init()` subscribed you.** With
+   `agora-agent-client-toolkit`, `init()` only stores config —
+   `subscribeMessage(channel)` is what binds `stream-message`. Configured and
+   subscribed are two steps, and skipping the second looks exactly like a deaf
+   product. Cost this project a full session on Sep 06.
 6. **Don't put Zone 3 keys in Next.js.** It changes a compromise from "can talk
    on one bridge" to "can page a human at 3am".
 

@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import config
+from . import store
 from .bridge import BridgeController
 from .contradiction import ContradictionEngine
 from .degradation import Degradation
@@ -37,6 +38,7 @@ from .extraction import (
 )
 from .proxy import ProxyActionLayer
 from .rti import ParticipantFrame, RTIMonitor
+from . import voice_agent
 from .ledger import Ledger
 from .privacy import PrivacyGate
 from .models import (
@@ -104,21 +106,48 @@ async def lifespan(app: FastAPI):
             except Exception:  # noqa: BLE001 — a bad window must not kill the loop
                 log.exception("flush ticker failed")
 
+    # ── DURABILITY, AND WHY IT IS OPTIONAL ──────────────────────────────
+    # `connect` never raises: a machine with no Docker must still run the
+    # bridge, degrading to the in-memory Ledger it has always used. Whether
+    # persistence is actually on is reported by /health rather than assumed.
+    if await store.connect():
+        try:
+            restored = await ledger.restore()
+            if restored:
+                log.info("Ledger restored from Postgres: %d rows", restored)
+        except Exception:
+            log.exception("could not restore the Ledger — continuing empty")
+
     ticker = asyncio.create_task(flush_ticker())
     log.info("Slow Loop up. observer mode=%s", config.observer_mode())
 
     yield
 
     ticker.cancel()
+    await store.close()
     await _http.aclose()
 
 
 app = FastAPI(title="EchoSphere — Slow Loop", version="0.1.0", lifespan=lifespan)
 
-# The dashboard is served from :3000 in development.
+# The dashboard is served from :3000 in development, but the console may run on
+# any port (e.g. :3001 when something else owns 3000). CORS_ORIGINS lets a host
+# override the dev defaults without editing source; the browser must be allowed
+# to POST /observer/transcript or the voice path dies silently.
+_cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    *[
+        o.strip()
+        for o in config.cors_origins().split(",")
+        if o.strip()
+    ],
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -157,6 +186,38 @@ async def tunnel_gate(request: Request, call_next):  # type: ignore[no-untyped-d
     if request.url.path in ("/health", "/"):
         return await call_next(request)
 
+    # ── CORS PREFLIGHTS CANNOT CARRY THE TOKEN ─────────────────────────────
+    #
+    # A browser sends OPTIONS *before* the real request and is forbidden from
+    # attaching custom headers to it, so `x-echo-tool-token` is never present.
+    # Refusing it 401 kills the request that follows, and the browser reports
+    # only "Failed to fetch" — which surfaced here as
+    # "Transcript forwarding paused: Failed to fetch", naming neither CORS nor
+    # this gate.
+    #
+    # Answering the preflight grants nothing: it returns headers, never data,
+    # and the POST behind it is still gated below.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # ── THE CONSOLE'S OWN BROWSER PATHS ────────────────────────────────────
+    #
+    # This gate was written for ONE remote caller: Agora's servers invoking
+    # /tools/*. Sharing the console over a tunnel added a second, which the
+    # gate had never seen — the guest's BROWSER, which holds no secret and
+    # must never be given one (it would be readable by anyone with the link).
+    #
+    # These two are what a participating browser needs, and neither is a
+    # control surface: /observer/transcript ingests speech the sender just
+    # spoke aloud on the bridge, and /ws/deltas is the same read-only view the
+    # dashboard already renders.
+    #
+    # Everything that CHANGES the world — /incident/reset, /bridge/say,
+    # /approval/redeem, /tools/* — stays behind the token. That is the line
+    # this gate exists to hold, and it still holds.
+    if request.url.path in ("/observer/transcript", "/ws/deltas"):
+        return await call_next(request)
+
     secret = config.tool_secret()
     if not secret:
         log.warning("refused remote %s %s — AGENT_TOOL_SECRET is not set", request.method, host)
@@ -188,6 +249,10 @@ async def health() -> JSONResponse:
             "credentials": creds,
             "missing": missing,
             "observerMode": config.observer_mode(),
+            # Surfaced, never assumed: a silent fallback to an in-memory
+            # Ledger is exactly the kind of quiet degradation this project
+            # keeps having to hunt down after the fact.
+            "persistence": store.status(),
             "degraded": degraded.to_wire(),
             "agent": _agent,
             "seq": hub.seq,
@@ -206,6 +271,140 @@ async def health() -> JSONResponse:
         },
         status_code=200 if ready else 503,
     )
+
+
+# ---------------------------------------------------------------------------
+# Agent creation — the SDK path (see app/voice_agent.py)
+# ---------------------------------------------------------------------------
+
+def _with_recap(prompt: str) -> str:
+    """
+    Append the Ledger recap to a system prompt, when there is one.
+
+    A replacement agent starts with an empty history, so without this the
+    person who joins third can ask what has been established and be told
+    nothing, while the dashboard beside them shows a full Ledger.
+    """
+    try:
+        recap = ledger.recap()
+    except Exception:
+        log.warning("could not build the ledger recap", exc_info=True)
+        return prompt
+    if not recap:
+        return prompt
+
+    header = (
+        "[WHAT THIS BRIDGE HAS ALREADY ESTABLISHED]\n"
+        "You are joining an incident already in progress. What follows is"
+        " the record so far, attributed. Treat it as the record, not as"
+        " your own recollection, and keep attributing it when you refer"
+        " to it.\n\n"
+    )
+    return prompt + "\n\n" + header + recap
+
+@app.post("/agent/start")
+async def start_agent(body: dict[str, Any]) -> JSONResponse:
+    """
+    Create the Agora agent through the official SDK, then register it here.
+
+    ── WHY ZONE 2 NO LONGER BUILDS THE PAYLOAD ────────────────────────────
+    It built it by hand, and Agora returns 200 for a payload it only partly
+    understands. Every misplaced field failed silently, and the failure that
+    survived longest was the one that matters most: the recogniser never ran,
+    so `content` came back EMPTY for turns carrying seconds of real speech.
+
+    The SDK derives the vendor presets instead of asserting them, and refuses
+    to construct an invalid recogniser at all. See `voice_agent.py`.
+
+    This endpoint deliberately also does the REGISTER step, because the two
+    were previously separate calls from Zone 2 and a lost second call left
+    Echo mute for the session with no way back. One call, one outcome.
+    """
+    channel = (body.get("channel") or "").strip()
+    prompt = body.get("systemPrompt") or ""
+    if not channel or not prompt:
+        return JSONResponse(
+            {"error": "channel and systemPrompt are required"}, status_code=400,
+        )
+
+    try:
+        result = await voice_agent.start(
+            channel=channel,
+            agent_uid=int(body.get("agentUid") or 0),
+            user_uid=int(body.get("userUid") or 0),
+            # Everyone else already on the bridge, so Echo can hear the whole
+            # room rather than only the console that invited it.
+            other_uids=[int(u) for u in (body.get("otherUids") or []) if int(u) > 0],
+            # ── HAND A REPLACEMENT AGENT THE INCIDENT SO FAR ───────────────
+            # Adding a speaker means a NEW agent (remote_rtc_uids is fixed at
+            # creation), and a new agent starts with an empty history. Without
+            # this, whoever joins third can ask "what have we established?"
+            # and be told nothing — while the dashboard beside them shows a
+            # full Ledger.
+            #
+            # The recap is attributed and non-diagnostic by construction, and
+            # INFERRED claims are excluded, so nothing enters the prompt that
+            # the model could mistake for its own knowledge.
+            system_prompt=_with_recap(prompt),
+            tts=body.get("tts") or {},
+            greeting=body.get("greeting"),
+            llm_mode=(body.get("llmMode") or "managed"),
+            groq_api_key=body.get("groqApiKey"),
+            groq_model=body.get("groqModel"),
+            tools=body.get("tools"),
+        )
+    except voice_agent.VoiceAgentError as exc:
+        # Degradation (§13): a failed invite must not take the dashboard with
+        # it. Reported, not raised.
+        log.warning("agent start failed: %s", exc)
+        return JSONResponse(
+            {"error": str(exc), "degraded": True}, status_code=502,
+        )
+
+    agent_id = result["agent_id"]
+    already_known = _agent["agent_id"] == agent_id
+    _agent["agent_id"] = agent_id
+    _agent["channel"] = channel
+    log.info("agent started and registered: %s on %s", agent_id, channel)
+
+    greeting = None
+    if not already_known and bool(body.get("greet", True)):
+        try:
+            line = joined(can_read_ledger=bool(body.get("tools")))
+            # `async with`, matching /agent/register: the context manager owns
+            # the HTTP client the controller speaks through. And `speak`, not
+            # `speak_now` — there is nothing to interrupt on a fresh join.
+            async with BridgeController(channel, agent_id, client=_http) as br:
+                result = await br.speak(line, priority="high", force=True)
+            greeting = {"spoken": bool(result and result.ok), "text": line}
+        except Exception as exc:
+            # A hoarse TTS vendor must not fail the whole invite.
+            log.warning("greeting failed", exc_info=True)
+            greeting = {"spoken": False, "error": str(exc)}
+
+    return JSONResponse({
+        "ok": True,
+        "agentId": agent_id,
+        "channel": channel,
+        "agent": _agent,
+        "greeting": greeting,
+    })
+
+
+@app.post("/agent/stop")
+async def stop_agent_endpoint(body: dict[str, Any]) -> dict[str, Any]:
+    """Stop the agent through the SDK and forget it here."""
+    agent_id = (body.get("agentId") or _agent["agent_id"] or "").strip()
+    if not agent_id:
+        return {"ok": False, "reason": "no agent registered"}
+    try:
+        await voice_agent.stop(agent_id)
+    except voice_agent.VoiceAgentError as exc:
+        log.warning("agent stop failed: %s", exc)
+        return {"ok": False, "reason": str(exc)}
+    _agent["agent_id"] = None
+    _agent["channel"] = None
+    return {"ok": True, "stopped": agent_id}
 
 
 # ---------------------------------------------------------------------------
@@ -730,7 +929,14 @@ async def reset_incident() -> dict[str, Any]:
     purged, not retained.
     """
     global ledger
-    ledger = Ledger()
+
+    # §10.4 says transcripts and derived state are PURGED, not retained, so
+    # the durable copy goes with the in-memory one. `global` has to come
+    # first: Python binds the declaration for the whole function body, so
+    # reading `ledger.channel` above it is a SyntaxError, not a warning.
+    channel = ledger.channel
+    await store.clear(channel)
+    ledger = Ledger(channel=channel)
 
     # The window and the cooldown table are incident state too. Leaving frames
     # in the window would let the previous run's last sentence be extracted into
@@ -867,6 +1073,11 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
     # window; the flush ticker handles the silence rule. `add` also rejects a
     # repeat of an utterance already accepted.
     accepted = window.add(t)
+
+    # The raw record beneath the claims. "What exactly was said" is where
+    # every disputed claim ends up, and extraction is not reversible.
+    if accepted:
+        store.save(t, ledger.channel)
 
     # A duplicate is not re-published either. The reducer would dedupe it by
     # messageId, but a delta that changes nothing still costs a render on every

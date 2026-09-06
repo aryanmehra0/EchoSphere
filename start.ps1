@@ -49,10 +49,15 @@
 param(
     [switch]$SkipPreflight,
     [switch]$Reset,
-    [switch]$Tunnel
+    [switch]$Tunnel,
+    [switch]$Share
 )
 
 $ErrorActionPreference = "Stop"
+
+# Sharing the console is pointless without the backend tunnel: a remote browser
+# would load the page and then fail every call to the Slow Loop.
+if ($Share) { $Tunnel = $true }
 $root = $PSScriptRoot
 $backend = Join-Path $root "backend"
 $frontend = Join-Path $root "frontend"
@@ -63,6 +68,50 @@ function Write-Step($text) { Write-Host "  $text" -ForegroundColor Cyan }
 function Write-Ok($text)   { Write-Host "  OK   $text" -ForegroundColor Green }
 function Write-Bad($text)  { Write-Host "  FAIL $text" -ForegroundColor Red }
 function Write-Note($text) { Write-Host "       $text" -ForegroundColor DarkGray }
+
+# ── FINDING CLOUDFLARED, ONCE ────────────────────────────────────────────────
+#
+# winget installs it and reports success, but a shell that was ALREADY OPEN
+# captured its PATH at launch, so `cloudflared` is "not recognized" in the very
+# window that just installed it. That reads as a broken installer rather than a
+# stale environment, and it has now cost two rounds of confusion.
+#
+# So: never rely on PATH. Look where winget actually writes.
+function Resolve-Cloudflared {
+    $found = Get-Command cloudflared -ErrorAction SilentlyContinue
+    if ($found) { return $found.Source }
+
+    $candidates = @(
+        (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\cloudflared.exe"),
+        (Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "cloudflared\cloudflared.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) { return $candidate }
+    }
+    return $null
+}
+
+# Open a quick tunnel and return its public URL, or $null.
+#
+# Each tunnel gets its OWN log file, and the URL is read from that file only -
+# a shared or reused log means reading the PREVIOUS run's hostname and
+# announcing a dead URL as live.
+function Start-QuickTunnel($exe, $target, $tag) {
+    $log = Join-Path $env:TEMP ("echosphere-$tag-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+    Start-Process -FilePath $exe `
+        -ArgumentList "tunnel", "--url", $target, "--logfile", $log `
+        -WindowStyle Hidden
+    foreach ($i in 1..45) {
+        Start-Sleep -Milliseconds 1000
+        if (Test-Path $log) {
+            $m = Select-String -Path $log -Pattern "https://[a-z0-9-]+\.trycloudflare\.com" `
+                 -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($m) { return $m.Matches[0].Value }
+        }
+    }
+    return $null
+}
 
 # KEEP STRING LITERALS IN THIS FILE PURE ASCII.
 #
@@ -137,13 +186,28 @@ function Get-EnvKey($key) {
 # with a 401 that looks exactly like Echo declining to answer.
 $tunnelUrl = $null
 if ($Tunnel) {
-    $cf = Get-Command cloudflared -ErrorAction SilentlyContinue
-    if (-not $cf) {
+    # ── FIND IT, DO NOT JUST ASK PATH ───────────────────────────────────────
+    #
+    # winget installs cloudflared and reports success, but the PATH entry it
+    # adds is not visible to a shell that was already open - the environment
+    # was captured at launch. So the very next command in the same window says
+    # "cloudflared is not installed" immediately after a successful install,
+    # which reads as a broken installer rather than a stale PATH.
+    #
+    # Checking the two locations winget actually writes to costs nothing and
+    # removes the "restart your terminal" step entirely.
+    $cfPath = Resolve-Cloudflared
+    if (-not $cfPath) {
         Write-Bad "cloudflared is not installed"
         Write-Note "winget install --id Cloudflare.cloudflared"
+        Write-Note "if you JUST installed it, open a new terminal - PATH is stale here"
         Write-Note "or run without -Tunnel; Echo will talk but cannot read the Ledger."
         exit 1
     }
+    if (-not (Get-Command cloudflared -ErrorAction SilentlyContinue)) {
+        Write-Note "found cloudflared at $cfPath (not on PATH in this shell)"
+    }
+    $cf = [PSCustomObject]@{ Source = $cfPath }
 
     Write-Step "opening a tunnel to the Slow Loop ..."
 
@@ -201,7 +265,27 @@ if ($Tunnel) {
 
     Set-EnvKey "AGENT_TOOL_BASE_URL" $tunnelUrl
     Set-EnvKey "AGENT_TOOL_SECRET" $secret
+
+    # ── THE BROWSER NEEDS THIS TOO, AND IT IS NOT THE SAME THING ────────────
+    #
+    # AGENT_TOOL_BASE_URL is for AGORA's servers calling our tools. This one is
+    # for the BROWSER: `delta-socket.ts` opens the delta WebSocket and POSTs
+    # transcripts to the Slow Loop, and without it every client falls back to
+    # ws://127.0.0.1:8000 - which on a guest's machine is their own laptop,
+    # where nothing is listening.
+    #
+    # The symptom is that a guest loads the console perfectly (it is served
+    # over the tunnel) and then cannot join the bridge at all, with no error
+    # that names the cause. Measured with the transcript probe: no PTS, no RTM
+    # subscribe, no toolkit subscribe, mic n/a.
+    #
+    # `wss:` because the tunnel is HTTPS and a browser on an HTTPS page refuses
+    # to open a plaintext ws:// socket.
+    $wsUrl = ($tunnelUrl -replace '^https:', 'wss:') + "/ws/deltas"
+    Set-EnvKey "NEXT_PUBLIC_SLOW_LOOP_WS" $wsUrl
+
     Write-Ok "tool credentials written to frontend\.env.local"
+    Write-Note "browsers will reach the Slow Loop at $wsUrl"
 
     # Both processes cached the old environment. Restart them.
     foreach ($port in 8000, 3000) {
@@ -247,8 +331,34 @@ $console = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction Silen
 if ($console) {
     Write-Ok "console already running on :3000"
 } else {
+    # ── KILL A STALE DEV SERVER BEFORE STARTING ONE ─────────────────────────
+    #
+    # Next 16 does NOT fail when :3000 is taken by another `next dev` - it
+    # takes the next free port and says so only in a window this script hides.
+    # The probe below then polls :3000 forever, reports "the console did not
+    # start", and exits 1 while the console is up and serving on :3001.
+    #
+    # Observed exactly that: PID 23112 on :3001, script exit 1, app fine.
+    #
+    # Worse than the wasted minute: the invite path mints tokens against an
+    # origin the browser is not on, so CORS silently drops the transcript
+    # POSTs and Echo goes deaf in the one way this project keeps rediscovering.
+    # A single console on a known port is not a nicety here.
+    $stale = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+             Where-Object { $_.CommandLine -like "*next*dev*" -and $_.CommandLine -like "*$($frontend.Replace('','\'))*" }
+    foreach ($proc in $stale) {
+        Write-Note "stopping a stale dev server (PID $($proc.ProcessId))"
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($stale) { Start-Sleep -Milliseconds 1200 }
+
     Write-Step "starting the console on :3000 ..."
-    Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "npm run dev" `
+    # `--port 3000` so a busy port is an ERROR we can see rather than a silent
+    # move to 3001. Logged to a file because the window is hidden and a
+    # failure with no output is the thing that wasted the most time here.
+    $clog = Join-Path $env:TEMP ("echosphere-console-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+    Start-Process -FilePath "cmd.exe" `
+        -ArgumentList "/c", "npm run dev -- --port 3000 > `"$clog`" 2>&1" `
         -WorkingDirectory $frontend -WindowStyle Hidden
 
     $up = $false
@@ -262,6 +372,10 @@ if ($console) {
     if ($up) { Write-Ok "console is up" }
     else {
         Write-Bad "the console did not start"
+        if (Test-Path $clog) {
+            Write-Note "last lines of $clog"
+            Get-Content $clog -Tail 15 | ForEach-Object { Write-Note "  $_" }
+        }
         Write-Host "  Run it in the foreground to see why:" -ForegroundColor Yellow
         Write-Host "    cd frontend"
         Write-Host "    npm run dev"
@@ -311,6 +425,10 @@ if ($configuredTunnel) {
         Write-Note "clearing it - stale tool URLs are worse than none at all"
         Set-EnvKey "AGENT_TOOL_BASE_URL" ""
         Set-EnvKey "AGENT_TOOL_SECRET" ""
+        # Cleared with them: a browser pointed at a dead tunnel cannot join the
+        # bridge at all, which is worse than the localhost default it falls
+        # back to when this is empty.
+        Set-EnvKey "NEXT_PUBLIC_SLOW_LOOP_WS" ""
         Write-Note "re-run with -Tunnel to open a fresh one"
         # The console cached the dead value at boot; without this it keeps
         # handing it to Agora until someone restarts it by hand.
@@ -343,6 +461,59 @@ try {
     Pop-Location
 }
 
+# ── SHARING THE CONSOLE ──────────────────────────────────────────────────────
+#
+# The -Tunnel flag exposes the SLOW LOOP so Agora's servers can call our REST
+# tools. That does nothing for a human on another machine: they need the web
+# app itself. This opens a second quick tunnel for :3000 and hands you a URL to
+# send them.
+#
+# ── WHY CORS_ORIGINS HAS TO BE WRITTEN HERE ─────────────────────────────────
+# A remote browser's page origin is the tunnel hostname, not localhost. Every
+# transcript that browser captures is POSTed to /observer/transcript, and the
+# Slow Loop's CORS list only contains localhost:3000/3001 by default. Without
+# the origin added, the browser silently drops those POSTs and the guest can
+# talk all they like while the Ledger stays empty - the exact class of silent
+# failure this project has spent days removing. So the origin is written to
+# .env.local and the Slow Loop is restarted to read it.
+#
+# ⚠️ A trycloudflare URL is PUBLIC and unauthenticated. Anyone with the link
+# gets your console. Fine for a demo; do not leave it running.
+$shareUrl = $null
+if ($Share) {
+    Write-Host ""
+    Write-Step "opening a tunnel to the console ..."
+
+    $shareUrl = Start-QuickTunnel $cf.Source "http://localhost:3000" "console"
+    if (-not $shareUrl) {
+        Write-Bad "the console tunnel did not come up"
+        Write-Note "the local console on :3000 is unaffected"
+    } else {
+        Write-Ok "console tunnel live  $shareUrl"
+
+        # Let the guest's browser reach the Slow Loop, then restart it so the
+        # new origin is actually loaded.
+        $origins = Get-EnvKey "CORS_ORIGINS"
+        if ([string]::IsNullOrWhiteSpace($origins)) { $origins = $shareUrl }
+        elseif ($origins -notlike "*$shareUrl*") { $origins = "$origins,$shareUrl" }
+        Set-EnvKey "CORS_ORIGINS" $origins
+
+        $slow = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
+        if ($slow) {
+            Stop-Process -Id $slow[0].OwningProcess -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 1200
+        }
+        Start-Process -FilePath $python `
+            -ArgumentList "-m", "uvicorn", "app.main:app", "--port", "8000" `
+            -WorkingDirectory $backend -WindowStyle Hidden
+        foreach ($i in 1..40) {
+            Start-Sleep -Milliseconds 800
+            try { Invoke-RestMethod "http://127.0.0.1:8000/health" -TimeoutSec 4 | Out-Null; break } catch { }
+        }
+        Write-Ok "guests may now reach the Ledger"
+    }
+}
+
 Write-Host "  Next:" -ForegroundColor White
 Write-Host "    open http://localhost:3000 and press J"
 if ($tunnelLive) {
@@ -366,3 +537,11 @@ if ($tunnelLive) {
     Write-Host "                           npm run demo feed"
 }
 Write-Host ""
+
+if ($shareUrl) {
+    Write-Host "  Share with others:" -ForegroundColor White
+    Write-Host "    $shareUrl" -ForegroundColor Cyan
+    Write-Host "    Same channel as you - the backend keeps ONE ledger and ONE agent." -ForegroundColor DarkGray
+    Write-Host "    Public and unauthenticated; stop this script when you are done." -ForegroundColor DarkGray
+    Write-Host ""
+}

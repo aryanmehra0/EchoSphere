@@ -2,10 +2,15 @@ import { NextResponse } from "next/server";
 
 import { MissingEnvError, serverEnv } from "@/lib/server/env";
 import { agoraAuthHeader, mintTokens } from "@/lib/server/agora-tokens";
-import { buildAgentPayload } from "@/lib/server/agent-config";
+import {
+  buildSystemPrompt,
+  buildToolsBlock,
+  DEFAULT_GREETING,
+} from "@/lib/server/agent-config";
 import { selectFastLoopModel } from "@/lib/server/groq-budget";
 import {
   AGENT_UID,
+  getRoster,
   putEntry,
   RosterWriteError,
 } from "@/lib/server/roster";
@@ -13,6 +18,8 @@ import {
   getActiveAgent,
   registerWithSlowLoop,
   rememberAgent,
+  forgetAgent,
+  startAgentViaSlowLoop,
 } from "@/lib/server/active-agents";
 
 /**
@@ -52,6 +59,88 @@ interface InviteRequest {
   toolBaseUrl?: string;
 }
 
+/*
+  TRUST NOTHING THE LOCAL MAP SAYS, ASK THE VENDOR.
+
+  The map reuses an entry so two consoles never spawn two Echoes. But reuse
+  against a dead entry is how Echo went mute for a whole session: Agora ended
+  the session (idle timeout, vendor failure) while the map — and the Slow
+  Loop — kept the id, so every rejoin "reused" a corpse that could neither
+  listen nor speak, and no local signal ever disagreed. The token-expiry
+  guard cannot catch it, so liveness is asked of Agora directly.
+
+  FAIL-CLOSED BY DESIGN: a probe that cannot answer ("network error", a 5xx,
+  a 404 that does not say the session is over) keeps the entry. The opposite
+  trade — evicting on ambiguity — could leave two consoles each spawning an
+  agent in one room (§18), the loud failure this idempotent map exists to
+  prevent. A mute Echo is recoverable; two Echoes argue.
+*/
+type AgentLiveness = "living" | "ended" | "unknown";
+
+async function agentLiveness(agentId: string): Promise<AgentLiveness> {
+  try {
+    const base =
+      `${serverEnv.agoraApiBase}/api/conversational-ai-agent/v2/projects/` +
+      `${serverEnv.agoraAppId}/agents/${agentId}`;
+    const response = await fetch(base, {
+      headers: { Authorization: agoraAuthHeader() },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (response.ok) {
+      /*
+        ── A 200 DOES NOT MEAN THE AGENT IS ALIVE ──────────────────────────
+        This used to `return "living"` on any 200, and that is how the console
+        spent a session talking to a corpse. Agora answers the read surface
+        for an agent it has already ENDED, with HTTP 200 and a body that says
+        so plainly:
+
+            {"agent_id": "...", "status": "STOPPED", "stop_ts": 1788678053}
+
+        So the entry was reused, `/agent/start` was never called, a dead agent
+        id was handed to the Bridge — and the room got a greeting from the
+        PREVIOUS session's agent while nothing anyone said was transcribed.
+        Identical from the outside to the deaf-ASR bug this project just spent
+        days removing, which is exactly why it has to be checked here.
+
+        The status field is the authority; the HTTP code only says the read
+        succeeded.
+      */
+      const body = (await response.json().catch(() => null)) as
+        | { status?: string }
+        | null;
+      const state = body?.status?.toUpperCase();
+      if (state === "RUNNING" || state === "STARTING" || state === "CREATING") {
+        return "living";
+      }
+      if (state) {
+        console.warn(`[agents] ${agentId} reports status ${state} — not reusable`);
+        return "ended";
+      }
+      // A 200 with no status we recognise: fail closed toward reuse, per the
+      // note above `agentLiveness`.
+      return "unknown";
+    }
+
+    const text = await response.text();
+    // A plain 404 is not enough: a still-CREATING session can 404 against the
+    // read surface too, and evicting one would spawn a duplicate. Recreate
+    // only on Agora's explicit "this session is over" answer — the exact body
+    // stop-agent already received live (reason: TaskNotFound).
+    if (
+      response.status === 404 &&
+      /TaskNotFound|has already ended|failed to start|not found/i.test(text)
+    ) {
+      return "ended";
+    }
+
+    console.warn(`[agents] liveness probe for ${agentId} -> HTTP ${response.status}`, text.slice(0, 300));
+    return "unknown";
+  } catch (error) {
+    console.warn(`[agents] liveness probe for ${agentId} failed`, error);
+    return "unknown";
+  }
+}
+
 export async function POST(request: Request) {
   let body: InviteRequest;
   try {
@@ -85,7 +174,75 @@ export async function POST(request: Request) {
     different words — which looks exactly like the product being broken.
   */
   const existing = getActiveAgent(channel);
-  if (existing) {
+  let reuseExisting = false;
+
+  /*
+    ── CARRY THE OUTGOING AGENT'S SUBSCRIBERS INTO ITS REPLACEMENT ──────────
+    Agora fixes `remote_rtc_uids` at creation, so adding a third person means
+    building a NEW agent. `forgetAgent` then erased the old one's subscriber
+    list and the rebuild was gathered from the roster alone.
+
+    That is why Echo ended up listening only to whoever joined LAST: each join
+    replaced the agent, and if the roster lookup missed the earlier joiners —
+    a reload that reused a uid, a row past its token expiry — the replacement
+    subscribed to the newcomer and nobody else. Person 3 could talk to it;
+    persons 1 and 2 had been silently dropped by the very join that was
+    supposed to add someone.
+
+    So the previous agent's subscribers are remembered here and merged into
+    the new one. The roster is the primary source; this is the floor beneath
+    it, and it means each join can only ever ADD ears, never remove them.
+  */
+  const inheritedUids = existing?.subscribedUids ?? [];
+
+  if (existing && !existing.subscribedUids.includes(userUid)) {
+    /*
+      ── THE AGENT LISTENS TO ONE UID, AND THIS CONSOLE IS NOT IT ────────────
+      Agora fixes `remote_rtc_uids` when the agent is created and it cannot be
+      changed afterwards. The Roster allocates uids sequentially and never
+      releases them, so every reload of the console took the next one — 1001,
+      1002, 1003 — while the agent stayed pinned to the first.
+
+      Reusing it then produces the exact failure this cost days to find: an
+      agent that is RUNNING, converses happily in its own history, and is deaf
+      to the person actually in the room, because Agora runs no recogniser on
+      a participant nobody subscribed to. Nothing errors. The transcript panel
+      simply stays empty.
+
+      Measured: a browser joined as 1002 against an agent subscribed to 1001
+      and produced zero TRANSCRIPT_UPDATED events in 60 seconds.
+
+      A tab now remembers its uid (see `requestBridgeCredentials`), so this
+      should be rare — but when the uid does differ, the old agent is useless
+      to this console and must be replaced rather than reused.
+    */
+    console.warn(
+      `[/api/invite-agent] agent ${existing.agentId} subscribes to uid ` +
+        `${existing.userUid}, but this console is uid ${userUid} — replacing it`,
+    );
+    forgetAgent(channel);
+  }
+
+  const stillExisting = getActiveAgent(channel);
+  if (stillExisting) {
+    /* Liveness guard — see the note above `agentLiveness`. */
+    const liveness = await agentLiveness(stillExisting.agentId);
+    if (liveness === "ended") {
+      console.warn(
+        `[/api/invite-agent] agent ${stillExisting.agentId} has ended at Agora — ` +
+          "creating a replacement instead of reusing a corpse",
+      );
+      forgetAgent(channel);
+    } else {
+      // "living", or the probe could not answer and this branch fails closed
+      // toward reuse. Evicting on ambiguity could have two consoles both
+      // spawning an agent in one room (§18) — the loud failure this idempotent
+      // map exists to prevent. A mute Echo is recoverable; two Echoes argue.
+      reuseExisting = true;
+    }
+  }
+
+  if (stillExisting && reuseExisting) {
     /*
       ── RE-REGISTER, EVEN THOUGH THE AGENT ALREADY EXISTS ───────────────────
       This branch used to return here without telling the Slow Loop anything,
@@ -107,7 +264,7 @@ export async function POST(request: Request) {
       twice.
     */
     const registered = await registerWithSlowLoop(
-      existing.agentId,
+      stillExisting.agentId,
       channel,
       Boolean(body.toolBaseUrl ?? serverEnv.agentToolBaseUrl),
       // Reused, not created: Echo is already in the room and has already said
@@ -115,10 +272,10 @@ export async function POST(request: Request) {
       false,
     );
     return NextResponse.json({
-      agentId: existing.agentId,
+      agentId: stillExisting.agentId,
       agentUid: AGENT_UID,
       channel,
-      expiresAt: existing.expiresAt,
+      expiresAt: stillExisting.expiresAt,
       reused: true,
       registeredWithSlowLoop: registered,
       toolsEnabled: Boolean(body.toolBaseUrl ?? serverEnv.agentToolBaseUrl),
@@ -142,14 +299,78 @@ export async function POST(request: Request) {
       console.warn("[agents] no Groq key answered — Echo will be mute:", fastLoop.detail);
     }
 
-    const payload = buildAgentPayload({
+    /*
+      ── THE AGENT IS NOW CREATED BY THE SLOW LOOP, THROUGH THE SDK ─────────
+      This block used to hand-assemble the Agora create-agent payload and POST
+      it to /join. Agora returns 200 for a payload it only partly understands,
+      so every misplaced field failed silently — and the one that survived
+      longest was fatal: the recogniser never ran. Agora's own history showed
+      `{"role":"user","source":"asr","content":""}` for turns carrying 3.35s
+      of real speech.
+
+      The Python SDK derives the vendor presets instead of asserting them, and
+      refuses to construct an invalid recogniser at all. Zone 2 still owns the
+      two things Zone 2 should own — the prompt and the tool definitions — and
+      sends them across; it no longer owns the wire format.
+    */
+    const toolsEnabledNow = Boolean(body.toolBaseUrl ?? serverEnv.agentToolBaseUrl);
+    const toolsBlock = buildToolsBlock(
+      body.toolBaseUrl ?? serverEnv.agentToolBaseUrl,
+      serverEnv.agentToolSecret,
+    ) as { tools?: unknown[] };
+
+    /*
+      ── EVERY HUMAN, NOT JUST THE INVITER ─────────────────────────────────
+      The agent subscribes to the uids named here and is deaf to everyone
+      else. Passing only `userUid` meant whoever pressed J first was the only
+      person Echo could hear — the other roles spoke to an agent that never
+      ran a recogniser on their audio.
+    */
+    /*
+      LIVE entries only. The roster never evicts, so it accumulates a uid for
+      every person who has ever held a token on this channel — including
+      reloads that took a new uid and demos from an hour ago.
+
+      Subscribing to those costs more than noise: `idle_timeout` stops the
+      agent only once EVERY subscribed user has left the channel, so a list
+      padded with uids that will never join again keeps a dead agent alive
+      (and billing) for its full timeout.
+    */
+    const now = Date.now();
+    const rosterUids = (await getRoster(channel))
+      .filter((e) => e.kind === "human" && e.expiresAt > now)
+      .map((e) => e.uid);
+
+    // Roster first, then anyone the agent we are replacing could already hear.
+    // Excludes this console (added separately as `userUid`) and the agent.
+    const humans = [...new Set([...rosterUids, ...inheritedUids])].filter(
+      (uid) => uid !== userUid && uid !== AGENT_UID && uid > 0,
+    );
+
+    const started = await startAgentViaSlowLoop({
       channel,
       agentUid: AGENT_UID,
       userUid,
-      agentRtcToken: agentTokens.rtcToken,
-      groqApiKey: fastLoop.apiKey,
-      groqModel: fastLoop.model,
-      llmMode: serverEnv.llmMode,
+      otherUids: humans,
+      systemPrompt: buildSystemPrompt(toolsEnabledNow),
+      /*
+        Let the ENGINE speak the greeting, the way the quickstart does.
+
+        Echo used to join in total silence: the prompt forbade greeting, and
+        `greeting_message` was forced to "". From inside the room a working
+        agent and a dead one looked identical, which is the single most
+        expensive ambiguity in this project.
+
+        The Bridge still speaks its own line too when the Slow Loop wants one;
+        this is the engine-level greeting that proves the LLM leg is alive.
+      */
+      /*
+        Only a genuinely NEW session announces itself. Adding a third person
+        replaces the agent, and an agent that reintroduces itself every time
+        someone joins talks over a bridge that is already in progress — the
+        filler §14.1 forbids, arriving through the join path.
+      */
+      greeting: inheritedUids.length > 0 ? "" : DEFAULT_GREETING,
       tts: {
         vendor,
         apiKey: serverEnv.ttsApiKey,
@@ -160,44 +381,19 @@ export async function POST(request: Request) {
               language: serverEnv.sarvamLanguage,
             }),
       },
-      // Agora calls tools from ITS servers, so this must be publicly
-      // reachable. Null disables tools rather than attaching broken ones.
-      toolBaseUrl: body.toolBaseUrl ?? serverEnv.agentToolBaseUrl,
-      toolSecret: serverEnv.agentToolSecret,
+      llmMode: serverEnv.llmMode,
+      groqApiKey: fastLoop.apiKey,
+      groqModel: fastLoop.model,
+      ...(toolsBlock.tools ? { tools: toolsBlock.tools } : {}),
+      greet: inheritedUids.length === 0,
     });
 
-    const url = `${serverEnv.agoraApiBase}/api/conversational-ai-agent/v2/projects/${serverEnv.agoraAppId}/join`;
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: agoraAuthHeader(),
-      },
-      body: JSON.stringify(payload),
-      // A hung invite must not hold the bridge open indefinitely; the UI needs
-      // to fall through to the degraded path promptly.
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    const text = await response.text();
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      parsed = { raw: text };
-    }
-
-    if (!response.ok) {
-      console.error("[/api/invite-agent] Agora rejected the invite", {
-        status: response.status,
-        body: parsed,
-      });
+    if (!started.ok) {
+      console.error("[/api/invite-agent] the Slow Loop could not create the agent", started.error);
       return NextResponse.json(
         {
           error: "Agent invite failed",
-          status: response.status,
-          detail: parsed,
+          detail: started.error,
           degraded: true,
           hint: "Slow Loop is unaffected — the dashboard still works without voice.",
         },
@@ -205,10 +401,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const agentId =
-      (parsed as { agent_id?: string; agentId?: string }).agent_id ??
-      (parsed as { agentId?: string }).agentId ??
-      null;
+    const agentId = started.agentId ?? null;
 
     // Register Echo so the Observer can exclude its audio.
     await putEntry({
@@ -223,17 +416,16 @@ export async function POST(request: Request) {
     });
 
     /*
-      Hand the agent id to the Slow Loop.
+      NO SEPARATE REGISTER CALL ANY MORE.
 
-      This is the hop that was missing entirely until Aug 31, and its absence
-      was invisible: every other part of the chain worked, the dashboard filled
-      with claims, contradictions were detected and recorded — and Echo never
-      said a word, because the Bridge Controller had no agent to speak through.
-      Nothing failed. It was just silent.
+      Creating the agent and telling the Slow Loop its id used to be two
+      round trips, and losing the second one left Echo mute for the whole
+      session with no cure but a new channel — the Bridge Controller had no
+      agent to speak through, and nothing anywhere reported a failure.
 
-      Only Zone 2 can do this. It holds the Agora credentials that created the
-      agent, and §10.1 forbids those crossing into Zone 3, so the id itself is
-      the one thing that has to travel.
+      `/agent/start` now does both inside the process that owns the Bridge, so
+      the id cannot go missing between them: if the agent exists, the Bridge
+      already knows about it.
     */
     if (agentId) {
       rememberAgent({
@@ -241,12 +433,14 @@ export async function POST(request: Request) {
         channel,
         startedAt: Date.now(),
         expiresAt: agentTokens.expiresAt,
+        userUid,
+        // Recorded so a console whose uid is NOT covered replaces this agent
+        // instead of reusing one that cannot hear it.
+        subscribedUids: [userUid, ...humans],
       });
     }
-    const toolsEnabled = Boolean(body.toolBaseUrl ?? serverEnv.agentToolBaseUrl);
-    const registered = agentId
-      ? await registerWithSlowLoop(agentId, channel, toolsEnabled)
-      : false;
+    const toolsEnabled = toolsEnabledNow;
+    const registered = Boolean(agentId);
 
     return NextResponse.json({
       agentId,

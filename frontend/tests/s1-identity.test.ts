@@ -24,6 +24,18 @@ import {
   buildTtsConfig,
 } from "../src/lib/server/agent-config.ts";
 
+
+/**
+ * Fixture expiry.
+ *
+ * These rows used to say `expiresAt: FUTURE` — two milliseconds after the epoch, so
+ * permanently expired. That was harmless until `allocateHumanUid` began
+ * reclaiming expired uids (it must, or the shared 1000-8999 pool leaks), at
+ * which point every fixture evicted itself and the allocator handed out the
+ * same uid twice. These tests assert allocation and authorisation, not expiry,
+ * so the rows simply need to be alive.
+ */
+const FUTURE = Date.now() + 3_600_000;
 /**
  * ============================================================================
  * S1 — Fast Loop identity layer
@@ -59,7 +71,7 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
       kind: "human",
       authorized: true,
       issuedAt: 1,
-      expiresAt: 2,
+      expiresAt: FUTURE,
     });
     const b = allocateHumanUid("inc-1");
 
@@ -67,7 +79,23 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
     assert.ok(a > 1000 && b > 1000);
   });
 
-  test("UIDs are scoped per channel", async () => {
+  test("UIDs are unique ACROSS channels, not per channel", async () => {
+    /*
+      This test used to assert the opposite — "a different bridge starts
+      fresh, 1001 on inc-2 is a different person" — and that assumption is
+      what RTM rejects.
+
+      RTM identity is app-wide: `agora-tokens.ts` builds the RTM token from
+      `String(uid)` with no channel in it, and Agora allows ONE login per user
+      id per app. Two people on two channels both being handed 1001 threw the
+      second out with
+
+          error code -10027 · the user ID is already in use
+
+      and because RTM carries the transcript feed, the loser got no
+      transcripts at all while both published audio as the same participant.
+      Reported live, from two machines on two channels.
+    */
     const a = allocateHumanUid("inc-1");
     await putEntry({
       channel: "inc-1",
@@ -76,11 +104,14 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
       kind: "human",
       authorized: true,
       issuedAt: 1,
-      expiresAt: 2,
+      expiresAt: FUTURE,
     });
 
-    // A different bridge starts fresh — 1001 on inc-2 is a different person.
-    assert.equal(allocateHumanUid("inc-2"), a);
+    assert.notEqual(
+      allocateHumanUid("inc-2"),
+      a,
+      "a uid taken on one channel must not be reissued on another",
+    );
   });
 
   test("a malformed entry is rejected rather than silently stored", async () => {
@@ -95,7 +126,7 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
           kind: "human",
           authorized: true,
           issuedAt: 1,
-          expiresAt: 2,
+          expiresAt: FUTURE,
         }),
       RosterWriteError,
     );
@@ -109,7 +140,7 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
           kind: "human",
           authorized: true,
           issuedAt: 1,
-          expiresAt: 2,
+          expiresAt: FUTURE,
         }),
       RosterWriteError,
     );
@@ -136,19 +167,19 @@ describe("Observer view — agent exclusion (precondition for G2)", () => {
   const seed = async () => {
     await putEntry({
       channel: "inc-1", uid: 1001, role: "DevOps Lead", kind: "human",
-      authorized: true, issuedAt: 1, expiresAt: 2,
+      authorized: true, issuedAt: 1, expiresAt: FUTURE,
     });
     await putEntry({
       channel: "inc-1", uid: 1002, role: "Support Engineer", kind: "human",
-      authorized: false, issuedAt: 1, expiresAt: 2,
+      authorized: false, issuedAt: 1, expiresAt: FUTURE,
     });
     await putEntry({
       channel: "inc-1", uid: AGENT_UID, role: "Echo", kind: "agent",
-      authorized: false, issuedAt: 1, expiresAt: 2,
+      authorized: false, issuedAt: 1, expiresAt: FUTURE,
     });
     await putEntry({
       channel: "inc-1", uid: OBSERVER_UID, role: "Echo", kind: "observer",
-      authorized: false, issuedAt: 1, expiresAt: 2,
+      authorized: false, issuedAt: 1, expiresAt: FUTURE,
     });
   };
 
@@ -178,7 +209,7 @@ describe("Observer view — agent exclusion (precondition for G2)", () => {
     await seed();
     await putEntry({
       channel: "inc-1", uid: 9500, role: "Echo", kind: "agent",
-      authorized: false, issuedAt: 1, expiresAt: 2,
+      authorized: false, issuedAt: 1, expiresAt: FUTURE,
     });
 
     const { exclude } = await getObserverView("inc-1");
@@ -228,6 +259,23 @@ describe("Fast Loop prompt — §14.1 epistemic rules must survive edits", () =>
 
   test("the prompt names itself a recording secretary, not a diagnostician", () => {
     assert.match(FAST_LOOP_SYSTEM_PROMPT, /recording secretary, not a diagnostician/i);
+  });
+
+  test("the prompt forbids placeholder text for silence", () => {
+    // Sep 05: on the managed path (gpt-4o-mini), an empty ASR turn produced
+    // the literal response "[Silence] ", which Agora's TTS read ALOUD for a
+    // minute straight. The prompt must forbid narrating silence — that text is
+    // spoken, not suppressed.
+    assert.match(
+      FAST_LOOP_SYSTEM_PROMPT,
+      /contains no recognisable/i,
+      "the empty-input rule is missing from the prompt",
+    );
+    assert.match(
+      FAST_LOOP_SYSTEM_PROMPT,
+      /\[Silence\]/i,
+      "the prompt must name the exact placeholder it forbids",
+    );
   });
 });
 

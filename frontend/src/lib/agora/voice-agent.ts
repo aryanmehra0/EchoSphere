@@ -91,6 +91,22 @@ function toAgentState(raw: string | undefined): AgentState {
 export class VoiceAgent {
   private ai: AgoraVoiceAI | null = null;
 
+  /*
+    Session identity, held here because `drain()` receives only the toolkit's
+    items and cannot be handed them per call.
+
+    `selfUid` is needed for one narrow case: the toolkit stamps `uid: "0"` on
+    every user transcription, so when no usable `stream_id` is present that
+    sentinel has to resolve back to this browser's own uid.
+
+    `selfRole` is a FALLBACK ONLY. Attribution comes from the Roster, because
+    Echo subscribes to `["*"]` and this console minutes the whole room -
+    labelling another person's sentence with our own role is exactly the
+    misattribution the stream_id fix exists to prevent.
+  */
+  private selfUid = 0;
+  private selfRole: ParticipantRole | null = null;
+
   /**
    * Turns already handed to the Slow Loop, keyed `uid:turn_id`.
    *
@@ -100,14 +116,121 @@ export class VoiceAgent {
    */
   private readonly delivered = new Set<string>();
 
+  /**
+   * Cap on `delivered`, because it is otherwise append-only.
+   *
+   * Every finished turn adds a key and nothing removes one until `stop()`. A
+   * bridge that runs for hours with three people talking accumulates keys
+   * without limit — a slow leak in the one tab nobody reloads, which is
+   * exactly the tab that has to survive the whole incident.
+   *
+   * Turn ids only ever move forward, so a key old enough to fall out of this
+   * window can never be re-emitted; trimming the oldest is safe. 5000 is far
+   * beyond any real burst while staying trivial in memory.
+   */
+  private static readonly MAX_DELIVERED = 5000;
+
+  /** Record a delivered turn, trimming the oldest keys past the cap. */
+  private markDelivered(key: string): void {
+    // `this.delivered.add`, NOT `this.markDelivered` — a blanket rename of the
+    // call sites rewrote this line too and made the method call itself, so
+    // every finished turn died in "Maximum call stack size exceeded" before it
+    // could be forwarded. Nothing reached the Slow Loop and the transcript
+    // panel stayed empty, with the only evidence a stack trace in DevTools.
+    this.delivered.add(key);
+    if (this.delivered.size <= VoiceAgent.MAX_DELIVERED) return;
+    // Set preserves insertion order, so the first N are the oldest.
+    const excess = this.delivered.size - VoiceAgent.MAX_DELIVERED;
+    let removed = 0;
+    for (const old of this.delivered) {
+      this.delivered.delete(old);
+      if (++removed >= excess) break;
+    }
+  }
+
+  /**
+   * Turns seen at END but not yet forwarded, with the longest text so far.
+   *
+   * ── WHY A TURN AT "END" IS NOT FINISHED ─────────────────────────────────
+   * `TurnStatus.END` is not the last word on a turn. The toolkit re-emits the
+   * same turn_id at END repeatedly while the recogniser keeps finalising it,
+   * and the text GROWS between emissions:
+   *
+   *     update 1: [9000#2/1: "Echo is on the bridge."]
+   *     update 2: [9000#2/1: "Echo is on the bridge.I am listening,"]
+   *     update 3: [9000#2/1: "Echo is on the bridge.I am listening,but"]
+   *
+   * Forwarding on the first END and marking the turn delivered therefore
+   * captured the SHORTEST fragment and dropped every later, fuller version as
+   * a duplicate — which is why the transcript panel showed a few words instead
+   * of the sentence that was actually spoken.
+   *
+   * So a turn is held here until its text stops growing, then forwarded once.
+   * The Slow Loop still receives each utterance exactly once (§4.4), it just
+   * receives the whole one.
+   */
+  private readonly settling = new Map<
+    string,
+    { text: string; timer: ReturnType<typeof setTimeout> }
+  >();
+
+  /**
+   * How long a turn must stay unchanged before it counts as final.
+   *
+   * Long enough to outlast the recogniser's own finalisation (observed at a
+   * few hundred ms between END emissions), short enough that the Ledger is
+   * not visibly behind the room.
+   */
+  private static readonly SETTLE_MS = 900;
+
   /** Diagnostics. Zero updates means the RTC data stream is silent. */
   updates = 0;
   forwarded = 0;
+
+  /**
+   * Fires if the data stream stays silent after we have subscribed.
+   *
+   * ── WHY A TIMER AND NOT JUST THE CATCH BLOCK ────────────────────────────
+   * `start()` already reports the LOUD failure — subscribe threw, and the
+   * operator is told. The expensive failure is the quiet one: subscribe
+   * succeeds, `TRANSCRIPT_UPDATED` never fires, and the transcript panel sits
+   * on "No speech captured" forever. That is indistinguishable from nobody
+   * having spoken, so nobody reports it as a fault; it reads as the product
+   * being broken in some unspecified way.
+   *
+   * This has now happened twice from different causes (wrong transport, then a
+   * dead agent being reused), and both times it was diagnosed by reading
+   * Agora's REST history from a shell rather than by looking at the console.
+   * A subscribed stream that has carried nothing for this long is worth saying
+   * out loud.
+   */
+  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private armSilenceWatchdog(channel: string, selfUid: number): void {
+    if (this.silenceTimer !== null) clearTimeout(this.silenceTimer);
+    this.silenceTimer = setTimeout(() => {
+      if (this.updates > 0) return;
+      this.events.onError(
+        `NO TRANSCRIPT DATA — subscribed to "${channel}" as uid ${selfUid}, ` +
+          "but the RTC data stream has carried nothing. Check that the agent " +
+          "is RUNNING and joined this same channel.",
+      );
+    }, 45_000);
+  }
+
+  /** Stop the watchdog — called on the first update and on teardown. */
+  private disarmSilenceWatchdog(): void {
+    if (this.silenceTimer !== null) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+  }
 
   constructor(private readonly events: VoiceAgentEvents) {}
 
   async start(
     rtcClient: IAgoraRTCClient,
+    channel: string,
     selfUid: number,
     role: ParticipantRole,
     rtmClient?: unknown,
@@ -125,6 +248,8 @@ export class VoiceAgent {
       });
 
       this.ai.on(AgoraVoiceAIEvents.TRANSCRIPT_UPDATED, (items) => {
+        // The stream is alive; the watchdog has nothing to report.
+        this.disarmSilenceWatchdog();
         this.updates += 1;
         /*
           Logged on every update, not sampled.
@@ -151,7 +276,42 @@ export class VoiceAgent {
         this.events.onError(`Agent error: ${String(error?.message ?? error)}`);
       });
 
-      console.info(`[voice-agent] transcript layer ready for uid ${selfUid}`);
+      /*
+        ── `init()` BINDS NOTHING. THIS LINE IS THE SUBSCRIPTION. ────────────
+        This was the whole failure, and it is invisible from the outside.
+
+        `AgoraVoiceAI.init()` only STORES config — it validates the engines,
+        stashes them on the singleton and returns. Read `_doInit` in
+        `dist/index.mjs`: it assigns `rtcEngine`, `rtmEngine`, `renderMode`
+        and returns. It attaches no listener to anything.
+
+        `subscribeMessage(channel)` is what calls `bindRtcEvents()`, which is
+        the ONLY place the toolkit does
+
+            rtcEngine.on("stream-message", this._boundHandleRtcStreamMessage)
+
+        and it also starts the render controller that turns those frames into
+        TRANSCRIPT_UPDATED. The toolkit's own documented example shows both
+        calls, in this order:
+
+            const api = AgoraVoiceAI.init({...});
+            api.subscribeMessage('channel-id');
+
+        Without it, `on(TRANSCRIPT_UPDATED, ...)` registers a handler on an
+        emitter that nothing will ever emit into. Every symptom follows: the
+        agent joins, the mic publishes, Agora transcribes — and the console
+        shows zero `[voice-agent] update` lines, because the RTC data stream
+        was never being read. No error, no warning, no failed promise. The
+        previous fix moved to the right TRANSPORT and then never opened it.
+      */
+      this.ai.subscribeMessage(channel);
+      this.selfUid = selfUid;
+      this.selfRole = role;
+      this.armSilenceWatchdog(channel, selfUid);
+
+      console.info(
+        `[voice-agent] subscribed to ${channel} — transcript layer ready for uid ${selfUid}`,
+      );
     } catch (error) {
       // Losing transcripts costs the incident record, not the call. The
       // operator can still hear and be heard; they are told which capability
@@ -172,46 +332,205 @@ export class VoiceAgent {
    */
   private drain(items: ToolkitItem[]): void {
     for (const item of items) {
-      if (item.status !== TurnStatus.END) continue;
+      /*
+        ── IN_PROGRESS TEXT IS NOT DISPOSABLE ────────────────────────────────
+        This skipped every non-END item, and that threw away words.
 
-      const key = `${item.uid}:${item.turn_id}`;
+        The recogniser streams a turn as IN_PROGRESS and the text grows with
+        each update. The END that follows is NOT guaranteed to carry the
+        longest version — it can arrive as a shorter re-segmentation, and an
+        INTERRUPTED turn (someone talked over someone else, which is normal on
+        a three-person bridge) may never reach END at all. Either way the
+        fuller IN_PROGRESS reading had already been discarded, so the panel
+        showed a fragment of what was said.
+
+        Every status is now recorded; `settling` keeps the longest text seen
+        for the turn and forwards once it stops changing. INTERRUPTED is
+        treated as final immediately, because nothing more is coming.
+      */
+      if (
+        item.status !== TurnStatus.END &&
+        item.status !== TurnStatus.IN_PROGRESS &&
+        item.status !== TurnStatus.INTERRUPTED
+      ) {
+        continue;
+      }
+
+      /*
+        Keyed on `stream_id`, NOT `uid`.
+
+        `uid` is "0" for every human turn (see the resolution below), so with
+        two people in the room a matching turn_id would collide and one
+        speaker's sentence would be silently dropped as an already-delivered
+        duplicate. `stream_id` is per-speaker, which is exactly what a
+        deduplication key needs to be.
+      */
+      const key = `${item.stream_id}:${item.uid}:${item.turn_id}`;
       if (this.delivered.has(key)) continue;
 
       const text = (item.text ?? "").trim();
       if (!text) continue;
 
-      const transcript: AgoraTranscript = {
-        uid: Number(item.uid),
-        text,
-        isFinal: true,
-        messageId: key,
-        // The toolkit tells us directly whether this was the agent talking,
-        // which is a stronger signal than the UID convention G2 relies on.
-        object: item.metadata?.object === MessageType.AGENT_TRANSCRIPTION
-          ? "assistant.transcription"
-          : "",
-      };
+      /*
+        HOLD, DO NOT FORWARD YET. See `settling` above: END repeats while the
+        text is still growing, so the first END carries a fragment. Restart the
+        timer whenever the text changes; forward when it has stopped changing.
+      */
+      const pending = this.settling.get(key);
+      /*
+        ── THE RECOGNISER ALSO SHRINKS A TURN, NOT ONLY GROWS IT ────────────
+        Observed live on one turn:
 
-      this.delivered.add(key);
+            update 1: [0#3/1: "Hey. You're"]
+            update 2: [0#3/1: "Wow."]
 
-      // Attribution comes from the ROSTER, not from whose browser this is.
-      // Echo subscribes to every participant, so this console minutes the
-      // whole room — and an utterance whose uid the Roster cannot name is
-      // dropped rather than filed under the wrong person.
-      const speaker = this.events.resolveRole(transcript.uid);
-      if (forwardDecision(transcript, this.events.resolveRole) !== "forward") {
+        Deepgram revised its own hypothesis and the text got SHORTER. Taking
+        whatever arrived last therefore threw away the longer reading, which
+        loses words exactly like the truncation this settling was added to fix.
+
+        So keep the LONGEST text seen for a turn, and let any change — longer
+        or shorter — restart the settle timer, because a revision means the
+        recogniser is still working on it.
+      */
+      if (pending) {
+        if (pending.text === text) continue; // unchanged — let the timer run
+        clearTimeout(pending.timer);
+        if (text.length < pending.text.length) {
+          // A shorter revision: keep the fuller text, but wait again in case
+          // the recogniser is mid-correction.
+          const timer = setTimeout(() => {
+            const settled = this.settling.get(key);
+            this.settling.delete(key);
+            if (!settled) return;
+            this.markDelivered(key);
+            this.emit(item, settled.text);
+          }, VoiceAgent.SETTLE_MS);
+          this.settling.set(key, { text: pending.text, timer });
+          continue;
+        }
+      }
+
+      /*
+        An INTERRUPTED turn is over — the speaker was cut off and no further
+        update is coming for it. Waiting out the settle window would only
+        delay it, and on a three-person bridge people interrupt constantly.
+      */
+      if (item.status === TurnStatus.INTERRUPTED) {
+        const best = pending && pending.text.length > text.length ? pending.text : text;
+        this.settling.delete(key);
+        this.markDelivered(key);
+        this.emit(item, best);
         continue;
       }
 
-      this.forwarded += 1;
-      this.events.onUtterance(transcript, speaker as ParticipantRole);
+      const timer = setTimeout(() => {
+        const settled = this.settling.get(key);
+        this.settling.delete(key);
+        if (!settled) return;
+        this.markDelivered(key);
+        this.emit(item, settled.text);
+      }, VoiceAgent.SETTLE_MS);
+
+      this.settling.set(key, { text, timer });
     }
+  }
+
+  /** Forward one settled turn, attributed to whoever actually spoke it. */
+  private emit(item: ToolkitItem, text: string): void {
+    const selfUid = this.selfUid;
+    /*
+      ── `stream_id` IS THE SPEAKER; `uid` IS NOT ────────────────────────────
+      The toolkit stamps `uid: "0"` on EVERY user.transcription, not just your
+      own — `self_uid` is a module constant and the mapping is unconditional.
+      With two humans in the room both consoles therefore relabelled the OTHER
+      person's speech as their own and forwarded it under their own name, so
+      the Ledger recorded every sentence twice with one copy misattributed.
+
+      `stream_id` survives that relabelling untouched and holds the RTC uid of
+      whoever actually spoke.
+    */
+    /*
+      ── NEVER FORWARD AN EMPTY TURN ─────────────────────────────────────────
+      `drain` skips empty text on the way in, but that is not sufficient now
+      that IN_PROGRESS turns are accepted: a turn can be held with real text
+      and then re-emitted empty by the recogniser, and VAD fires on coughs and
+      room noise, producing turns whose content never becomes a word.
+
+      Forwarding one publishes a blank line into the transcript panel and a
+      sourceless row into the Ledger — a claim attributed to a named human who
+      said nothing. That is worse than a missing line, because it is a record
+      of something that did not happen.
+    */
+    if (!text.trim()) return;
+
+    const isAgentTurn = item.metadata?.object === MessageType.AGENT_TRANSCRIPTION;
+    const streamUid = Number(item.stream_id);
+    const resolvedUid = isAgentTurn
+      ? Number(item.uid)
+      : Number.isFinite(streamUid) && streamUid > 0
+        ? streamUid
+        : String(item.uid) === "0"
+          ? selfUid
+          : Number(item.uid);
+
+    const transcript: AgoraTranscript = {
+      uid: resolvedUid,
+      text,
+      isFinal: true,
+      /*
+        ── THE ID MUST BE UNIQUE ACROSS SPEAKERS, NOT JUST WITHIN ONE ───────
+        The Slow Loop's `TurnWindow.add` dedupes on `message_id` ALONE — it
+        never looks at the uid — and drops any repeat as an already-seen
+        utterance.
+
+        `turn_id` is numbered per speaker and restarts at 1 for each of them,
+        so `${stream_id}:${turn_id}` still collided the moment two people were
+        talking: DevOps turn 3 and the DBA's turn 3 produced the same id under
+        different stream_ids only if stream_id differed — and when the toolkit
+        reports the same stream for a relabelled turn, the second speaker's
+        sentence vanished into "dropped duplicate transcript" with nothing on
+        screen to say so.
+
+        `resolvedUid` is the speaker the Ledger will attribute this to, so it
+        is exactly the right thing to key on. Including the channel-scoped uid
+        makes the id unique across the whole bridge.
+      */
+      messageId: `${resolvedUid}:${item.stream_id}:${item.turn_id}`,
+      object: isAgentTurn ? "assistant.transcription" : "",
+    };
+
+    /*
+      ── ATTRIBUTION COMES FROM THE ROSTER, NOT FROM WHOSE BROWSER THIS IS ───
+      This used to be `forwardDecision(transcript, selfUid)` - forward only my
+      own speech - which was right while each participant ran their own console
+      and forwarded their own line. It stopped being right the moment Echo
+      began subscribing to `["*"]`: this console now hears the whole room, and
+      a uid the Roster cannot name must be DROPPED rather than filed under
+      whoever happens to be sitting here.
+    */
+    if (forwardDecision(transcript, this.events.resolveRole) !== "forward") return;
+
+    // Non-null: `forwardDecision` returns "skip:unknown-uid" otherwise. The
+    // local role is a fallback for the agent's own turns, which the Roster
+    // does not name.
+    const speaker = this.events.resolveRole(transcript.uid) ?? this.selfRole;
+    if (!speaker) return;
+
+    this.forwarded += 1;
+    console.info(
+      `[voice-agent] forwarded uid=${transcript.uid} "${transcript.text.slice(0, 60)}"`,
+    );
+    this.events.onUtterance(transcript, speaker);
   }
 
   async stop(): Promise<void> {
     const ai = this.ai;
     this.ai = null;
     this.delivered.clear();
+    // Pending turns die with the session — firing them after a leave would
+    // forward speech into a bridge this console is no longer part of.
+    for (const { timer } of this.settling.values()) clearTimeout(timer);
+    this.settling.clear();
     if (!ai) return;
     try {
       ai.unsubscribe();

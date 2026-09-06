@@ -8,6 +8,11 @@
  * importing from `@/lib/server/` fails the build regardless — so the marker
  * would add nothing here except making the module unimportable from tests.
  *
+ * This module is imported by the test suite under plain `node --test`, so it
+ * must stay free of `@/` aliases and extensionless relative imports. Agora-
+ * touching logic — including the liveness probe that guards `invite-agent`'s
+ * reuse branch — lives in the route instead, on the far side of the bundler.
+ *
  * ── WHY THIS EXISTS ────────────────────────────────────────────────────────
  * Two problems, both found on Aug 31 while checking whether Echo had ever
  * actually spoken. It had not.
@@ -39,6 +44,19 @@ interface ActiveAgent {
   channel: string;
   startedAt: number;
   expiresAt: number;
+  /** The uid of the console that created this agent. */
+  userUid: number;
+
+  /**
+   * EVERY participant this agent subscribes to.
+   *
+   * Agora fixes `remote_rtc_uids` at creation and it cannot be changed
+   * afterwards, so an agent is permanently deaf to anyone not named here.
+   * A console whose uid is missing from this list must REPLACE the agent
+   * rather than reuse it — otherwise it gets one that is alive, healthy and
+   * cannot hear the person actually in the room.
+   */
+  subscribedUids: number[];
 }
 
 const agents = new Map<string, ActiveAgent>();
@@ -70,9 +88,26 @@ export function forgetAgent(channel: string): ActiveAgent | null {
 
 /** Where Zone 3 lives, as HTTP. */
 function slowLoopBase(): string {
-  return (process.env.NEXT_PUBLIC_SLOW_LOOP_WS ?? "ws://127.0.0.1:8000/ws/deltas")
-    .replace(/^ws/, "http")
-    .replace(/\/ws\/deltas$/, "");
+  /*
+    ── THIS IS SERVER-SIDE, SO IT MUST NOT USE THE PUBLIC URL ────────────────
+    `NEXT_PUBLIC_SLOW_LOOP_WS` exists for the BROWSER: once the console is
+    shared over a tunnel, a guest's `127.0.0.1` is their own laptop. But this
+    module runs inside the Next.js server, on the same machine as the Slow
+    Loop, and routing it through the tunnel breaks it in a way that is easy to
+    misread.
+
+    The tunnel gate in `main.py` refuses any request arriving with a non-local
+    Host unless it carries AGENT_TOOL_SECRET. These calls do not carry it — it
+    is meant for Agora's tool invocations — so `/agent/start` came back 401 and
+    the invite failed with "the Slow Loop never created the agent", while the
+    exact same call to 127.0.0.1:8000 succeeded immediately.
+
+    So: an explicit server-side override if one is ever needed, otherwise
+    always loopback. Never the public URL.
+  */
+  const serverSide = process.env.SLOW_LOOP_INTERNAL_URL?.trim();
+  if (serverSide) return serverSide.replace(/\/+$/, "");
+  return "http://127.0.0.1:8000";
 }
 
 /**
@@ -161,5 +196,96 @@ export async function unregisterWithSlowLoop(channel: string): Promise<void> {
     });
   } catch {
     // Best-effort on the way out; a stale id is corrected by the next invite.
+  }
+}
+
+/**
+ * Ask the Slow Loop to CREATE the agent through the Agora SDK.
+ *
+ * ── WHY THE PAYLOAD NO LONGER LIVES IN THIS PROCESS ─────────────────────────
+ * It used to be assembled by hand in `agent-config.ts`. Agora returns 200 for
+ * a payload it only partly understands, so every misplaced field failed
+ * silently — and the one that survived longest cost the whole product: the
+ * recogniser never ran, and `content` came back EMPTY for turns carrying
+ * seconds of real speech.
+ *
+ * The Python SDK derives the vendor presets rather than asserting them, and
+ * refuses to construct an invalid recogniser at all. So Zone 3 creates the
+ * agent and Zone 2 sends only what Zone 2 owns: the prompt and the tools.
+ *
+ * §10.1 is not violated. The Agora CREDENTIALS still never leave this process
+ * for the REST paths, and the app id/certificate the SDK needs are read by the
+ * backend from its own environment — not passed across the wire.
+ */
+export interface StartAgentResult {
+  ok: boolean;
+  agentId?: string;
+  error?: string;
+  degraded?: boolean;
+}
+
+export async function startAgentViaSlowLoop(payload: {
+  channel: string;
+  agentUid: number;
+  userUid: number;
+  /** Every OTHER human on the bridge, so the agent can hear all of them. */
+  otherUids?: number[];
+  systemPrompt: string;
+  tts: Record<string, unknown>;
+  /** Spoken by the Engine on join — the quickstart's `greeting_message`. */
+  greeting?: string;
+  llmMode: string;
+  groqApiKey?: string;
+  groqModel?: string;
+  tools?: unknown[];
+  greet?: boolean;
+}): Promise<StartAgentResult> {
+  /*
+    Retried for the same reason registration is: starting or restarting the
+    tunnel restarts BOTH services, and anyone who presses J in that window
+    would otherwise get a permanently silent Echo.
+  */
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(`${slowLoopBase()}/agent/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        // Agora can take a while to bring a session up; longer than the old
+        // 15s REST timeout because the SDK also waits for RUNNING.
+        signal: AbortSignal.timeout(45000),
+      });
+      const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      if (response.ok && body.ok) {
+        return { ok: true, agentId: String(body.agentId ?? "") };
+      }
+      // A 502 here is Agora rejecting the agent — a real answer, not a
+      // transport failure. Retrying it just delays the degraded banner.
+      if (response.status === 502) {
+        return {
+          ok: false,
+          error: String(body.error ?? "Agora rejected the agent"),
+          degraded: true,
+        };
+      }
+      console.warn(`[agents] /agent/start returned ${response.status} (attempt ${attempt}/3)`);
+    } catch (error) {
+      console.warn(`[agents] /agent/start failed (attempt ${attempt}/3)`, error);
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 1000));
+  }
+  return { ok: false, error: "the Slow Loop never created the agent", degraded: true };
+}
+
+export async function stopAgentViaSlowLoop(agentId: string): Promise<void> {
+  try {
+    await fetch(`${slowLoopBase()}/agent/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    // Best effort; Agora's idle timeout is the backstop.
   }
 }

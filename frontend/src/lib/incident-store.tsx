@@ -109,6 +109,26 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   /** Handles for the in-flight replay, so closing the bridge can cancel it. */
   const timers = useRef<number[]>([]);
 
+  /**
+   * A join already in flight, so a second one cannot start on top of it.
+   *
+   * ── WHY THIS IS NOT DEFENSIVE PROGRAMMING ───────────────────────────────
+   * `openBridge` is reachable from the J key AND the button, neither of which
+   * debounced. Pressing J twice, or clicking while the first join is still
+   * negotiating, ran the whole sequence concurrently — and the second run
+   * constructed a SECOND RTM client for the same uid before the first had
+   * finished logging out. Agora says so directly:
+   *
+   *     <RTM> Ins id is 2, please pay attention to avoid mutual kick issues
+   *
+   * The two instances then kick each other. RTM is where the transcript feed
+   * arrives (`data_channel: "rtm"`), so the loser stops receiving transcripts
+   * entirely — which is the "it stops listening to the other person" that
+   * looked like a timeout but never recovered, because nothing retries a
+   * connection that believes it is still open.
+   */
+  const joining = useRef(false);
+
   const clearTimers = useCallback(() => {
     timers.current.forEach(window.clearTimeout);
     timers.current = [];
@@ -118,7 +138,32 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     const transport = new AgoraBridge({
       onAgentTrack: setAgentTrack,
       onAgentState: (agent) => dispatch({ type: "AGENT", state: agent }),
-      onError: (detail) => console.warn(`[agora bridge] ${detail}`),
+      /*
+        ── ON SCREEN, NOT ONLY IN THE DEVTOOLS CONSOLE ─────────────────────
+        This was `console.warn` alone, which meant the transport's loudest
+        message — "NO TRANSCRIPTS — <reason>" — reached nobody. The operator
+        saw an empty transcript panel and no explanation, and both times this
+        failed for real it was diagnosed by reading Agora's REST history from
+        a shell rather than by looking at the product.
+
+        The degradation banner already exists for exactly this: one short line
+        naming the CONSEQUENCE. Voice is marked degraded because that is what
+        losing transcripts costs — the incident record, not the call.
+      */
+      onError: (detail) => {
+        console.warn(`[agora bridge] ${detail}`);
+        dispatch({
+          type: "DELTA",
+          payload: {
+            degraded: {
+              voice: true,
+              extraction: false,
+              model: null,
+              banner: detail.slice(0, 140),
+            },
+          },
+        });
+      },
     });
     agora.current = transport;
 
@@ -164,11 +209,38 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     const cleanChannel = channel.trim();
     if (!cleanChannel) return;
 
+    // See `joining` above: a concurrent join creates a second RTM client for
+    // the same uid, and the two kick each other off the transcript feed.
+    if (joining.current) {
+      console.info("[bridge] join already in progress — ignoring duplicate request");
+      return;
+    }
+    joining.current = true;
+
     clearTimers();
     socket.current?.close();
     socket.current = null;
     await agora.current?.leave();
     setAgentTrack(null);
+
+    /*
+      ── CLEAR THE BANNER BEFORE TRYING, NOT ONLY AFTER SUCCEEDING ──────────
+      A previous failed join leaves "NO MICROPHONE — you can watch, but the
+      room cannot hear you" on screen, and it was only lowered at the END of a
+      SUCCESSFUL join. So a retry that worked still showed the old warning for
+      its whole duration, and a retry that reached "Listening" while the banner
+      stayed up produced a screen that contradicted itself: a red NO MICROPHONE
+      bar directly above a live "Microphone open" control.
+
+      An operator cannot act on a contradiction. Clear the stale verdict up
+      front; this attempt will publish its own.
+    */
+    dispatch({
+      type: "DELTA",
+      payload: {
+        degraded: { voice: false, extraction: false, model: null, banner: null },
+      },
+    });
     setMicOn(true);
     dispatch({ type: "RESET" });
     dispatch({ type: "BRIDGE", state: "connecting" });
@@ -296,6 +368,25 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
         });
 
       await agora.current?.join(cleanChannel, credentials);
+
+      /*
+        ── A SUCCESSFUL JOIN CLEARS THE BANNER ────────────────────────────────
+        Nothing else ever did. `onError` raises the degradation banner and no
+        path lowered it, so any transient failure — a lost subscribe race, a
+        tunnel blip, an invite that succeeded on retry — left "NO VOICE" on
+        screen permanently over a bridge that was working perfectly.
+
+        A banner that cannot clear itself stops being information and becomes
+        noise people learn to ignore, which is worse than not having one: the
+        NEXT genuine failure is the one nobody looks at. So reaching the end of
+        a join with no throw is treated as the positive evidence it is.
+      */
+      dispatch({
+        type: "DELTA",
+        payload: {
+          degraded: { voice: false, extraction: false, model: null, banner: null },
+        },
+      });
     } catch (error) {
       // Voice is gone; the incident record is not. This is the ANALYTICS-ONLY
       // rung of §13's ladder, and the operator is told rather than left to
@@ -314,6 +405,10 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
           },
         },
       });
+    } finally {
+      // Released on EVERY path — success, throw, or the degraded fallback.
+      // A flag left set would block every future join with no way back.
+      joining.current = false;
     }
   }, [clearTimers, startReplay]);
 

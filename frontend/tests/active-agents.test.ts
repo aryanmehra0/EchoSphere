@@ -42,7 +42,7 @@ describe("Echo's session lifecycle", () => {
       agentId: "agent-alpha",
       channel: "inc-4417",
       startedAt: Date.now(),
-      expiresAt: Date.now() + HOUR,
+      expiresAt: Date.now() + HOUR, userUid: 1001, subscribedUids: [1001],
     });
 
     const secondConsoleSees = getActiveAgent("inc-4417");
@@ -54,7 +54,7 @@ describe("Echo's session lifecycle", () => {
       agentId: "agent-alpha",
       channel: "inc-4417",
       startedAt: Date.now(),
-      expiresAt: Date.now() + HOUR,
+      expiresAt: Date.now() + HOUR, userUid: 1001, subscribedUids: [1001],
     });
     assert.equal(getActiveAgent("inc-other"), null);
   });
@@ -67,7 +67,7 @@ describe("Echo's session lifecycle", () => {
       agentId: "agent-stale",
       channel: "inc-4417",
       startedAt: Date.now() - 2 * HOUR,
-      expiresAt: Date.now() - 1000,
+      expiresAt: Date.now() - 1000, userUid: 1001, subscribedUids: [1001],
     });
 
     assert.equal(
@@ -85,7 +85,7 @@ describe("Echo's session lifecycle", () => {
       agentId: "agent-alpha",
       channel: "inc-4417",
       startedAt: Date.now(),
-      expiresAt: Date.now() + HOUR,
+      expiresAt: Date.now() + HOUR, userUid: 1001, subscribedUids: [1001],
     });
 
     assert.equal(forgetAgent("inc-4417")?.agentId, "agent-alpha");
@@ -98,14 +98,14 @@ describe("Echo's session lifecycle", () => {
       agentId: "agent-one",
       channel: "inc-4417",
       startedAt: Date.now(),
-      expiresAt: Date.now() + HOUR,
+      expiresAt: Date.now() + HOUR, userUid: 1001, subscribedUids: [1001],
     });
     forgetAgent("inc-4417");
     rememberAgent({
       agentId: "agent-two",
       channel: "inc-4417",
       startedAt: Date.now(),
-      expiresAt: Date.now() + HOUR,
+      expiresAt: Date.now() + HOUR, userUid: 1001, subscribedUids: [1001],
     });
 
     assert.equal(getActiveAgent("inc-4417")?.agentId, "agent-two");

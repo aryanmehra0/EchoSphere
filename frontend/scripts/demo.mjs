@@ -20,7 +20,7 @@
  * A human reading a checklist under pressure skips items. This does not.
  */
 
-const WEB = process.env.DEMO_WEB ?? "http://localhost:3000";
+const WEB = process.env.DEMO_WEB ?? `http://localhost:${process.env.ECHO_CONSOLE_PORT ?? 3000}`;
 const API = process.env.DEMO_API ?? "http://127.0.0.1:8000";
 const CHANNEL = process.env.DEMO_CHANNEL ?? "inc-4417";
 
@@ -491,7 +491,8 @@ async function converse() {
 
   if (!api?.agent?.agent_id) {
     console.log(r("  Echo is not in the channel."));
-    console.log(d("  Open http://localhost:3000, press J, wait for the greeting, then re-run.\n"));
+    const port = new URL(WEB).port || "3000";
+    console.log(d(`  Open http://localhost:${port}, press J, wait for the greeting, then re-run.\n`));
     return 1;
   }
   const agentId = api.agent.agent_id;

@@ -52,6 +52,10 @@ class AgoraSettings:
     customer_id: str
     customer_secret: str
     api_base: str
+    # Token-signing key. Required by the SDK path (`voice_agent.py`), which
+    # mints its own RTC/RTM token rather than being handed one by Zone 2.
+    # Empty string when absent so the REST-only paths keep working unchanged.
+    app_certificate: str = ""
 
     @property
     def conv_ai_base(self) -> str:
@@ -64,6 +68,7 @@ def agora() -> AgoraSettings:
         customer_id=_required("AGORA_CUSTOMER_ID"),
         customer_secret=_required("AGORA_CUSTOMER_SECRET"),
         api_base=_optional("AGORA_API_BASE", "https://api.agora.io"),
+        app_certificate=_optional("AGORA_APP_CERTIFICATE", ""),
     )
 
 
@@ -146,6 +151,19 @@ def observer_mode() -> str:
     return _optional("OBSERVER_MODE", "ingress")
 
 
+def cors_origins() -> str:
+    """
+    Additional CORS origins, comma-separated.
+
+    Development defaults are baked into main.py; this is the escape hatch for
+    a console that runs on a non-standard port (e.g. :3001 when something else
+    owns 3000). Without the browser's origin listed here, the voice path dies
+    silently: transcripts never reach /observer/transcript and the dashboard
+    never hears a word.
+    """
+    return _optional("CORS_ORIGINS", "")
+
+
 def credential_status() -> dict[str, bool]:
     """Presence only, never values — same contract as Zone 2's /api/health."""
     def present(name: str) -> bool:
@@ -157,6 +175,38 @@ def credential_status() -> dict[str, bool]:
         "AGORA_CUSTOMER_SECRET": present("AGORA_CUSTOMER_SECRET"),
         "GROQ_API_KEY": present("GROQ_API_KEY"),
     }
+
+
+def database_url() -> str:
+    """
+    Postgres DSN for the Evidence Ledger, or "" when persistence is off.
+
+    ── WHY ABSENCE IS A VALID CONFIGURATION ────────────────────────────────
+    The Slow Loop must still run with no database. §17's standing rule is that
+    the dashboard never depends on the Fast Loop, and the same reasoning
+    applies downward: a demo on a laptop with no Docker should degrade to the
+    in-memory Ledger it has always used, not refuse to start.
+
+    So this returns "" rather than raising, and `store.py` treats that as
+    "persistence disabled". `docker-compose.yml` publishes 5433, not 5432 —
+    developer machines very often already run a Postgres on the default port,
+    and connecting to the wrong server produces a confusing "database exists
+    but the tables are missing".
+    """
+    return _optional(
+        "DATABASE_URL", "postgresql://echo:echo@127.0.0.1:5433/echosphere"
+    )
+
+
+def persistence_enabled() -> bool:
+    """
+    Whether to persist the Ledger at all.
+
+    Explicit opt-out via `LEDGER_PERSISTENCE=off`, because a developer running
+    the Rehearsal Rig against a scratch incident should be able to keep the
+    database out of the picture without stopping the container.
+    """
+    return _optional("LEDGER_PERSISTENCE", "on").lower() not in ("off", "0", "false")
 
 
 def tool_secret() -> str:

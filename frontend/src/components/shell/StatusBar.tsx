@@ -5,6 +5,7 @@ import { clock } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { Dot, Rule } from "@/components/ui/Signal";
 import { Kbd } from "@/components/ui/Button";
+import { ASR_LABEL, llmLabel, TTS_LABEL, VAD_LABEL } from "@/lib/pipeline-facts";
 
 /**
  * The foot of the console.
@@ -87,16 +88,20 @@ export function StatusBar() {
       {/*
         These must stay TRUE. This strip is where an operator looks to confirm
         which system they are actually talking to when something looks wrong, so
-        a stale vendor name here is worse than no name at all. They read
-        `gpt-4o-realtime` and `assemblyai` until the Fast Loop moved off OpenAI
-        Realtime onto a cascade — neither was ever in the request path.
+        a stale vendor name here is worse than no name at all — it sends whoever
+        is debugging to the wrong provider's dashboard.
+
+        They were hardcoded here, which is exactly how all four went stale: they
+        read `groq/gpt-oss-120b` and `agora` while the pipeline was actually on
+        Agora-managed gpt-4o-mini and Deepgram nova-3. Nothing connected the
+        label to the thing it described. They now come from `pipeline-facts.ts`,
+        which mirrors `backend/app/voice_agent.py` — the file that really builds
+        the pipeline.
       */}
-      <Item label="LLM" value="groq/gpt-oss-120b" title="Fast Loop brain — Groq chat completions (cascaded, not audio-to-audio)" />
-      {/* Barge-in raised from 160ms to 300ms in v6 (Appendix A): 160ms fired on
-          breaths and back-channel "mm-hm", making Echo interrupt constantly. */}
-      <Item label="VAD" value="agora_vad · 300ms" title="Turn detection mode and barge-in threshold" />
-      <Item label="ASR" value="agora" title="Speech-to-text, performed by Agora in cascaded mode" />
-      <Item label="TTS" value="elevenlabs/flash-v2.5" title="Echo's voice — low-latency model, chosen because the cascade already costs us the §12.1 budget" />
+      <Item label="LLM" value={llmLabel()} title="Fast Loop brain — Agora-managed gpt-4o-mini (cascaded, not audio-to-audio)" />
+      <Item label="VAD" value={VAD_LABEL} title="Turn detection — barge-in threshold; end-of-speech is 480ms" />
+      <Item label="ASR" value={ASR_LABEL} title="Speech-to-text — Agora-managed Deepgram nova-3, no vendor key required" />
+      <Item label="TTS" value={TTS_LABEL} title="Echo's voice — low-latency model, chosen because the cascade already costs us the §12.1 budget" />
 
       <Rule className="h-3" />
 
