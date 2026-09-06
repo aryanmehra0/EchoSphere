@@ -75,58 +75,82 @@ describe("Who forwards what — the two-machine rule", () => {
   const DEVOPS = 1001;
   const SUPPORT = 1002;
 
-  test("a browser forwards its own speech", () => {
-    assert.equal(
-      forwardDecision(speech(DEVOPS, "Memory is at 40 percent"), DEVOPS),
-      "forward",
-    );
+  const DBA = 1003;
+
+  /** Stand-in for the Roster: exactly who this console has been told about. */
+  const roster =
+    (map: Record<number, string>) =>
+    (uid: number) =>
+      (map[uid] ?? null) as never;
+
+  const ROOM = roster({
+    [DEVOPS]: "DevOps Lead",
+    [SUPPORT]: "Support Engineer",
+    [DBA]: "Database Admin",
   });
 
-  test("a browser does NOT forward another participant's speech", () => {
-    // The bug this replaces: DevOps's console received Support's utterance over
-    // RTM and forwarded it labelled "DevOps Lead". A MIS-sourced claim is worse
-    // than an unsourced one — Rule 1 catches the second, nothing catches the
-    // first, and the contradiction engine would then compare two people's
-    // claims believing them to be one person's.
-    assert.equal(
-      forwardDecision(speech(SUPPORT, "cache read timeouts"), DEVOPS),
-      "skip:not-mine",
-    );
-  });
+  test("one console minutes the WHOLE room, not just its operator", () => {
+    /*
+      Changed Sep 6, and it is a reversal.
 
-  test("one utterance produces exactly ONE forward across two machines", () => {
-    // The duplicate half of the same bug: both browsers forwarded, so every
-    // sentence was extracted twice.
-    const utterance = speech(SUPPORT, "Application logs show cache read timeouts");
-    const decisions = [DEVOPS, SUPPORT].map((self) => forwardDecision(utterance, self));
+      The rule was "forward only my own speech", which was right while each
+      participant ran their own console. Once Echo began subscribing to
+      `["*"]`, the toolkit started handing every speaker's finished turn to
+      every console — so one console can record the whole bridge, and
+      colleagues can join from any Agora client with no console of their own.
 
-    assert.deepEqual(decisions, ["skip:not-mine", "forward"]);
-    assert.equal(decisions.filter((d) => d === "forward").length, 1);
-  });
-
-  test("Echo's own speech is never forwarded by anyone (G2)", () => {
-    for (const self of [DEVOPS, SUPPORT]) {
-      assert.equal(forwardDecision(speech(9000, "Echo speaking"), self), "skip:agent");
-      assert.equal(
-        forwardDecision(
-          speech(0, "Echo speaking", { object: "assistant.transcription" }),
-          self,
-        ),
-        "skip:agent",
-      );
+      Three speakers, one console, three forwards.
+    */
+    for (const uid of [DEVOPS, SUPPORT, DBA]) {
+      assert.equal(forwardDecision(speech(uid, "a measured thing"), ROOM), "forward");
     }
+  });
+
+  test("an unknown uid is DROPPED, never guessed at", () => {
+    /*
+      The danger the old rule was protecting against, kept.
+
+      Forwarding a stranger's words under some default role would put one
+      person's sentence in another's mouth. §6.2 Rule 1 catches an unsourced
+      claim; nothing downstream catches a mis-sourced one, and the
+      contradiction engine would then compare two people believing them to be
+      one. So a uid the Roster cannot name is skipped outright.
+    */
+    assert.equal(
+      forwardDecision(speech(4242, "who even is this"), ROOM),
+      "skip:unknown-uid",
+    );
+  });
+
+  test("attribution comes from the Roster, not from whose browser this is", () => {
+    // A console operated by DevOps still files Support's line as Support's.
+    const support = speech(SUPPORT, "cache read timeouts");
+    assert.equal(forwardDecision(support, ROOM), "forward");
+    assert.equal(ROOM(support.uid), "Support Engineer");
+  });
+
+  test("Echo's own speech is never forwarded (G2)", () => {
+    assert.equal(forwardDecision(speech(9000, "Echo speaking"), ROOM), "skip:agent");
+    assert.equal(
+      forwardDecision(
+        speech(0, "Echo speaking", { object: "assistant.transcription" }),
+        ROOM,
+      ),
+      "skip:agent",
+    );
   });
 
   test("partials are held back — extraction needs whole sentences", () => {
     assert.equal(
-      forwardDecision(speech(DEVOPS, "Memory is at", { is_final: false }), DEVOPS),
+      forwardDecision(speech(DEVOPS, "Memory is at", { is_final: false }), ROOM),
       "skip:partial",
     );
   });
 
-  test("the agent check runs before the ownership check", () => {
-    // Order matters for diagnosis: an operator reading "skip:not-mine" against
-    // uid 9000 would go hunting for a roster bug that does not exist.
-    assert.equal(forwardDecision(speech(9000, "Echo"), DEVOPS), "skip:agent");
+  test("the agent check runs before the roster lookup", () => {
+    // Order matters for diagnosis: an operator reading "skip:unknown-uid"
+    // against uid 9000 would go hunting for a Roster bug that does not exist.
+    // Echo is deliberately absent from this roster, as it is from the real one.
+    assert.equal(forwardDecision(speech(9000, "Echo"), ROOM), "skip:agent");
   });
 });

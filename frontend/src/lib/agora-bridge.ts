@@ -8,7 +8,7 @@ import type {
 import type { RTMClient, RTMConfig } from "agora-rtm-sdk";
 
 import type { AgoraTranscript, ForwardDecision } from "./agora-transcript";
-import { forwardTranscriptToSlowLoop } from "./delta-socket";
+import { fetchRoster, forwardTranscriptToSlowLoop } from "./delta-socket";
 import { VoiceAgent } from "./agora/voice-agent";
 import type { AgentState, ParticipantRole } from "./types";
 
@@ -49,10 +49,11 @@ export class AgoraBridge {
   /**
    * Why transcripts were not forwarded, by reason.
    *
-   * Exposed because the failure this guards against is SILENT: if Agora stops
-   * echoing a speaker their own transcript, every frame reads "skip:not-mine"
-   * and the dashboard simply stops filling. A count makes that a five-second
-   * diagnosis rather than a mystery.
+   * Exposed because the failure this guards against is SILENT. A dashboard
+   * that stops filling looks identical whichever cause it has, and the counts
+   * separate them in five seconds: a pile of "skip:unknown-uid" means the
+   * Roster does not know who is speaking, while zero updates of any kind means
+   * the RTC data stream itself is quiet and the fault is upstream of us.
    */
   readonly skipped: Partial<Record<ForwardDecision, number>> = {};
   forwarded = 0;
@@ -64,13 +65,71 @@ export class AgoraBridge {
    */
   private readonly voice: VoiceAgent;
 
+  /**
+   * uid → role for everyone on the bridge, refreshed from the Roster.
+   *
+   * Echo subscribes to `["*"]`, so this console minutes the whole room and
+   * needs a name for each speaker. Held as a map rather than looked up per
+   * utterance because `resolveRole` sits on the transcript hot path and must
+   * be synchronous.
+   */
+  private readonly roles = new Map<number, ParticipantRole>();
+
+  /** In-flight roster refresh, so a burst of unknown uids makes ONE request. */
+  private rosterRefresh: Promise<void> | null = null;
+
   constructor(private readonly events: AgoraBridgeEvents) {
     this.voice = new VoiceAgent({
+      resolveRole: (uid) => this.resolveRole(uid),
       onUtterance: (transcript, role) => void this.forwardTranscript(transcript, role),
       onTranscriptView: () => {},
       onAgentState: (state) => this.events.onAgentState(state),
       onError: (detail) => this.events.onError(detail),
     });
+  }
+
+  /**
+   * Name a speaker, or refuse to.
+   *
+   * Falls back to THIS operator's own role for their own uid, so a Roster that
+   * cannot be reached costs the other participants' lines but never this
+   * console's — the single-machine demo keeps working when the network does
+   * not. Any other unknown uid returns null and the turn is dropped: guessing
+   * would put one person's words in another's mouth.
+   */
+  private resolveRole(uid: number): ParticipantRole | null {
+    const known = this.roles.get(uid);
+    if (known) return known;
+
+    if (this.credentials && uid === this.credentials.uid) {
+      return this.credentials.role;
+    }
+
+    // Someone spoke before we learned who they are — a late joiner, almost
+    // always. Refresh in the background; the next turn resolves.
+    void this.refreshRoster();
+    return null;
+  }
+
+  private async refreshRoster(): Promise<void> {
+    const channel = this.channel;
+    if (!channel || this.rosterRefresh) return;
+
+    this.rosterRefresh = (async () => {
+      const next = await fetchRoster(channel);
+      // Empty means the fetch failed. Keeping the previous map is strictly
+      // better than clearing it and going deaf to everyone.
+      if (next.size > 0) {
+        this.roles.clear();
+        for (const [uid, role] of next) this.roles.set(uid, role);
+      }
+    })();
+
+    try {
+      await this.rosterRefresh;
+    } finally {
+      this.rosterRefresh = null;
+    }
   }
 
   async join(channel: string, credentials: BridgeCredentials): Promise<void> {
@@ -86,6 +145,10 @@ export class AgoraBridge {
 
     client.on("user-published", async (user, mediaType) => {
       if (mediaType !== "audio") return;
+      // A new voice on the bridge. Learn their role BEFORE they finish their
+      // first sentence, or that sentence is dropped as unattributable — which
+      // is safe but is still a lost line from a colleague who just joined.
+      if (!this.roles.has(Number(user.uid))) void this.refreshRoster();
       try {
         await client.subscribe(user, "audio");
         const track = user.audioTrack;
@@ -150,6 +213,8 @@ export class AgoraBridge {
       this.silenceTimer = null;
     }
     this.clearAgentTrack();
+    // The next bridge may be a different channel with different people.
+    this.roles.clear();
     await this.voice.stop();
 
     const mic = this.mic;
@@ -218,6 +283,11 @@ export class AgoraBridge {
       this.rtm = null;
       console.warn("[agora rtm] unavailable — continuing without it", error);
     }
+
+    // Learn the room before the transcript layer starts handing us turns.
+    // Awaited: it is one same-origin request, and starting deaf to everyone
+    // but ourselves would drop the opening exchange of the incident.
+    await this.refreshRoster();
 
     await this.voice.start(this.client!, credentials.uid, credentials.role, rtmClient);
   }

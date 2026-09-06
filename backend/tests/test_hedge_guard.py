@@ -208,6 +208,62 @@ class LedgerDoesNotDoubleCount(unittest.TestCase):
         self.assertEqual(len(self.ledger.claims), 1)
         self.assertIn("95", self.ledger.claims["c1"].text)
 
+class HedgeConfidenceCap(unittest.TestCase):
+    """
+    A hedge cannot be 100% certain, whoever labelled it.
+
+    The cap used to live inside the downgrade branch, so it ran only when WE
+    reclassified an OBSERVED claim. A model that returned HYPOTHESIS on its own
+    kept whatever confidence it liked, and the board showed
+
+        [OPEN QUESTION] Redis might be evicting keys ... 100%
+
+    which is the original defect wearing different clothes: right pane, and a
+    number beside it still claiming certainty about a guess.
+    """
+
+    WINDOW = "[DevOps Lead] Datadog looks like Redis might be evicting keys."
+
+    def _one(self, status: str, confidence: float) -> dict:
+        out = validate_extraction(
+            {"claims": [{
+                "text": "Redis might be evicting keys",
+                "epistemicStatus": status,
+                "speakerRole": "DevOps Lead",
+                "confidence": confidence,
+            }]},
+            window_text=self.WINDOW,
+        )
+        return out["claims"][0]
+
+    def test_a_downgraded_hedge_is_capped(self) -> None:
+        c = self._one("OBSERVED", 1.0)
+        self.assertEqual(c["epistemicStatus"], "HYPOTHESIS")
+        self.assertLessEqual(c["confidence"], 0.8)
+
+    def test_a_hedge_the_model_already_called_a_hypothesis_is_capped_too(self) -> None:
+        c = self._one("HYPOTHESIS", 1.0)
+        self.assertLessEqual(c["confidence"], 0.8, "100% certainty about a guess")
+
+    def test_the_cap_is_a_ceiling_not_a_floor(self) -> None:
+        # A model that is already appropriately unsure must not be talked UP.
+        self.assertAlmostEqual(self._one("HYPOTHESIS", 0.5)["confidence"], 0.5)
+
+    def test_an_unhedged_fact_keeps_its_confidence(self) -> None:
+        out = validate_extraction(
+            {"claims": [{
+                "text": "Memory is at 40 percent",
+                "epistemicStatus": "OBSERVED",
+                "speakerRole": "DevOps Lead",
+                "confidence": 1.0,
+            }]},
+            window_text=self.WINDOW,
+        )
+        c = out["claims"][0]
+        self.assertEqual(c["epistemicStatus"], "OBSERVED")
+        self.assertAlmostEqual(c["confidence"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -357,9 +357,26 @@ export const MANAGED_FAST_LOOP_MODEL = "gpt-4o-mini";
  */
 export const MANAGED_OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
-/** Terms this incident actually uses, boosted for the recogniser. */
+/**
+ * Terms this incident actually uses.
+ *
+ * NOT currently sent. Passing this as `asr.params.keyterm` coincided with the
+ * recogniser returning empty content for every turn (Sep 6) and it is absent
+ * from every payload we have seen transcribe successfully — see the long note
+ * on the `asr` block. Kept because the vocabulary is right and worth
+ * reinstating once it can be re-tested one parameter at a time.
+ */
 export const ASR_KEYTERMS =
   "Redis Datadog checkout eviction latency replica failover Sev-1";
+
+/**
+ * The language handed to DEEPGRAM, inside `asr.params`.
+ *
+ * Deliberately `en` and not `TURN_DETECTION.language` ("en-US"): this mirrors
+ * the working quickstart's `DeepgramSTT(model="nova-3", language="en")`. The
+ * two language fields are different things and both belong on the wire.
+ */
+export const ASR_LANGUAGE = "en";
 
 /**
  * The `preset` string, composed the way `presets.py:resolve_session_presets`
@@ -711,30 +728,42 @@ export function buildAgentPayload(params: {
       token: params.agentRtcToken,
       agent_rtc_uid: String(params.agentUid),
       /*
-        ── THE AGENT HEARS EXACTLY ONE PERSON, AND "*" IS NOT A WILDCARD ─────
-        This was `["*"]`, with a comment claiming it subscribed to everyone so
-        late joiners would be heard. That is not what the field does. The
-        schema is unambiguous:
+        ── ECHO LISTENS TO THE WHOLE ROOM. "*" IS A WILDCARD. ───────────────
+        CORRECTION, Sep 6. This was `[String(params.userUid)]` — one person —
+        on the strength of a comment asserting that `"*"` is "read as a user ID
+        literally named `*`, which nobody has". That assertion is false, and it
+        cost us the entire multi-participant premise of the product.
 
-          "A list of user IDs that the agent subscribes to in the channel.
-           Only subscribed users can interact with the agent. Currently, only
-           one user ID is supported."
+        Agora's own documentation for this field:
 
-        So `"*"` was read as a user ID literally named `*`, which nobody has.
-        The agent therefore subscribed to NOBODY: it joined, sat in the
-        channel, heard silence, and produced no transcripts — with the create
-        call returning 200 the whole time, because the value is well-formed
-        even though it matches no one.
+          "The `*` selector includes all UIDs present in the channel, which
+           may include other AI agents."
+          — docs.agora.io/en/conversational-ai/rest-api/join
 
-        ⚠️ ARCHITECTURAL CONSEQUENCE, and it is not a small one. Agora's
-        Conversational AI Engine listens to ONE human. §18's two-machine
-        requirement still holds for the DASHBOARD — both consoles forward
-        their own speech to the Slow Loop over their own RTC connection — but
-        Echo's own ears are on a single participant. Whoever is subscribed
-        here is the person Echo can converse with; the second speaker's words
-        still reach the Ledger, they just do not reach the agent's STT.
+        Verified against the live API as well: `["*"]`, `["1001"]` and
+        `["1001","1002","1003"]` are all accepted and all return a running
+        agent. The SDK's own docstring still says "currently, only one user ID
+        is supported" — it is stale, and believing it is what started this.
+
+        WHY THE ORIGINAL EXPERIMENT LOOKED LIKE IT FAILED. `["*"]` was tried,
+        no transcripts appeared, and the wildcard took the blame. But the `asr`
+        block was broken at the same time — no `params.language`, plus a
+        `keyterm` string the managed adapter would not take — so NOTHING was
+        going to transcribe regardless of who the agent subscribed to. Two
+        independent bugs, and the wrong one was convicted. See session_log §7.
+
+        WHAT THIS UNLOCKS. Three people on three machines are now all heard by
+        Echo, not just whoever pressed J first. The rest of the pipeline was
+        already built for this and needed no change: `forwardDecision` has each
+        browser forward ONLY its own speech under its own role, so three
+        speakers produce three correctly-attributed streams and no duplicates.
+
+        ONE CONSEQUENCE TO KNOW. `idle_timeout` fires when everyone in
+        `remote_rtc_uids` has left, and under `"*"` a second agent lingering in
+        the channel counts as somebody. `npm run demo reset` stops strays, and
+        that is the reason it matters rather than mere tidiness.
       */
-      remote_rtc_uids: [String(params.userUid)],
+      remote_rtc_uids: ["*"],
       enable_string_uid: false,
       idle_timeout: 300,
       advanced_features: {
@@ -907,27 +936,59 @@ export function buildAgentPayload(params: {
         `en` rather than `en-US`, matching the quickstart's
         `DeepgramSTT(model="nova-3", language="en")`.
       */
+      /*
+        ── THIS BLOCK IS A COPY OF A PAYLOAD THAT DEMONSTRABLY WORKS ─────────
+        Sep 6. Echo joined, VAD segmented turns correctly — Agora recorded 44
+        of them — and every single one came back with EMPTY content. The room
+        sees "[Silence]" forever while the agent looks perfectly healthy.
+
+        The shape below is not reasoned from the SDK source; it is the literal
+        output of running the SDK, taken from the quickstart in
+        `agent-quickstart-python/` whose pipeline is confirmed hearing speech:
+
+            DeepgramSTT(model="nova-3", language="en").to_config()
+              -> {"vendor":"deepgram","params":{"model":"nova-3","language":"en"}}
+            _resolve_asr_config      adds top-level language from turn detection
+            resolve_session_presets  infers `deepgram_nova_3` FROM params.model,
+                                     then strips params.model — KEEPING language
+
+            FINAL: {"vendor":"deepgram","params":{"language":"en"},
+                    "language":"en-US"}
+
+        Two things were wrong here, and both fail silently because Agora
+        validates only `vendor` and forwards `params` unchecked — the same trap
+        already documented for `tts`:
+
+        1. `params.language` was ABSENT. The comment that removed it claimed the
+           session layer "overwrites it from turn detection afterwards, so params
+           is exactly where it gets thrown away." That is not what the code does.
+           `_resolve_asr_config` assigns `asr_config["language"]` — the TOP-LEVEL
+           key — and never touches `params`. Both are present on the working
+           wire, and they are not the same field: `params.language` is what
+           reaches Deepgram, the top-level one is the interaction language.
+
+        2. `keyterm`, `smart_format` and `punctuation` were sent and are NOT in
+           any payload we have seen transcribe successfully. `keyterm` is the
+           prime suspect: it was one space-separated string, and a managed
+           adapter that rejects it takes the whole recogniser down with it —
+           which is precisely the observed all-empty result.
+
+        Losing the keyterm boost costs some accuracy on "Redis" and "Datadog".
+        Being deaf costs the demo. Re-add them ONE at a time, running
+        `npm run demo speech` after each, and keep only what still transcribes.
+      */
       asr: {
         vendor: "deepgram",
         params: {
-          // Domain vocabulary. An incident bridge says "Redis" and "Datadog"
-          // far more often than general English does, and Deepgram scores
-          // these terms higher when they are named.
-          keyterm: ASR_KEYTERMS,
-          smart_format: true,
-          punctuation: true,
+          // What actually reaches Deepgram. `en`, matching the working config —
+          // NOT the `en-US` interaction language below.
+          language: ASR_LANGUAGE,
         },
         // TOP LEVEL, and equal to turn_detection.language. `agent.py`:
         //
         //   # Unconditional: turn detection is the single source of truth for
-        //   # the interaction language, so a vendor-level `language` would be
-        //   # silently discarded here.
+        //   # the interaction language.
         //   asr_config["language"] = field(turn_detection_config, "language")
-        //
-        // A previous edit moved this into `params` on the strength of
-        // `DeepgramSTT.to_config()`, which does put it there - but the session
-        // layer overwrites it from turn detection afterwards, so params is
-        // exactly where it gets thrown away.
         language: TURN_DETECTION.language,
       },
     },

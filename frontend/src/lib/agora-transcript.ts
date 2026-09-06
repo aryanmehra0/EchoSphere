@@ -5,6 +5,8 @@
  * parser pure makes that vendor boundary executable and keeps the reducer's
  * transcript contract stable.
  */
+import type { ParticipantRole } from "./types";
+
 export interface AgoraTranscript {
   uid: number;
   text: string;
@@ -89,35 +91,58 @@ export type ForwardDecision =
   | "forward"
   | "skip:partial"
   | "skip:agent"
-  | "skip:not-mine";
+  | "skip:unknown-uid";
 
 /**
- * Decide whether THIS browser should forward THIS transcript.
+ * Resolve a speaker's role from the Roster. `null` means "not a known human",
+ * which is the ONLY safe answer when the uid has no entry.
+ */
+export type RoleResolver = (uid: number) => ParticipantRole | null;
+
+/**
+ * Decide whether this browser should forward THIS transcript, and under whose
+ * name.
  *
- * ── THE RULE, AND WHY IT MATTERS ────────────────────────────────────────────
- * RTM broadcasts every transcript to every subscriber, but a browser knows
- * exactly one role for certain: its own. So each participant forwards only
- * their own speech.
+ * ── WHY THIS IS NO LONGER "ONLY MY OWN SPEECH" ──────────────────────────────
+ * It used to be `transcript.uid !== selfUid -> skip`, because a browser was
+ * said to know exactly one role for certain: its own. That was the right rule
+ * when each participant ran their own console and every console forwarded its
+ * own line.
  *
- * Forwarding someone else's would label it with OUR role — on the two-machine
- * setup §18 requires, DevOps's console would file Support's sentences as
- * DevOps's own. A MIS-sourced claim is worse than an unsourced one, because
- * §6.2 Rule 1 catches the second and nothing downstream can catch the first.
- * It would also mean two browsers forwarding one utterance, so every sentence
- * gets extracted twice.
+ * It stopped being the right rule the moment Echo began subscribing to `["*"]`.
+ * The toolkit hands EVERY speaker's finished turn to EVERY console on the RTC
+ * data stream, so one console can now record the whole room — which is what
+ * lets two colleagues join the bridge from any Agora client, with no console,
+ * no tunnel and no per-person setup, and still be minuted correctly.
  *
- * Pure and exported so it can be tested without two machines on a channel —
- * which is precisely the configuration this rule exists for and the one that
- * cannot be exercised on a single laptop.
+ * THE ORIGINAL DANGER IS REAL AND IS HANDLED, NOT DISCARDED. Forwarding
+ * someone else's words under OUR role is worse than not forwarding them: §6.2
+ * Rule 1 catches an unsourced claim and nothing downstream catches a
+ * MIS-sourced one. So attribution no longer comes from "whose browser is
+ * this" — it comes from the Roster, which is the only component that has ever
+ * known uid → role. A uid the Roster does not know is skipped outright rather
+ * than guessed at.
+ *
+ * DUPLICATES ARE HANDLED SERVER-SIDE. If two consoles are open they will both
+ * forward the same turn, but `messageId` is `uid:turn_id` — identical in both
+ * browsers, because it comes from Agora — and the Slow Loop's window rejects a
+ * message id it has already accepted. Two consoles cost one wasted request,
+ * not a doubled claim.
+ *
+ * Pure and exported so the multi-speaker case can be tested without three
+ * machines on a channel — precisely the configuration this rule exists for and
+ * the one that cannot be exercised on one laptop.
  * ────────────────────────────────────────────────────────────────────────────
  */
 export function forwardDecision(
   transcript: AgoraTranscript,
-  selfUid: number,
+  resolveRole: RoleResolver,
   agentUid = 9000,
 ): ForwardDecision {
+  // FIRST, always. An operator reading "skip:unknown-uid" against uid 9000
+  // would go hunting for a Roster bug that does not exist.
   if (isAgentTranscript(transcript, agentUid)) return "skip:agent";
   if (!transcript.isFinal) return "skip:partial";
-  if (transcript.uid !== selfUid) return "skip:not-mine";
+  if (!resolveRole(transcript.uid)) return "skip:unknown-uid";
   return "forward";
 }

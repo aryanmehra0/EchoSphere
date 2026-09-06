@@ -315,6 +315,54 @@ export async function requestBridgeCredentials(
   };
 }
 
+/**
+ * Who is on this bridge, and as what role — uid → role from the Roster.
+ *
+ * ── WHY IT LIVES IN THIS MODULE ────────────────────────────────────────────
+ * Not because the bridge could not call it, but because Zone 1 egress is
+ * confined to this file by a test, and the right response to needing a second
+ * caller is to add the call HERE rather than to widen the allow-list. The
+ * bridge imports this function; it opens no connection of its own.
+ *
+ * ── WHY THE CONSOLE NEEDS IT ───────────────────────────────────────────────
+ * Echo subscribes to every participant, so this console receives the whole
+ * room's finished turns and has to name each speaker. Attribution is the
+ * product: filing one person's sentence under another's name is worse than
+ * dropping it, because Rule 1 catches an unsourced claim and nothing catches a
+ * mis-sourced one. The Roster is the only source of truth for uid → role.
+ *
+ * A failure here returns an EMPTY map rather than throwing. The caller then
+ * attributes nobody, drops the turn, and retries on the next one — losing a
+ * sentence, which is recoverable, instead of taking the bridge down, which is
+ * not.
+ */
+export async function fetchRoster(
+  channel: string,
+): Promise<Map<number, ParticipantRole>> {
+  const roles = new Map<number, ParticipantRole>();
+  try {
+    const response = await fetch(`/api/roster?channel=${encodeURIComponent(channel)}`);
+    if (!response.ok) return roles;
+
+    const body = (await response.json()) as {
+      roles?: Record<string, ParticipantRole>;
+      exclude?: number[];
+    };
+    // JSON turns numeric keys into strings. Parsing them back is the whole
+    // reason this is not a one-liner: a uid arriving as "1001" and being looked
+    // up as 1001 fails by silently skipping every utterance, not by throwing.
+    const excluded = new Set(body.exclude ?? []);
+    for (const [uid, role] of Object.entries(body.roles ?? {})) {
+      const parsed = Number(uid);
+      if (!Number.isFinite(parsed) || excluded.has(parsed)) continue;
+      roles.set(parsed, role);
+    }
+  } catch {
+    // Network hiccup mid-incident. Keep the caller's last good map.
+  }
+  return roles;
+}
+
 /** Final human ASR frames enter the Observer only through the approved egress. */
 export async function forwardTranscriptToSlowLoop(
   transcript: AgoraTranscript,

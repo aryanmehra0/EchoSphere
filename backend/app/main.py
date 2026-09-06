@@ -450,6 +450,11 @@ async def run_pipeline_if_ready() -> dict[str, Any] | None:
         spoken = None
         existing = list(ledger.claims.values())
 
+        # Recomputed AFTER the merge above, not reused from before it: a claim
+        # that named an entity first seen in THIS window can only be scoped
+        # against it once that entity is in the table.
+        scope_aliases = entity_aliases(ledger)
+
         """
         ONE INTERRUPTION PER WINDOW - BUT THE RIGHT ONE.
 
@@ -471,7 +476,7 @@ async def run_pipeline_if_ready() -> dict[str, Any] | None:
         held: tuple[Claim, Claim, Any] | None = None
 
         for claim in new_claims:
-            found = await engine.evaluate(claim, existing)
+            found = await engine.evaluate(claim, existing, aliases=scope_aliases)
             if not found:
                 continue
 

@@ -47,6 +47,15 @@ import type { AgentState, ParticipantRole } from "../types";
 
 /** What the console needs back from a transcript update. */
 export interface VoiceAgentEvents {
+  /**
+   * uid → role, from the Roster.
+   *
+   * Echo subscribes to every participant, so this console sees the whole
+   * room's turns and must name each speaker from the Roster rather than assume
+   * they are all this browser's operator. Returning `null` for an unknown uid
+   * is what makes "drop it" the default instead of "guess".
+   */
+  resolveRole: (uid: number) => ParticipantRole | null;
   /** One COMPLETED utterance, exactly once, already role-attributed. */
   onUtterance: (transcript: AgoraTranscript, role: ParticipantRole) => void;
   /** Live transcript for display, including turns still in progress. */
@@ -131,7 +140,7 @@ export class VoiceAgent {
           items.map((i) => `${i.uid}#${i.turn_id}/${i.status}:${(i.text ?? "").slice(0, 40)}`),
         );
         this.events.onTranscriptView(items as TranscriptHelperItem<unknown>[]);
-        this.drain(items as ToolkitItem[], selfUid, role);
+        this.drain(items as ToolkitItem[]);
       });
 
       this.ai.on(AgoraVoiceAIEvents.AGENT_STATE_CHANGED, (_uid, event) => {
@@ -161,7 +170,7 @@ export class VoiceAgent {
    * sentence, and extraction on half a sentence produces claims nobody made —
    * which is the same failure as inventing one.
    */
-  private drain(items: ToolkitItem[], selfUid: number, role: ParticipantRole): void {
+  private drain(items: ToolkitItem[]): void {
     for (const item of items) {
       if (item.status !== TurnStatus.END) continue;
 
@@ -185,13 +194,17 @@ export class VoiceAgent {
 
       this.delivered.add(key);
 
-      // The existing per-UID rule still decides: each browser forwards only
-      // its OWN speech, and never the agent's. That logic is tested and is
-      // what keeps two machines from double-forwarding or mis-attributing.
-      if (forwardDecision(transcript, selfUid) !== "forward") continue;
+      // Attribution comes from the ROSTER, not from whose browser this is.
+      // Echo subscribes to every participant, so this console minutes the
+      // whole room — and an utterance whose uid the Roster cannot name is
+      // dropped rather than filed under the wrong person.
+      const speaker = this.events.resolveRole(transcript.uid);
+      if (forwardDecision(transcript, this.events.resolveRole) !== "forward") {
+        continue;
+      }
 
       this.forwarded += 1;
-      this.events.onUtterance(transcript, role);
+      this.events.onUtterance(transcript, speaker as ParticipantRole);
     }
   }
 

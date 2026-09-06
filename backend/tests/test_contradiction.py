@@ -89,6 +89,58 @@ class TestStage0Scope(unittest.TestCase):
                   role="Support Engineer", at=now + 300)
         self.assertEqual([c.id for c in self.eng.scope(a, [b], now_ms_=now)], ["c2"])
 
+    def test_a_claim_filed_elsewhere_but_NAMING_the_entity_is_a_candidate(self):
+        """
+        The Sep 6 regression, pinned.
+
+        Extraction files a claim under one entity. "cache read timeouts on the
+        checkout path" names two systems and landed on checkout; "the cache is
+        fine" landed on Redis. Same-entity-only scoping never compared them, so
+        the demo's headline contradiction produced no panel, no dashboard entry
+        and no spoken line — silently, which is why it survived a green build.
+        """
+        now = now_ms()
+        aliases = {"redis": "e2", "cache": "e2", "checkout": "e1"}
+        fine = claim("c6", "The cache is fine", "e2", role="DevOps Lead", at=now)
+        timeouts = claim(
+            "c7",
+            "application logs are showing cache read timeouts on the checkout path",
+            "e1", role="Support Engineer", at=now + 1000,
+        )
+        self.assertEqual(
+            [c.id for c in self.eng.scope(timeouts, [fine], now_ms_=now, aliases=aliases)],
+            ["c6"],
+        )
+
+    def test_naming_is_required_co_occurrence_in_the_incident_is_not_enough(self):
+        """
+        The row-4 guard must survive the widening above.
+
+        Both entities are in the alias table and both claims are in the same
+        incident; what keeps them apart is that neither sentence NAMES the
+        other's system.
+        """
+        aliases = {"redis": "redis", "postgres": "postgres"}
+        new = claim("c1", "Redis memory is at 40 percent", "redis")
+        other = claim("c2", "Postgres memory is at 40 percent", "postgres")
+        self.assertEqual(self.eng.scope(new, [other], aliases=aliases), [])
+
+    def test_an_alias_inside_a_longer_word_does_not_count_as_naming(self):
+        # "redistribute" contains "redis". A substring match would invent a
+        # cross-entity pairing out of nothing.
+        aliases = {"redis": "e2", "gateway": "e3"}
+        new = claim("c1", "We redistribute traffic at the gateway", "e3")
+        other = claim("c2", "Redis memory is at 40 percent", "e2")
+        self.assertEqual(self.eng.scope(new, [other], aliases=aliases), [])
+
+    def test_scope_without_an_alias_table_keeps_the_old_behaviour(self):
+        # Every caller that predates the alias table still gets same-entity
+        # scoping, so this widening cannot change their results.
+        new = claim("c1", "The cache is fine", "e2")
+        other = claim("c2", "cache read timeouts on checkout", "e1",
+                      role="Support Engineer")
+        self.assertEqual(self.eng.scope(new, [other]), [])
+
     def test_a_same_entity_observation_IS_a_candidate(self):
         # Two DIFFERENT speakers. This test originally used the same role for
         # both and passed only because the same-utterance filter did not exist

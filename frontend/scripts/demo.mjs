@@ -62,6 +62,135 @@ const SCRIPT = [
     text: "Wait. I checked the primary Redis shard directly. Memory is at 40 percent. The cache is fine." },
   { gap: 17, act: "Act 2", role: "Support Engineer", uid: 1002,
     text: "But application logs are definitely showing cache read timeouts on the checkout path." },
+  /*
+   * Act 3 exists so OWNERSHIP is demonstrated rather than described.
+   *
+   * The four lines above produce facts, a hypothesis, a gap and a
+   * contradiction, and the Tasks panel stayed empty through all of them —
+   * "assignment and tracking of task ownership" was a feature the code had and
+   * the demo never showed. This assigns one, out loud, with an owner and a
+   * deadline.
+   *
+   * Spoken by the DevOps Lead, not the Database Admin: the assignee never has
+   * to be in the room, so this needs no third UID in the roster and no third
+   * machine. It also closes on the unchecked assumption Act 1 opened, which is
+   * the note the close-out summary should land on.
+   */
+  { gap: 12, act: "Act 3", role: "DevOps Lead", uid: 1001,
+    text: "Alright — Database Admin, you own this one: pull the client-side connection pool saturation for the last hour and report back in ten minutes. Nobody is declaring a root cause until that number is in front of us." },
+];
+
+/* ------------------------------------------------------------------ */
+/* THE FULL INCIDENT — `npm run demo feed full`                        */
+/* ------------------------------------------------------------------ */
+/**
+ * A complete payment outage, start to close-out, written to exercise every
+ * capability the brief asks for rather than to read well.
+ *
+ * ── WHY THIS IS A SECOND SCRIPT AND NOT A REPLACEMENT ─────────────────────
+ * `SCRIPT` above is the proven one: five lines, ~60s, cheap enough to rehearse
+ * repeatedly. This is roughly three times the extraction and panel work, and
+ * the Groq free tier is 200,000 tokens PER DAY — call it four or five full
+ * runs. Rehearse on the short script; run this one for the real thing.
+ *
+ * ── HOW THE PACING IS CHOSEN, AND WHY IT IS NOT COSMETIC ──────────────────
+ * `gap` is seconds of silence BEFORE the line, and the pipeline reads it:
+ *
+ *   - SILENCE_FLUSH_SECONDS is 1.5, so any gap above ~2s closes the previous
+ *     extraction window. Every line here gets its own window, its own
+ *     contradiction check and its own chance to interrupt. Bunch two lines at
+ *     gap 1 and they merge into one window — §5.1 allows ONE interruption per
+ *     window, so the second finding is silently never spoken.
+ *   - SAME_UTTERANCE_SECONDS is 15: two claims by the SAME speaker inside 15s
+ *     are never compared, so one person cannot contradict themselves in a
+ *     breath. Both conflicts below are between DIFFERENT people, which has no
+ *     such floor.
+ *
+ * ── THE TWO CONFLICTS ARE BUILT, NOT HOPED FOR ────────────────────────────
+ * `scope()` pairs claims that share an entity OR that NAME each other's
+ * entity, and only OBSERVED ones. So each conflicting pair below is: two
+ * different speakers, both stating something measured, both naming the same
+ * system in the sentence itself.
+ *
+ *   Act 2  "The cache is fine"            vs "cache read timeouts"   (Redis)
+ *   Act 5  "Postgres primary is healthy"  vs "failed over twice"     (Postgres)
+ *
+ * Act 5's pair needs Act 4 to have put the healthy claim on the record first —
+ * do not reorder them.
+ */
+const SCRIPT_FULL = [
+  /* ── ACT 1 — THE PAGE ────────────────────────────────────────────────
+     Facts and a hypothesis in the same breath, which is how incidents
+     actually open. "might be evicting" must land as HYPOTHESIS and stay
+     out of Echo's mouth as fact. */
+  /*
+    KEEP THIS SENTENCE AS IT IS.
+
+    It was briefly rewritten to open with "we are Sev 1" and the extractor
+    then emitted neither "massive spike in 500s" nor "latency is through the
+    roof" — the two symptoms the entire story starts from. Nothing failed;
+    the model simply summarised differently. The wording below is the one
+    observed to produce both claims, and the severity is already on screen.
+  */
+  { gap: 0, act: "Act 1", role: "DevOps Lead", uid: 1001,
+    text: "Everyone on the bridge, massive spike in 500s on checkout starting at 14:02. Latency is through the roof. Datadog looks like Redis might be evicting keys." },
+  { gap: 10, act: "Act 1", role: "Support Engineer", uid: 1002,
+    text: "Tickets are flooding in. Users say their carts empty the second they hit purchase. We are at about four hundred tickets in twenty minutes." },
+
+  /* ── ACT 2 — THE HEADLINE CONFLICT ───────────────────────────────────
+     The pair the whole product exists for. Two people, both measuring,
+     both right about what they saw, and they cannot both be true. */
+  { gap: 12, act: "Act 2", role: "DevOps Lead", uid: 1001,
+    text: "Wait. I checked the primary Redis shard directly. Memory is at 40 percent. The cache is fine." },
+  { gap: 18, act: "Act 2", role: "Support Engineer", uid: 1002,
+    text: "But application logs are definitely showing cache read timeouts on the checkout path." },
+
+  /* ── ACT 3 — OWNERSHIP ───────────────────────────────────────────────
+     An owner, a deliverable and a deadline. Also the line that refuses to
+     let the room jump to a cause. */
+  { gap: 18, act: "Act 3", role: "DevOps Lead", uid: 1001,
+    text: "Alright — Database Admin, you own this one: pull the client-side connection pool saturation for the last hour and report back in ten minutes. Nobody is declaring a root cause until that number is in front of us." },
+
+  /* ── ACT 4 — THE SECOND CLAIM, PLANTED ───────────────────────────────
+     Says nothing surprising on its own. It is the first half of Act 5. */
+  { gap: 12, act: "Act 4", role: "DevOps Lead", uid: 1001,
+    text: "While we wait, I pulled up Postgres as well. The primary is healthy and replication is current." },
+
+  /* ── ACT 5 — THE SECOND CONFLICT, FROM A THIRD ROLE ──────────────────
+     Proves role recognition is real: a person who has not spoken yet
+     contradicts the incident lead with a measurement. */
+  { gap: 15, act: "Act 5", role: "Database Admin", uid: 1003,
+    text: "That is not what I am seeing on Postgres. The primary failed over twice in the last ten minutes and the replica is forty seconds behind." },
+
+  /* ── ACT 6 — OFF THE RECORD (§10.5) ──────────────────────────────────
+     The phrase list is fixed, not inferred — "off the record" and "back on
+     the record" are matched literally. The middle line must be genuinely
+     sensitive, and must leave NO trace: it is counted, never stored. */
+  { gap: 16, act: "Act 6", role: "Support Engineer", uid: 1002,
+    text: "Before we go further, let's go off the record for a moment." },
+  { gap: 7, act: "Act 6", role: "Support Engineer", uid: 1002,
+    text: "Leadership is asking whether we miss the quarterly number on this, and whether we are contractually obliged to tell the payments partner tonight." },
+  { gap: 7, act: "Act 6", role: "Support Engineer", uid: 1002,
+    text: "Okay, back on the record." },
+
+  /* ── ACT 7 — A DECISION AND A SECOND OWNER ───────────────────────────
+     Decisions are their own timeline kind. Mitigation is explicitly NOT a
+     root-cause finding, and the wording keeps that distinction. */
+  { gap: 10, act: "Act 7", role: "DevOps Lead", uid: 1001,
+    text: "Decision: we are failing over to the read replica and putting checkout behind the static queue page. That is mitigation, not a diagnosis. Support Engineer, you own customer comms — post an update to the status page every fifteen minutes." },
+
+  /* ── ACT 8 — THE ASSIGNED TASK REPORTS BACK ──────────────────────────
+     A hard number AND an explicit refusal to over-read it. This is the
+     discipline the product enforces, spoken by a human for once. */
+  { gap: 13, act: "Act 8", role: "Database Admin", uid: 1003,
+    text: "Connection pool saturation is at ninety-eight percent on the checkout service. The pool is exhausted. To be clear, I have not verified whether that is a cause or a symptom." },
+
+  /* ── ACT 9 — THE CAUSAL LEAP ─────────────────────────────────────────
+     Deliberately the last line. A human asserting a cause is fine and
+     realistic; Echo repeating it is a Rule 1 violation. This is the setup
+     for the question you ask out loud next — see docs/DEMO.md. */
+  { gap: 12, act: "Act 9", role: "Support Engineer", uid: 1002,
+    text: "So it was the connection pool all along. Can we call that the root cause and start writing this up?" },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -199,6 +328,14 @@ async function reset() {
 }
 
 async function feed() {
+  /*
+    `feed full` runs the whole incident; `feed` stays the short proven script.
+    Defaulting the other way round would quietly triple the Groq spend of every
+    rehearsal, and the day's budget is what runs out first.
+  */
+  const wantsFull = ["full", "story", "long"].includes(process.argv[3] ?? "");
+  const script = wantsFull ? SCRIPT_FULL : SCRIPT;
+
   const api = await get(`${API}/health`);
   if (!api?.agent?.agent_id) {
     console.log(y("\n  Echo is not in the channel yet — press J in the browser first."));
@@ -207,14 +344,27 @@ async function feed() {
     console.log(d(`\n  Echo is in the channel (${api.agent.agent_id})\n`));
   }
 
-  for (const line of SCRIPT) {
+  const seconds = script.reduce((t, l) => t + (l.gap ?? 0), 0);
+  console.log(d(`  ${wantsFull ? "FULL INCIDENT" : "Demo Script v2"} — ${script.length} lines, about ${Math.round(seconds / 6) / 10} minutes\n`));
+
+  for (const line of script) {
     if (line.gap) await sleep(line.gap * 1000);
     const res = await post(`${API}/observer/transcript`,
                            { uid: line.uid, role: line.role, text: line.text });
     const ok = res && !res.error;
     console.log(`  ${ok ? g("✓") : r("✗")} ${d(line.act)} ${line.role.padEnd(17)} ${d(line.text.slice(0, 44) + "…")}`);
   }
-  console.log(d("\n  Script complete. Give the panel ~8s to finish deliberating.\n"));
+  /*
+    The full script is long enough to hit Groq's PER-MINUTE ceiling, not just
+    the daily one. Measured: several 429s, the engine backing off and retrying,
+    and the last findings landing ~40s after the final line rather than ~8s.
+    Nothing is lost — extraction requeues and the panel retries — but a
+    presenter who reads "~8s", sees an incomplete board and starts clicking
+    will talk over their own best moment. So say the real number.
+  */
+  console.log(d(wantsFull
+    ? "\n  Script complete. Allow ~40s — the full run hits Groq's per-minute\n  limit, so the last findings arrive after a retry.\n"
+    : "\n  Script complete. Give the panel ~8s to finish deliberating.\n"));
   return 0;
 }
 
@@ -377,13 +527,13 @@ async function converse() {
       The first version of this re-invited with `userUid: 1001` and looked
       like it worked. It does not: the Roster allocates UIDs sequentially and
       hands the browser whatever is next, so an earlier probe is enough to put
-      the real listener on 1002. Agora subscribes to exactly ONE uid, so an
-      agent invited against a guessed one joins, reports RUNNING, and hears
-      nobody - which is the silently-deaf failure that has already cost this
-      project days.
+      the real listener on 1002.
 
-      Only the browser knows its own UID, so only the browser can invite an
-      agent that will hear it. Clearing the stale entry is the part a script
+      Since Sep 6 the agent subscribes to `["*"]`, so a guessed UID no longer
+      makes it deaf. Re-inviting from here is still wrong for a second reason:
+      the browser has to be joined and publishing before an agent is worth
+      creating, and only the browser knows when that is true. Clearing the
+      stale entry is the part a script
       CAN do correctly: without it the invite is idempotent per channel and
       pressing J would just hand back the same dead agent.
     */
@@ -507,8 +657,9 @@ async function converse() {
   console.log(d("    1. the browser tab is joined and the mic is not muted"));
   console.log(d("    2. the browser console for [voice-agent] - zero updates means"));
   console.log(d("       Agora published no transcript, so the fault is upstream of us"));
-  console.log(d("    3. Echo subscribes to ONE uid - with two people joined it hears"));
-  console.log(d("       whoever pressed J first\n"));
+  console.log(d("    3. Conversational AI transcription enabled on the Agora project"));
+  console.log(d("       (Echo now subscribes to ALL participants, so 'it only hears"));
+  console.log(d("       the first joiner' is no longer a possible cause)\n"));
   return 1;
 }
 
@@ -519,7 +670,8 @@ if (!COMMANDS[cmd]) {
   console.log(`\n  unknown command ${JSON.stringify(cmd)}\n`);
   console.log("  npm run demo          pre-flight check");
   console.log("  npm run demo reset    clean board, stop stray agent");
-  console.log("  npm run demo feed     speak Demo Script v2");
+  console.log("  npm run demo feed     speak Demo Script v2 (5 lines, ~1 min)");
+  console.log("  npm run demo feed full  the whole incident (13 lines, ~2 min)");
   console.log("  npm run demo stop     stop the agent\n");
   process.exit(2);
 }

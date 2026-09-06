@@ -155,6 +155,32 @@ def _similarity(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
+def _named_entities(text: str, aliases: dict[str, str]) -> set[str]:
+    """
+    Which entities does this sentence name OUTRIGHT?
+
+    `aliases` is the Ledger's alias table (`extraction.entity_aliases`),
+    mapping every label, id and alias to a canonical entity id.
+
+    Matched on word boundaries, so "cache" hits "cache read timeouts" but
+    "redis" does not hit "redistribute" — an accidental substring would
+    manufacture exactly the cross-entity pairing this is meant to find
+    honestly. Aliases shorter than three characters are skipped; they are
+    almost always noise ("db", "id") and a two-letter false hit is expensive.
+    """
+    if not aliases or not text:
+        return set()
+
+    low = text.lower()
+    found: set[str] = set()
+    for alias, entity_id in aliases.items():
+        if len(alias) < 3 or alias in _STOP:
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", low):
+            found.add(entity_id)
+    return found
+
+
 ADJUDICATION_PROMPT = """Two claims made about the same system during one incident. Classify the
 LOGICAL relationship between them.
 
@@ -246,19 +272,51 @@ class ContradictionEngine:
     def _pair_key(a: str, b: str) -> tuple[str, str]:
         return (a, b) if a < b else (b, a)
 
-    def scope(self, new: Claim, existing: list[Claim], *, now_ms_: int | None = None) -> list[Claim]:
+    def scope(
+        self,
+        new: Claim,
+        existing: list[Claim],
+        *,
+        now_ms_: int | None = None,
+        aliases: dict[str, str] | None = None,
+    ) -> list[Claim]:
         """
-        Stage 0 — same entity, same incident, inside the window.
+        Stage 0 — same subject, same incident, inside the window.
 
         This single filter removes the large majority of spurious candidates
         before any similarity cost is paid, and it is what makes the
         "Redis memory 40%" / "Postgres memory 40%" false positive impossible
         rather than merely unlikely.
+
+        ── WHY "SAME SUBJECT" IS NOT "SAME `entity` FIELD" ──────────────────
+        It was, and that silently cost the headline contradiction on Sep 6.
+
+        Extraction files each claim under ONE entity id. "The cache is fine"
+        landed on Redis; "application logs are showing cache read timeouts on
+        the checkout path" landed on checkout, because the sentence also names
+        checkout and the model had to pick one. Two claims that cannot both be
+        true were therefore never even compared — `scope` returned [], no panel
+        ran, and nothing appeared on the dashboard or in the room. Nothing
+        errored either, which is what makes this failure mode expensive.
+
+        A claim is ABOUT every system it names, not merely the one that won the
+        extractor's tie-break. So a candidate also qualifies when one claim
+        names the other's entity outright.
+
+        This deliberately does NOT weaken the precision guard above. That guard
+        works because "Redis memory is at 40%" does not contain the word
+        Postgres — mention is required, not merely co-occurrence in the
+        incident, so those two remain unpaired. Widening recall here is also
+        the cheap direction to be wrong in: Stage 3's Panel still decides, and
+        it is tuned to refuse OPPOSED.
+        ────────────────────────────────────────────────────────────────────
         """
         if not new.entity:
             return []
 
         cutoff = (now_ms_ if now_ms_ is not None else new.at) - SCOPE_WINDOW_SECONDS * 1000
+        table = aliases or {}
+        named_by_new = _named_entities(new.text, table)
 
         def _same_utterance(c: Claim) -> bool:
             return (
@@ -266,10 +324,17 @@ class ContradictionEngine:
                 and abs(c.at - new.at) < SAME_UTTERANCE_SECONDS * 1000
             )
 
+        def _same_subject(c: Claim) -> bool:
+            if c.entity == new.entity:
+                return True
+            if c.entity and c.entity in named_by_new:
+                return True
+            return new.entity in _named_entities(c.text, table)
+
         return [
             c for c in existing
             if c.id != new.id
-            and c.entity == new.entity
+            and _same_subject(c)
             # Only claims Echo could actually say are worth conflicting over.
             # A HYPOTHESIS is already visibly unconfirmed, and an INFERRED claim
             # may never be spoken at all (§6.2 Rule 3).
@@ -342,6 +407,7 @@ class ContradictionEngine:
         call_llm: Callable[..., Awaitable[str]] | None = None,
         now: float | None = None,
         use_panel: bool = True,
+        aliases: dict[str, str] | None = None,
     ) -> tuple[Claim, Adjudication | "PanelVerdict"] | None:
         """
         The whole pipeline. Returns the counterpart claim and the verdict when
@@ -368,7 +434,7 @@ class ContradictionEngine:
         if new.epistemic_status not in ("OBSERVED", "TOOL_RESULT"):
             return None
 
-        candidates = self.scope(new, existing)
+        candidates = self.scope(new, existing, aliases=aliases)
         if not candidates:
             return None
 

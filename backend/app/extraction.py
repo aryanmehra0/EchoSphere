@@ -342,18 +342,27 @@ def validate_extraction(
         # judge reading that dashboard sees it do both at once. So the rule is
         # structural, not a prompt instruction: text that hedges CANNOT be a
         # fact, whatever the model called it and whatever tool it cites.
-        if status in ("OBSERVED", "TOOL_RESULT"):
-            hedge = _HEDGE.search(str(claim.get("text", "")))
-            if hedge:
+        hedge = _HEDGE.search(str(claim.get("text", "")))
+        if hedge:
+            if status in ("OBSERVED", "TOOL_RESULT"):
                 log.warning(
                     "extraction: %r hedges (%r) — OBSERVED downgraded to HYPOTHESIS",
                     claim.get("text"), hedge.group(0),
                 )
                 status = "HYPOTHESIS"
-                # A downgraded claim must not keep a fact's confidence. 100%
-                # certainty about a guess is a contradiction in terms, and the
-                # dashboard prints that number next to the row.
-                claim["confidence"] = min(float(claim.get("confidence", 0.8) or 0.8), 0.8)
+
+            # ── THE CAP APPLIES TO ANY HEDGE, NOT ONLY A DOWNGRADED ONE ─────
+            # This used to live inside the branch above, so it ran only when WE
+            # reclassified the claim. When the model returned HYPOTHESIS by
+            # itself the cap never fired, and the board showed
+            #
+            #     [OPEN QUESTION] Redis might be evicting keys ... 100%
+            #
+            # which is the same defect as the original one wearing different
+            # clothes: the pane is right and the number beside it still claims
+            # certainty about a guess. Who assigned the status is irrelevant to
+            # whether the sentence hedges.
+            claim["confidence"] = min(float(claim.get("confidence", 0.8) or 0.8), 0.8)
 
         claim["epistemicStatus"] = status
         claim.setdefault("confidence", 0.8)

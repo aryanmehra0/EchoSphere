@@ -8,7 +8,7 @@
 > **If you are an agent or developer starting a new session: read this file
 > first, then `echosphere_architecture_v6.md`, then `handoff_log.md`.**
 >
-> **Last updated:** September 3, 2026
+> **Last updated:** September 6, 2026
 
 ---
 
@@ -22,12 +22,12 @@
 | **S1 (identity)** | 🟡 Code done and tested — never run against live Agora, two machines |
 | **S2 (Observer)** | 🟡 Adapter seam only. Agent-UID exclusion (G2) live; real PCM blocked on Python 3.14 |
 | **S3 (Ledger/extraction/deltas)** | ✅ Verified live — speech to graph in under 4 s, screenshotted |
-| **S4 (contradiction + RTI)** | ✅ Rebuilt as the Deliberation Panel, Aug 31 — see below |
+| **S4 (contradiction + RTI)** | ✅ Panel Aug 31; **cross-entity scoping fixed Sep 6** — see Session 7 |
 | **S5 (Bridge + Authorization Gate)** | ✅ Verified live: verbal yes denied, wrong role rejected, replay rejected |
 | **S6 (Rig + degradation)** | 🟡 Tiers 1-3 exist; **Tier 3 is new (Aug 31)**. Dress rehearsals below |
 | **7a Deliberation Panel** | ✅ New Aug 31 — replaced the single adjudicator |
 | **10.5 Consent gate** | ✅ New Aug 31 — off the record, verified leaves no trace |
-| **Tests** | **101 frontend** (`npm run verify` green) + **157 backend** = 258 |
+| **Tests** | **124 frontend** (`npm run verify` green) + **202 backend** = 326 |
 | **Voice path** | ✅ Verified live Aug 31 — `spoken: true`, 790 ms. Was never wired before. |
 | **Demo runbook** | `docs/DEMO.md` — three modes, the script, the questions judges ask |
 
@@ -1198,6 +1198,181 @@ spoken question comes back as a spoken answer needs someone to say it out
 loud — `npm run demo speech`.
 
 **Tests: 198 backend + 118 frontend = 316.**
+
+---
+
+### Session 7 — the headline contradiction was silently not firing (Sep 6)
+
+**Ask:** get the project demo-ready against the hackathon problem statement.
+
+Mapping the ten required capabilities onto the code found eight already built
+and verified. Two were not, and the first one mattered a great deal.
+
+#### The contradiction never reached a panel
+
+A clean live run — reset, GO pre-flight, full feed — produced claims, gaps and
+a timeline, and **zero contradictions**. Nothing errored. The dashboard simply
+sat at `00 CONFLICTS` while the Ledger held both halves of the conflict.
+
+`ContradictionEngine.scope` required `c.entity == new.entity`. Extraction files
+each claim under exactly ONE entity, and the two claims the whole demo turns on
+had landed on different ones:
+
+| claim | text | entity |
+|---|---|---|
+| c6 | "The cache is fine" | `e2` Redis |
+| c7 | "cache read timeouts on the checkout path" | `e1` checkout |
+
+c7 names two systems and the extractor had to pick one; it picked checkout. So
+`scope` returned `[]`, no panel ran, and the pair was never compared. The Aug 31
+work had made the *panel* reliable at judging that pair — this bug meant the
+panel was never asked.
+
+**The fix is in `scope`, not in extraction.** A claim is about every system it
+NAMES, not just the one that won the extractor's tie-break, so a candidate now
+also qualifies when one claim names the other's entity. Tuning the extraction
+prompt to file c7 under Redis would have been asking a model for a guarantee it
+cannot give (Rule 8); this is structural.
+
+The row-4 precision guard survives, and deliberately: mention is *required*, so
+"Redis memory 40%" and "Postgres memory 40%" still never pair, because neither
+sentence contains the other's name. Widening recall is also the cheap direction
+to be wrong in — Stage 3's Panel still decides, and it is tuned to refuse
+OPPOSED. Four tests pin all of it, including a substring guard
+("redistribute" must not match "redis") and a no-alias-table case proving old
+callers are unaffected.
+
+After the fix, same script: **OPPOSED, unanimous, 94% confidence** — "The
+presence of cache read timeouts directly contradicts the assertion that the
+cache is fine."
+
+#### Ownership was a feature the demo never showed
+
+Tasks with `assigneeRole` were fully implemented and the Tasks panel stayed
+empty for the entire script, because none of the four lines assigned anything.
+Added Act 3 — the DevOps Lead assigning the connection-pool check to the
+Database Admin, spoken by the Lead so it needs no third UID and no third
+machine. It also closes on Act 1's unchecked assumption.
+
+Echo files the assignment as `INFERRED`, so it shows on the dashboard and is
+filtered out of the voice channel. That is Rule 3 working, not a bug.
+
+#### Verified this session, against the API and a real browser
+
+Close-out speaks and ends on "Root cause is not established"; a verbal "yes"
+returns `authorized:false`; ADVISORY tools execute (`INC-0001`) while both
+CRITICAL tools return `PENDING_APPROVAL` — "voice cannot authorize this" — and
+a replayed Jira call comes back `DEDUPED`.
+
+#### Rule 7 earned its place three times in one session
+
+None of these were product defects, and each looked exactly like one:
+
+1. `/get_config` returned **404** and `/api/health` returned **308**. This
+   environment sets `HTTP_PROXY=http://127.0.0.1:58080`, which `curl`,
+   `requests` AND `urllib` all honour. `trust_env=False` (or a `ProxyHandler({})`
+   opener) turns the same call into a 200.
+2. A headless screenshot showed a completely empty board. `--virtual-time-budget`
+   fast-forwards timers and captures before the real WebSocket round-trip lands.
+   Asserting the SNAPSHOT directly over `ws://` showed the server had everything.
+   **Screenshots of this app must be driven over CDP with a real wait** — and
+   the socket only opens after **J**, by design, so an unjoined page is
+   correctly blank.
+3. The close-out summary printed `4 items � 1`. That is a U+2014 em dash the
+   Windows console cannot render; the wire bytes decode as strict UTF-8.
+
+#### ECHO WAS DEAF — `asr.params` had no `language`, and three params too many
+
+`npm run demo speech` returned **"NOTHING ARRIVED"**. Agora recorded 44 turns,
+22 carrying text, and the text was Echo's own greeting plus `[Silence]`.
+
+That combination is the whole diagnosis: **VAD was segmenting correctly** — 44
+turns is not a microphone that never opened — and the recogniser produced no
+words. The fault was in `asr`, not the mic, not the tunnel, not the roster.
+
+The `agent-quickstart-python/` clone in this repo is the control group: same
+Agora project, same App ID, and it transcribes. So the shapes were compared as
+bytes rather than as intentions, by running the SDK:
+
+```
+DeepgramSTT(model="nova-3", language="en").to_config()
+_resolve_asr_config()        # adds TOP-LEVEL language from turn detection
+resolve_session_presets()    # infers deepgram_nova_3 FROM params.model,
+                             # strips params.model, KEEPS params.language
+```
+
+| | works | EchoSphere (deaf) |
+|---|---|---|
+| `preset` | `deepgram_nova_3,…` | `deepgram_nova_3,openai_gpt_4o_mini` ✅ |
+| `asr.params` | `{language:"en"}` | `{keyterm, smart_format, punctuation}` ❌ |
+| `asr.language` | `"en-US"` | `"en-US"` ✅ |
+
+**`params.language` was missing.** It had been deleted on the reasoning that
+"the session layer overwrites it from turn detection afterwards, so params is
+exactly where it gets thrown away." That is not what the SDK does:
+`_resolve_asr_config` assigns `asr_config["language"]`, the TOP-LEVEL key, and
+never touches `params`. Both fields are on the working wire and they are not
+the same field — one is the interaction language, the other is what reaches
+Deepgram. Note also `en` vs `en-US`; the file's own comment already said `en`
+while the code sent `TURN_DETECTION.language`.
+
+`keyterm` / `smart_format` / `punctuation` were also removed: none appear in
+any payload observed to transcribe, and `keyterm` was one space-separated
+string. Agora validates only `vendor` and forwards `params` unchecked — the
+trap already documented for `tts` — so a param the managed adapter dislikes
+takes the recogniser down silently. Re-add them one at a time, running
+`npm run demo speech` after each.
+
+`buildAgentPayload` now emits the proven shape byte-for-byte, asserted by
+`scripts/dump-payload.mjs`, and two tests pin it: `params.language === "en"`,
+and `Object.keys(params) === ["language"]` as a floor against re-adding an
+untested option.
+
+**Not yet confirmed by a human voice.** Agora accepts the corrected payload
+(agent created, `voiceVerified: true`), but only someone speaking into a
+microphone can close this out — `npm run demo speech`.
+
+#### CORRECTION — `"*"` IS a wildcard, and believing otherwise made Echo deaf to the room
+
+Three people joined on three machines, could all hear each other, and **Echo
+heard none of them**. This is the second half of the deafness, and it is a
+correction to a decision this log previously recorded as a fix.
+
+`agent-config.ts` sent `remote_rtc_uids: [String(params.userUid)]` — one
+person — justified by a long comment asserting that `"*"` is "read as a user ID
+literally named `*`, which nobody has". A test pinned it. **The assertion is
+false.** Agora's documentation for the field:
+
+> "The `*` selector includes all UIDs present in the channel, which may include
+> other AI agents."
+> — docs.agora.io/en/conversational-ai/rest-api/join
+
+Confirmed against the live API as well: `["*"]`, `["1001"]` and
+`["1001","1002","1003"]` are all accepted and all start a running agent. The
+`agora-agents` SDK docstring still says "currently, only one user ID is
+supported" — **it is stale**, and trusting it over the docs is what started
+this.
+
+**Why the original `["*"]` trial looked like it failed.** It was run while the
+`asr` block was broken (no `params.language`, plus a `keyterm` the managed
+adapter would not take), so nothing was going to transcribe no matter who the
+agent subscribed to. Two independent bugs; the wrong one was convicted, and the
+conviction was then written into a comment and a test that kept it alive.
+
+**Nothing else needed changing.** `forwardDecision` already has each browser
+forward ONLY its own speech under its own role, so three speakers produce three
+correctly-attributed streams with no duplicates. The multi-participant design
+was already there and had one field throttling it.
+
+One consequence worth knowing: `idle_timeout` fires when everyone in
+`remote_rtc_uids` has left, and under `"*"` a stray agent in the channel counts
+as somebody — so `npm run demo reset` matters for more than tidiness.
+
+The lesson is the one Rule 7 keeps teaching in a new costume: **two bugs at
+once will frame each other.** When an experiment fails, check that the thing it
+was testing was the only variable.
+
+**Tests: 202 backend + 125 frontend = 327.**
 
 ---
 

@@ -235,17 +235,16 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     joinedChannel.current = cleanChannel;
 
     /*
-      ORDER: credentials FIRST, because the invite needs the UID.
+      ORDER: credentials FIRST, because this browser needs its own UID before
+      it can join RTC or label the speech it forwards.
 
-      Agora's Conversational AI Engine subscribes to exactly ONE participant
-      (`remote_rtc_uids`, and the schema says "currently, only one user ID is
-      supported"). It therefore has to be told WHICH one, and the UID is
-      allocated by the Roster when the token is minted — so the token call has
-      to happen first.
-
-      This used to fire the invite in parallel with a hardcoded `"*"`, which is
-      not a wildcard: the agent subscribed to a participant named `*`, which
-      nobody is, and heard silence for the entire session.
+      Echo itself now subscribes to `["*"]` — every participant in the channel,
+      per Agora's documented wildcard — so the invite no longer decides who
+      Echo can hear. It passes this UID for the Roster and the audit trail, not
+      to pick a single listener. (An earlier comment here claimed `"*"` was not
+      a wildcard and that the agent had to be told which one person to hear.
+      That was wrong, and it made Echo deaf to everyone but the first joiner —
+      see agent-config.ts and session_log §7.)
 
       §17 still holds. The dashboard is already live by this point — the delta
       socket opened above — so neither of these calls can take it down, and the

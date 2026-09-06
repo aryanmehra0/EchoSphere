@@ -388,24 +388,29 @@ describe("Agent configuration", () => {
     );
   });
 
-  test("the agent subscribes to a REAL uid — \"*\" is not a wildcard", () => {
+  test("the agent subscribes to the WHOLE room, not one participant", () => {
     /*
-      The most expensive bug in this project, pinned.
+      CORRECTION, Sep 6 — this test previously asserted the opposite, and was
+      the thing keeping the bug in place.
 
-      `remote_rtc_uids` was `["*"]`, with a comment claiming it meant everyone.
-      The schema says otherwise: "A list of user IDs that the agent subscribes
-      to in the channel. Only subscribed users can interact with the agent.
-      Currently, only one user ID is supported."
+      It pinned `["1001"]` on the claim that `"*"` is "a user id, not a
+      wildcard". Agora's documentation for the field says plainly:
 
-      So `"*"` was read as a participant literally named `*`. Nobody is. The
-      agent subscribed to no one, joined, sat in the channel hearing silence,
-      and produced no transcripts for days — while the create call returned
-      200 throughout, because the value is well-formed and simply matches
-      nothing.
+        "The `*` selector includes all UIDs present in the channel, which may
+         include other AI agents."
+
+      Confirmed against the live API too — `["*"]`, one uid, and three explicit
+      uids are all accepted and all start an agent. The earlier `["*"]` trial
+      produced no transcripts because the `asr` block was broken at the same
+      time, not because the wildcard matched nobody.
+
+      With one uid, Echo heard whoever pressed J first and was deaf to the
+      other two people on the bridge — which is most of the product. Each
+      browser still forwards only its own speech (`forwardDecision`), so
+      attribution stays correct with three speakers.
     */
     const uids = samplePayload("c").properties.remote_rtc_uids;
-    assert.deepEqual(uids, ["1001"], "the agent must subscribe to a real uid");
-    assert.ok(!uids.includes("*"), '"*" is a user id, not a wildcard');
+    assert.deepEqual(uids, ["*"], "Echo must subscribe to every participant");
   });
 
   test("ASR names a vendor — without one Agora runs no recogniser at all", () => {
@@ -439,18 +444,34 @@ describe("Agent configuration", () => {
     );
   });
 
-  test("ASR keyterm biasing covers the demo's technical vocabulary", () => {
+  test("ASR params carry the language Deepgram actually reads", () => {
+    /*
+      `params.language` was absent on Sep 6 and every transcribed turn came
+      back EMPTY — 44 turns segmented, not one word. It was removed on the
+      belief that the session layer "overwrites it from turn detection", but
+      `_resolve_asr_config` assigns the TOP-LEVEL `language` and never touches
+      `params`. Both are on the wire in the working quickstart payload, and
+      they are different fields.
+
+      `en`, not the `en-US` interaction language — this mirrors
+      `DeepgramSTT(model="nova-3", language="en")`.
+    */
     const params = samplePayload("c").properties.asr.params;
-    // `keyterm` is Deepgram's option name. The previous `keywords` array was
-    // not one, so it was silently discarded even had a vendor been set.
-    // "Redis" reliably transcribes as "read us" without biasing, and the
-    // extraction model then invents an entity nobody mentioned.
-    for (const term of ["Redis", "Datadog", "checkout", "failover"]) {
-      assert.ok(
-        params.keyterm.includes(term),
-        `ASR biasing is missing "${term}"`,
-      );
-    }
+    assert.equal(params.language, "en", "Deepgram gets no language to run in");
+  });
+
+  test("ASR sends nothing beyond the payload proven to transcribe", () => {
+    /*
+      Agora validates `vendor` and forwards `params` unchecked, so an option
+      the managed adapter dislikes cannot fail loudly — it fails as silence.
+      `keyterm` (one space-separated string), `smart_format` and `punctuation`
+      were all being sent and none appear in a payload observed to work.
+
+      This is a floor, not a ban: re-add one, run `npm run demo speech`, and
+      update this list only once that run actually returns text.
+    */
+    const params = samplePayload("c").properties.asr.params;
+    assert.deepEqual(Object.keys(params).sort(), ["language"]);
   });
 
   test("ASR language stays in step with turn detection", () => {
