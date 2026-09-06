@@ -307,7 +307,143 @@ async def start(
 
     _sessions[agent_id] = session
     log.info("voice_agent: started agent_id=%s channel=%s", agent_id, channel)
+
+    # ── ONE AGENT PER CHANNEL, ENFORCED AGAINST AGORA ──────────────────────
+    # Adding a person replaces the agent (remote_rtc_uids is fixed at
+    # creation), and nothing reaped the predecessor. Live inspection found
+    # FOUR agents RUNNING on one channel, all subscribed to a single uid and
+    # all answering — which is both "it only listens to one person" and
+    # "the transcript catches only some words", since several agents publish
+    # interleaved frames for the same speech.
+    #
+    # Best effort: a stray we cannot stop must not fail the join.
+    try:
+        reaped = await stop_strays(channel, keep_agent_id=agent_id)
+        if reaped:
+            log.info("voice_agent: reaped %d stray agent(s) on %s", reaped, channel)
+    except Exception:
+        log.warning("voice_agent: stray sweep failed on %s", channel, exc_info=True)
     return {"agent_id": agent_id, "channel": channel, "status": "started"}
+
+
+async def _agent_channel(agent_id: str) -> str | None:
+    """
+    Which channel an agent is serving, read straight off the REST API.
+
+    The SDK's typed models for both `get` and `get_history` omit `channel`,
+    but the history endpoint returns it. Identification matters more than
+    elegance here: a project-wide sweep that cannot tell channels apart would
+    stop an agent serving a different bridge, which is unrecoverable for the
+    people on it.
+
+    Returns None when it cannot be determined, and the caller then leaves the
+    agent alone.
+    """
+    import base64
+
+    import httpx
+
+    settings = config.agora()
+    raw = f"{settings.customer_id}:{settings.customer_secret}".encode()
+    auth = "Basic " + base64.b64encode(raw).decode()
+    url = f"{settings.conv_ai_base}/agents/{agent_id}/history"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            resp = await http.get(url, headers={"Authorization": auth})
+        if not resp.is_success:
+            return None
+        return resp.json().get("channel")
+    except Exception:
+        return None
+
+
+async def stop_strays(channel: str, keep_agent_id: str | None = None) -> int:
+    """
+    Stop every OTHER agent Agora still has running on this channel.
+
+    ── WHY THIS IS NOT HOUSEKEEPING ────────────────────────────────────────
+    Nothing ever reaped them, and they do not expire quickly. Live inspection
+    found FOUR agents RUNNING on `inc-4417` at once, each from a previous
+    join, each subscribed to uid 1001 and each answering out loud.
+
+    That single fact produces both of the symptoms reported:
+
+      - "it only listens to one person" — every one of those agents predates
+        multi-uid subscription, so whichever answered first was pinned to
+        1001 and deaf to 1002 and 1003.
+      - "the transcript only catches some of the words" — several agents
+        share one channel and all publish transcript frames for the same
+        speech. They interleave and interrupt each other, so what any console
+        renders is a shredded mix of several agents' partial views.
+
+    Adding a person REPLACES the agent (remote_rtc_uids is fixed at creation),
+    so without this every join leaves its predecessor behind. Three people
+    joining means three agents in the room.
+
+    Best effort by design: a stray we cannot stop must not fail the join that
+    is trying to fix the room.
+    """
+    client = _agora_client()
+    settings = config.agora()
+    stopped = 0
+
+    try:
+        # `client.agents.list(appid, channel=..., state="RUNNING")` — an async
+        # pager, so it is iterated rather than indexed.
+        # ── LIST WITHOUT FILTERS, FILTER HERE ───────────────────────────
+        # `channel=` and `state=` are accepted and then return an EMPTY list
+        # while agents are demonstrably running: the same project answered
+        # `?channel=inc-4417&state=RUNNING` with zero entries and `?limit=5`
+        # with three RUNNING agents, one of which a direct GET also confirmed.
+        #
+        # So the reaper never saw anything to stop, three agents accumulated
+        # in one channel, and the room heard two Echoes answering over each
+        # other. Ask for everything and do the filtering locally, where it
+        # cannot be silently ignored.
+        pager = client.agents.list(settings.app_id, limit=100)
+        items = [item async for item in pager]
+    except Exception:
+        log.warning("voice_agent: could not list agents on %s", channel, exc_info=True)
+        return 0
+
+    for item in items:
+        aid = getattr(item, "agent_id", None)
+        if not aid or aid == keep_agent_id:
+            continue
+
+        # Only stop what is actually alive. The list carries ended agents too,
+        # and a stop against one of those is a wasted round trip that logs a
+        # scary-looking 404.
+        state = str(getattr(item, "status", "") or "").upper()
+        if state not in ("RUNNING", "STARTING", "CREATING"):
+            continue
+
+        # ── CONFIRM THE CHANNEL BEFORE STOPPING ANYTHING ────────────────────
+        # The list response carries only {agent_id, status, start_ts} — no
+        # channel — so a project-wide sweep would happily kill an agent
+        # serving a DIFFERENT bridge. `get` is the only place the channel is
+        # exposed, so each candidate is confirmed individually.
+        #
+        # An agent we cannot identify is LEFT ALONE. Killing the wrong bridge
+        # is unrecoverable for the people on it; leaving a stray costs one
+        # duplicate voice that the next join will clear.
+        # ── THE SDK MODELS DROP `channel`, SO ASK REST DIRECTLY ────────────
+        # `agents.get` returns {message, start_ts, stop_ts, status, agent_id}
+        # and `agents.get_history` parses into {agent_id, start_ts, status,
+        # contents} — neither model keeps `channel`, though the raw history
+        # JSON carries it. Rather than guess, read the field off the wire.
+        if await _agent_channel(aid) != channel:
+            continue
+        try:
+            await client.stop_agent(aid)
+            _sessions.pop(aid, None)
+            stopped += 1
+            log.info("voice_agent: stopped stray agent %s on %s", aid, channel)
+        except Exception:
+            log.warning("voice_agent: could not stop stray %s", aid, exc_info=True)
+
+    return stopped
 
 
 async def stop(agent_id: str) -> None:

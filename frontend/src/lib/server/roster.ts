@@ -121,6 +121,24 @@ function channelMap(channel: string): Map<number, RosterEntry> {
  * first channel is 1001 and the demo narrates the same way it always did.
  */
 export function allocateHumanUid(channel: string): number {
+  /*
+    Expired rows are reclaimed first.
+
+    Nothing ever removed a roster entry, and uids are now allocated across ALL
+    channels (an RTM identity is app-wide), so the 1000-8999 range is a shared,
+    monotonically shrinking pool. A long-lived server would eventually hand out
+    "No free UID" to a bridge with three people on it.
+
+    A row past its token expiry cannot correspond to anyone still connected —
+    the token they hold has expired too — so the uid is free to reissue.
+  */
+  const now = Date.now();
+  for (const entries of store.values()) {
+    for (const [uid, entry] of [...entries]) {
+      if (entry.expiresAt <= now) entries.delete(uid);
+    }
+  }
+
   const taken = new Set<number>();
   for (const entries of store.values()) {
     for (const uid of entries.keys()) taken.add(uid);

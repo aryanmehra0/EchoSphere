@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import config
+from . import store
 from .bridge import BridgeController
 from .contradiction import ContradictionEngine
 from .degradation import Degradation
@@ -105,12 +106,25 @@ async def lifespan(app: FastAPI):
             except Exception:  # noqa: BLE001 — a bad window must not kill the loop
                 log.exception("flush ticker failed")
 
+    # ── DURABILITY, AND WHY IT IS OPTIONAL ──────────────────────────────
+    # `connect` never raises: a machine with no Docker must still run the
+    # bridge, degrading to the in-memory Ledger it has always used. Whether
+    # persistence is actually on is reported by /health rather than assumed.
+    if await store.connect():
+        try:
+            restored = await ledger.restore()
+            if restored:
+                log.info("Ledger restored from Postgres: %d rows", restored)
+        except Exception:
+            log.exception("could not restore the Ledger — continuing empty")
+
     ticker = asyncio.create_task(flush_ticker())
     log.info("Slow Loop up. observer mode=%s", config.observer_mode())
 
     yield
 
     ticker.cancel()
+    await store.close()
     await _http.aclose()
 
 
@@ -235,6 +249,10 @@ async def health() -> JSONResponse:
             "credentials": creds,
             "missing": missing,
             "observerMode": config.observer_mode(),
+            # Surfaced, never assumed: a silent fallback to an in-memory
+            # Ledger is exactly the kind of quiet degradation this project
+            # keeps having to hunt down after the fact.
+            "persistence": store.status(),
             "degraded": degraded.to_wire(),
             "agent": _agent,
             "seq": hub.seq,
@@ -258,6 +276,31 @@ async def health() -> JSONResponse:
 # ---------------------------------------------------------------------------
 # Agent creation — the SDK path (see app/voice_agent.py)
 # ---------------------------------------------------------------------------
+
+def _with_recap(prompt: str) -> str:
+    """
+    Append the Ledger recap to a system prompt, when there is one.
+
+    A replacement agent starts with an empty history, so without this the
+    person who joins third can ask what has been established and be told
+    nothing, while the dashboard beside them shows a full Ledger.
+    """
+    try:
+        recap = ledger.recap()
+    except Exception:
+        log.warning("could not build the ledger recap", exc_info=True)
+        return prompt
+    if not recap:
+        return prompt
+
+    header = (
+        "[WHAT THIS BRIDGE HAS ALREADY ESTABLISHED]\n"
+        "You are joining an incident already in progress. What follows is"
+        " the record so far, attributed. Treat it as the record, not as"
+        " your own recollection, and keep attributing it when you refer"
+        " to it.\n\n"
+    )
+    return prompt + "\n\n" + header + recap
 
 @app.post("/agent/start")
 async def start_agent(body: dict[str, Any]) -> JSONResponse:
@@ -292,7 +335,17 @@ async def start_agent(body: dict[str, Any]) -> JSONResponse:
             # Everyone else already on the bridge, so Echo can hear the whole
             # room rather than only the console that invited it.
             other_uids=[int(u) for u in (body.get("otherUids") or []) if int(u) > 0],
-            system_prompt=prompt,
+            # ── HAND A REPLACEMENT AGENT THE INCIDENT SO FAR ───────────────
+            # Adding a speaker means a NEW agent (remote_rtc_uids is fixed at
+            # creation), and a new agent starts with an empty history. Without
+            # this, whoever joins third can ask "what have we established?"
+            # and be told nothing — while the dashboard beside them shows a
+            # full Ledger.
+            #
+            # The recap is attributed and non-diagnostic by construction, and
+            # INFERRED claims are excluded, so nothing enters the prompt that
+            # the model could mistake for its own knowledge.
+            system_prompt=_with_recap(prompt),
             tts=body.get("tts") or {},
             greeting=body.get("greeting"),
             llm_mode=(body.get("llmMode") or "managed"),
@@ -871,7 +924,14 @@ async def reset_incident() -> dict[str, Any]:
     purged, not retained.
     """
     global ledger
-    ledger = Ledger()
+
+    # §10.4 says transcripts and derived state are PURGED, not retained, so
+    # the durable copy goes with the in-memory one. `global` has to come
+    # first: Python binds the declaration for the whole function body, so
+    # reading `ledger.channel` above it is a SyntaxError, not a warning.
+    channel = ledger.channel
+    await store.clear(channel)
+    ledger = Ledger(channel=channel)
 
     # The window and the cooldown table are incident state too. Leaving frames
     # in the window would let the previous run's last sentence be extracted into
@@ -1008,6 +1068,11 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
     # window; the flush ticker handles the silence rule. `add` also rejects a
     # repeat of an utterance already accepted.
     accepted = window.add(t)
+
+    # The raw record beneath the claims. "What exactly was said" is where
+    # every disputed claim ends up, and extraction is not reversible.
+    if accepted:
+        store.save(t, ledger.channel)
 
     # A duplicate is not re-published either. The reducer would dedupe it by
     # messageId, but a delta that changes nothing still costs a render on every

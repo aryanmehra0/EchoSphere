@@ -177,6 +177,38 @@ def credential_status() -> dict[str, bool]:
     }
 
 
+def database_url() -> str:
+    """
+    Postgres DSN for the Evidence Ledger, or "" when persistence is off.
+
+    ── WHY ABSENCE IS A VALID CONFIGURATION ────────────────────────────────
+    The Slow Loop must still run with no database. §17's standing rule is that
+    the dashboard never depends on the Fast Loop, and the same reasoning
+    applies downward: a demo on a laptop with no Docker should degrade to the
+    in-memory Ledger it has always used, not refuse to start.
+
+    So this returns "" rather than raising, and `store.py` treats that as
+    "persistence disabled". `docker-compose.yml` publishes 5433, not 5432 —
+    developer machines very often already run a Postgres on the default port,
+    and connecting to the wrong server produces a confusing "database exists
+    but the tables are missing".
+    """
+    return _optional(
+        "DATABASE_URL", "postgresql://echo:echo@127.0.0.1:5433/echosphere"
+    )
+
+
+def persistence_enabled() -> bool:
+    """
+    Whether to persist the Ledger at all.
+
+    Explicit opt-out via `LEDGER_PERSISTENCE=off`, because a developer running
+    the Rehearsal Rig against a scratch incident should be able to keep the
+    database out of the picture without stopping the container.
+    """
+    return _optional("LEDGER_PERSISTENCE", "on").lower() not in ("off", "0", "false")
+
+
 def tool_secret() -> str:
     """
     Shared secret for tool calls that arrive from outside this machine.

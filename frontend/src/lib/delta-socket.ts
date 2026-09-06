@@ -355,7 +355,18 @@ export async function requestBridgeCredentials(
     own uid, but a reload is the same person and must not.
   */
   let remembered: number | null = null;
-  const storageKey = `echo:uid:${channel}`;
+  /*
+    Keyed by ROLE as well as channel.
+
+    With only the channel in the key, switching role in the same tab renewed
+    the uid already issued for the previous role. `putEntry` then overwrote
+    that roster row, so the same person could hold two roles across a reload —
+    or, worse, keep speaking as the role they had abandoned, since the Ledger
+    attributes claims by the roster's role for that uid.
+
+    A different role is a different participant. It gets its own uid.
+  */
+  const storageKey = `echo:uid:${channel}:${role}`;
   try {
     const raw = sessionStorage.getItem(storageKey);
     const parsed = raw === null ? Number.NaN : Number(raw);

@@ -92,6 +92,38 @@ export class VoiceAgent {
   private readonly delivered = new Set<string>();
 
   /**
+   * Cap on `delivered`, because it is otherwise append-only.
+   *
+   * Every finished turn adds a key and nothing removes one until `stop()`. A
+   * bridge that runs for hours with three people talking accumulates keys
+   * without limit — a slow leak in the one tab nobody reloads, which is
+   * exactly the tab that has to survive the whole incident.
+   *
+   * Turn ids only ever move forward, so a key old enough to fall out of this
+   * window can never be re-emitted; trimming the oldest is safe. 5000 is far
+   * beyond any real burst while staying trivial in memory.
+   */
+  private static readonly MAX_DELIVERED = 5000;
+
+  /** Record a delivered turn, trimming the oldest keys past the cap. */
+  private markDelivered(key: string): void {
+    // `this.delivered.add`, NOT `this.markDelivered` — a blanket rename of the
+    // call sites rewrote this line too and made the method call itself, so
+    // every finished turn died in "Maximum call stack size exceeded" before it
+    // could be forwarded. Nothing reached the Slow Loop and the transcript
+    // panel stayed empty, with the only evidence a stack trace in DevTools.
+    this.delivered.add(key);
+    if (this.delivered.size <= VoiceAgent.MAX_DELIVERED) return;
+    // Set preserves insertion order, so the first N are the oldest.
+    const excess = this.delivered.size - VoiceAgent.MAX_DELIVERED;
+    let removed = 0;
+    for (const old of this.delivered) {
+      this.delivered.delete(old);
+      if (++removed >= excess) break;
+    }
+  }
+
+  /**
    * Turns seen at END but not yet forwarded, with the longest text so far.
    *
    * ── WHY A TURN AT "END" IS NOT FINISHED ─────────────────────────────────
@@ -273,7 +305,29 @@ export class VoiceAgent {
    */
   private drain(items: ToolkitItem[], selfUid: number, role: ParticipantRole): void {
     for (const item of items) {
-      if (item.status !== TurnStatus.END) continue;
+      /*
+        ── IN_PROGRESS TEXT IS NOT DISPOSABLE ────────────────────────────────
+        This skipped every non-END item, and that threw away words.
+
+        The recogniser streams a turn as IN_PROGRESS and the text grows with
+        each update. The END that follows is NOT guaranteed to carry the
+        longest version — it can arrive as a shorter re-segmentation, and an
+        INTERRUPTED turn (someone talked over someone else, which is normal on
+        a three-person bridge) may never reach END at all. Either way the
+        fuller IN_PROGRESS reading had already been discarded, so the panel
+        showed a fragment of what was said.
+
+        Every status is now recorded; `settling` keeps the longest text seen
+        for the turn and forwards once it stops changing. INTERRUPTED is
+        treated as final immediately, because nothing more is coming.
+      */
+      if (
+        item.status !== TurnStatus.END &&
+        item.status !== TurnStatus.IN_PROGRESS &&
+        item.status !== TurnStatus.INTERRUPTED
+      ) {
+        continue;
+      }
 
       /*
         Keyed on `stream_id`, NOT `uid`.
@@ -321,7 +375,7 @@ export class VoiceAgent {
             const settled = this.settling.get(key);
             this.settling.delete(key);
             if (!settled) return;
-            this.delivered.add(key);
+            this.markDelivered(key);
             this.emit(item, settled.text, selfUid, role);
           }, VoiceAgent.SETTLE_MS);
           this.settling.set(key, { text: pending.text, timer });
@@ -329,11 +383,24 @@ export class VoiceAgent {
         }
       }
 
+      /*
+        An INTERRUPTED turn is over — the speaker was cut off and no further
+        update is coming for it. Waiting out the settle window would only
+        delay it, and on a three-person bridge people interrupt constantly.
+      */
+      if (item.status === TurnStatus.INTERRUPTED) {
+        const best = pending && pending.text.length > text.length ? pending.text : text;
+        this.settling.delete(key);
+        this.markDelivered(key);
+        this.emit(item, best, selfUid, role);
+        continue;
+      }
+
       const timer = setTimeout(() => {
         const settled = this.settling.get(key);
         this.settling.delete(key);
         if (!settled) return;
-        this.delivered.add(key);
+        this.markDelivered(key);
         this.emit(item, settled.text, selfUid, role);
       }, VoiceAgent.SETTLE_MS);
 
@@ -359,6 +426,20 @@ export class VoiceAgent {
       `stream_id` survives that relabelling untouched and holds the RTC uid of
       whoever actually spoke.
     */
+    /*
+      ── NEVER FORWARD AN EMPTY TURN ─────────────────────────────────────────
+      `drain` skips empty text on the way in, but that is not sufficient now
+      that IN_PROGRESS turns are accepted: a turn can be held with real text
+      and then re-emitted empty by the recogniser, and VAD fires on coughs and
+      room noise, producing turns whose content never becomes a word.
+
+      Forwarding one publishes a blank line into the transcript panel and a
+      sourceless row into the Ledger — a claim attributed to a named human who
+      said nothing. That is worse than a missing line, because it is a record
+      of something that did not happen.
+    */
+    if (!text.trim()) return;
+
     const isAgentTurn = item.metadata?.object === MessageType.AGENT_TRANSCRIPTION;
     const streamUid = Number(item.stream_id);
     const resolvedUid = isAgentTurn
@@ -373,7 +454,25 @@ export class VoiceAgent {
       uid: resolvedUid,
       text,
       isFinal: true,
-      messageId: `${item.stream_id}:${item.turn_id}`,
+      /*
+        ── THE ID MUST BE UNIQUE ACROSS SPEAKERS, NOT JUST WITHIN ONE ───────
+        The Slow Loop's `TurnWindow.add` dedupes on `message_id` ALONE — it
+        never looks at the uid — and drops any repeat as an already-seen
+        utterance.
+
+        `turn_id` is numbered per speaker and restarts at 1 for each of them,
+        so `${stream_id}:${turn_id}` still collided the moment two people were
+        talking: DevOps turn 3 and the DBA's turn 3 produced the same id under
+        different stream_ids only if stream_id differed — and when the toolkit
+        reports the same stream for a relabelled turn, the second speaker's
+        sentence vanished into "dropped duplicate transcript" with nothing on
+        screen to say so.
+
+        `resolvedUid` is the speaker the Ledger will attribute this to, so it
+        is exactly the right thing to key on. Including the channel-scoped uid
+        makes the id unique across the whole bridge.
+      */
+      messageId: `${resolvedUid}:${item.stream_id}:${item.turn_id}`,
       object: isAgentTurn ? "assistant.transcription" : "",
     };
 

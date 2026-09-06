@@ -109,6 +109,26 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   /** Handles for the in-flight replay, so closing the bridge can cancel it. */
   const timers = useRef<number[]>([]);
 
+  /**
+   * A join already in flight, so a second one cannot start on top of it.
+   *
+   * ── WHY THIS IS NOT DEFENSIVE PROGRAMMING ───────────────────────────────
+   * `openBridge` is reachable from the J key AND the button, neither of which
+   * debounced. Pressing J twice, or clicking while the first join is still
+   * negotiating, ran the whole sequence concurrently — and the second run
+   * constructed a SECOND RTM client for the same uid before the first had
+   * finished logging out. Agora says so directly:
+   *
+   *     <RTM> Ins id is 2, please pay attention to avoid mutual kick issues
+   *
+   * The two instances then kick each other. RTM is where the transcript feed
+   * arrives (`data_channel: "rtm"`), so the loser stops receiving transcripts
+   * entirely — which is the "it stops listening to the other person" that
+   * looked like a timeout but never recovered, because nothing retries a
+   * connection that believes it is still open.
+   */
+  const joining = useRef(false);
+
   const clearTimers = useCallback(() => {
     timers.current.forEach(window.clearTimeout);
     timers.current = [];
@@ -188,6 +208,14 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   const openBridge = useCallback(async ({ channel, role }: BridgeJoinOptions) => {
     const cleanChannel = channel.trim();
     if (!cleanChannel) return;
+
+    // See `joining` above: a concurrent join creates a second RTM client for
+    // the same uid, and the two kick each other off the transcript feed.
+    if (joining.current) {
+      console.info("[bridge] join already in progress — ignoring duplicate request");
+      return;
+    }
+    joining.current = true;
 
     clearTimers();
     socket.current?.close();
@@ -378,6 +406,10 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
           },
         },
       });
+    } finally {
+      // Released on EVERY path — success, throw, or the degraded fallback.
+      // A flag left set would block every future join with no way back.
+      joining.current = false;
     }
   }, [clearTimers, startReplay]);
 

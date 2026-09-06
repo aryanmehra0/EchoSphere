@@ -34,3 +34,9 @@ groq>=0.11
 #   2. py -3.12 -m venv .venv312
 #   3. .venv312/Scripts/pip install -r requirements.txt agora-python-server-sdk
 #   4. set OBSERVER_MODE=agora
+
+# Durable Evidence Ledger (docker-compose.yml brings up Postgres).
+# OPTIONAL at runtime: store.py degrades to an in-memory Ledger when the
+# database is unreachable, because a laptop with no Docker must still be
+# able to run the bridge.
+asyncpg>=0.29

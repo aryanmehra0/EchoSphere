@@ -262,7 +262,25 @@ export class AgoraBridge {
     this.rtm = null;
     if (rtm) {
       try {
+        /*
+          ── AWAITED, AND THEN GIVEN A BEAT ──────────────────────────────────
+          `logout()` resolves before the SDK has released its instance slot,
+          so a join that begins immediately afterwards constructs a SECOND RTM
+          client for the same uid and Agora warns:
+
+              <RTM> Ins id is 2 ... avoid mutual kick issues
+
+          The two instances then kick each other, and because the transcript
+          feed arrives over RTM (`data_channel: "rtm"`) the loser goes silent
+          for the rest of the session — the "it stops listening to the other
+          person" that never recovered on its own.
+
+          The real guard is `joining` in `incident-store.tsx`, which stops two
+          joins overlapping at all. This is the belt to that braces: a short
+          settle so a legitimate rejoin does not race the SDK's own teardown.
+        */
         await rtm.logout();
+        await new Promise((resolve) => setTimeout(resolve, 150));
       } catch {
         // A half-open RTM connection is already being discarded.
       }

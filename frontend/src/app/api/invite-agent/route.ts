@@ -176,6 +176,25 @@ export async function POST(request: Request) {
   const existing = getActiveAgent(channel);
   let reuseExisting = false;
 
+  /*
+    ── CARRY THE OUTGOING AGENT'S SUBSCRIBERS INTO ITS REPLACEMENT ──────────
+    Agora fixes `remote_rtc_uids` at creation, so adding a third person means
+    building a NEW agent. `forgetAgent` then erased the old one's subscriber
+    list and the rebuild was gathered from the roster alone.
+
+    That is why Echo ended up listening only to whoever joined LAST: each join
+    replaced the agent, and if the roster lookup missed the earlier joiners —
+    a reload that reused a uid, a row past its token expiry — the replacement
+    subscribed to the newcomer and nobody else. Person 3 could talk to it;
+    persons 1 and 2 had been silently dropped by the very join that was
+    supposed to add someone.
+
+    So the previous agent's subscribers are remembered here and merged into
+    the new one. The roster is the primary source; this is the floor beneath
+    it, and it means each join can only ever ADD ears, never remove them.
+  */
+  const inheritedUids = existing?.subscribedUids ?? [];
+
   if (existing && !existing.subscribedUids.includes(userUid)) {
     /*
       ── THE AGENT LISTENS TO ONE UID, AND THIS CONSOLE IS NOT IT ────────────
@@ -307,9 +326,26 @@ export async function POST(request: Request) {
       person Echo could hear — the other roles spoke to an agent that never
       ran a recogniser on their audio.
     */
-    const humans = (await getRoster(channel))
-      .filter((e) => e.kind === "human" && e.uid !== userUid)
+    /*
+      LIVE entries only. The roster never evicts, so it accumulates a uid for
+      every person who has ever held a token on this channel — including
+      reloads that took a new uid and demos from an hour ago.
+
+      Subscribing to those costs more than noise: `idle_timeout` stops the
+      agent only once EVERY subscribed user has left the channel, so a list
+      padded with uids that will never join again keeps a dead agent alive
+      (and billing) for its full timeout.
+    */
+    const now = Date.now();
+    const rosterUids = (await getRoster(channel))
+      .filter((e) => e.kind === "human" && e.expiresAt > now)
       .map((e) => e.uid);
+
+    // Roster first, then anyone the agent we are replacing could already hear.
+    // Excludes this console (added separately as `userUid`) and the agent.
+    const humans = [...new Set([...rosterUids, ...inheritedUids])].filter(
+      (uid) => uid !== userUid && uid !== AGENT_UID && uid > 0,
+    );
 
     const started = await startAgentViaSlowLoop({
       channel,
@@ -328,7 +364,13 @@ export async function POST(request: Request) {
         The Bridge still speaks its own line too when the Slow Loop wants one;
         this is the engine-level greeting that proves the LLM leg is alive.
       */
-      greeting: DEFAULT_GREETING,
+      /*
+        Only a genuinely NEW session announces itself. Adding a third person
+        replaces the agent, and an agent that reintroduces itself every time
+        someone joins talks over a bridge that is already in progress — the
+        filler §14.1 forbids, arriving through the join path.
+      */
+      greeting: inheritedUids.length > 0 ? "" : DEFAULT_GREETING,
       tts: {
         vendor,
         apiKey: serverEnv.ttsApiKey,
@@ -343,7 +385,7 @@ export async function POST(request: Request) {
       groqApiKey: fastLoop.apiKey,
       groqModel: fastLoop.model,
       ...(toolsBlock.tools ? { tools: toolsBlock.tools } : {}),
-      greet: true,
+      greet: inheritedUids.length === 0,
     });
 
     if (!started.ok) {

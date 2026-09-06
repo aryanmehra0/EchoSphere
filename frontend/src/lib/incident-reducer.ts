@@ -180,6 +180,20 @@ export function incidentReducer(
      */
     case "TRANSCRIPT": {
       const incoming = action.payload;
+
+      /*
+        ── A BLANK TURN IS NOT A TURN ──────────────────────────────────────
+        VAD fires on coughs, chair scrapes and room noise, so the recogniser
+        emits turns whose text never becomes a word. Rendering one puts an
+        empty row in the transcript feed attributed to a named human — a
+        record that someone spoke when they did not, which is worse than a
+        missing line in a product whose whole claim is careful attribution.
+
+        Guarded here rather than only at the producer because transcripts
+        reach this reducer from two places: the local toolkit AND the Slow
+        Loop's delta socket. This is the one point both pass through.
+      */
+      if (!incoming.text?.trim()) return state;
       const at = state.transcripts.findIndex(
         (t) => t.messageId === incoming.messageId,
       );

@@ -24,6 +24,18 @@ import {
   buildTtsConfig,
 } from "../src/lib/server/agent-config.ts";
 
+
+/**
+ * Fixture expiry.
+ *
+ * These rows used to say `expiresAt: FUTURE` — two milliseconds after the epoch, so
+ * permanently expired. That was harmless until `allocateHumanUid` began
+ * reclaiming expired uids (it must, or the shared 1000-8999 pool leaks), at
+ * which point every fixture evicted itself and the allocator handed out the
+ * same uid twice. These tests assert allocation and authorisation, not expiry,
+ * so the rows simply need to be alive.
+ */
+const FUTURE = Date.now() + 3_600_000;
 /**
  * ============================================================================
  * S1 — Fast Loop identity layer
@@ -59,7 +71,7 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
       kind: "human",
       authorized: true,
       issuedAt: 1,
-      expiresAt: 2,
+      expiresAt: FUTURE,
     });
     const b = allocateHumanUid("inc-1");
 
@@ -92,7 +104,7 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
       kind: "human",
       authorized: true,
       issuedAt: 1,
-      expiresAt: 2,
+      expiresAt: FUTURE,
     });
 
     assert.notEqual(
@@ -114,7 +126,7 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
           kind: "human",
           authorized: true,
           issuedAt: 1,
-          expiresAt: 2,
+          expiresAt: FUTURE,
         }),
       RosterWriteError,
     );
@@ -128,7 +140,7 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
           kind: "human",
           authorized: true,
           issuedAt: 1,
-          expiresAt: 2,
+          expiresAt: FUTURE,
         }),
       RosterWriteError,
     );
@@ -155,19 +167,19 @@ describe("Observer view — agent exclusion (precondition for G2)", () => {
   const seed = async () => {
     await putEntry({
       channel: "inc-1", uid: 1001, role: "DevOps Lead", kind: "human",
-      authorized: true, issuedAt: 1, expiresAt: 2,
+      authorized: true, issuedAt: 1, expiresAt: FUTURE,
     });
     await putEntry({
       channel: "inc-1", uid: 1002, role: "Support Engineer", kind: "human",
-      authorized: false, issuedAt: 1, expiresAt: 2,
+      authorized: false, issuedAt: 1, expiresAt: FUTURE,
     });
     await putEntry({
       channel: "inc-1", uid: AGENT_UID, role: "Echo", kind: "agent",
-      authorized: false, issuedAt: 1, expiresAt: 2,
+      authorized: false, issuedAt: 1, expiresAt: FUTURE,
     });
     await putEntry({
       channel: "inc-1", uid: OBSERVER_UID, role: "Echo", kind: "observer",
-      authorized: false, issuedAt: 1, expiresAt: 2,
+      authorized: false, issuedAt: 1, expiresAt: FUTURE,
     });
   };
 
@@ -197,7 +209,7 @@ describe("Observer view — agent exclusion (precondition for G2)", () => {
     await seed();
     await putEntry({
       channel: "inc-1", uid: 9500, role: "Echo", kind: "agent",
-      authorized: false, issuedAt: 1, expiresAt: 2,
+      authorized: false, issuedAt: 1, expiresAt: FUTURE,
     });
 
     const { exclude } = await getObserverView("inc-1");

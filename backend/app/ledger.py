@@ -15,6 +15,10 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+import logging
+from dataclasses import fields as dataclass_fields
+
+from . import store
 from .models import (
     Claim,
     Contradiction,
@@ -54,6 +58,10 @@ class Ledger:
     incident_id: str = "INC-4417"
     started_at: int = field(default_factory=now_ms)
     phase: str = "triage"
+
+    # Which bridge this record belongs to. Persisted rows are keyed
+    # (channel, id) so a second incident cannot collide with the first.
+    channel: str = "inc-4417"
 
     entities: dict[str, Entity] = field(default_factory=dict)
     links: dict[str, Link] = field(default_factory=dict)
@@ -107,32 +115,92 @@ class Ledger:
                     return existing
 
         self.claims[claim.id] = claim
+        store.save(claim, self.channel)
         return claim
 
     def upsert_entity(self, entity: Entity) -> Entity:
         self.entities[entity.id] = entity
+        store.save(entity, self.channel)
         return entity
 
     def upsert_link(self, link: Link) -> Link:
         self.links[link.id] = link
+        store.save(link, self.channel)
         return link
 
     def upsert_unchecked(self, item: Unchecked) -> Unchecked:
         self.unchecked[item.id] = item
+        store.save(item, self.channel)
         return item
 
     def upsert_task(self, task: Task) -> Task:
         self.tasks[task.id] = task
+        store.save(task, self.channel)
         return task
 
     def upsert_contradiction(self, cx: Contradiction) -> Contradiction:
         self.contradictions[cx.id] = cx
+        store.save(cx, self.channel)
         return cx
 
     def add_timeline(self, event: TimelineEvent) -> TimelineEvent:
         self.timeline.append(event)
         self.timeline.sort(key=lambda e: e.at)
+        store.save(event, self.channel)
         return event
+
+    async def restore(self) -> int:
+        """
+        Rehydrate this Ledger from Postgres. Returns the number of rows read.
+
+        ── WHY A RESTART SHOULD NOT LOSE THE INCIDENT ──────────────────────
+        The Ledger is the record. Restarting the Slow Loop mid-bridge used to
+        erase every claim while the humans were still talking, and there was
+        no way to review an incident afterwards — which is most of what an
+        incident record is for.
+
+        Rows are constructed by keyword from the column names, which match the
+        dataclass fields exactly. A column the model no longer has is dropped
+        rather than raising: a schema slightly ahead of the code must not stop
+        the service from starting.
+        """
+        rows = await store.load(self.channel)
+        if not rows:
+            return 0
+
+        def build(cls, payload: dict) -> object | None:
+            names = {f.name for f in dataclass_fields(cls)}
+            try:
+                return cls(**{k: v for k, v in payload.items() if k in names})
+            except Exception:
+                log.warning("ledger: skipped an unreadable %s row", cls.__name__)
+                return None
+
+        count = 0
+        for row in rows.get("entities", []):
+            e = build(Entity, row)
+            if e: self.entities[e.id] = e; count += 1
+        for row in rows.get("links", []):
+            l = build(Link, row)
+            if l: self.links[l.id] = l; count += 1
+        for row in rows.get("claims", []):
+            c = build(Claim, row)
+            if c: self.claims[c.id] = c; count += 1
+        for row in rows.get("unchecked", []):
+            u = build(Unchecked, row)
+            if u: self.unchecked[u.id] = u; count += 1
+        for row in rows.get("tasks", []):
+            t = build(Task, row)
+            if t: self.tasks[t.id] = t; count += 1
+        for row in rows.get("contradictions", []):
+            x = build(Contradiction, row)
+            if x: self.contradictions[x.id] = x; count += 1
+        for row in rows.get("timeline", []):
+            ev = build(TimelineEvent, row)
+            if ev: self.timeline.append(ev); count += 1
+        self.timeline.sort(key=lambda e: e.at)
+
+        return count
 
     # -- projections (mirror of the frontend selectors) --------------------
 
@@ -169,6 +237,51 @@ class Ledger:
 
     def claims_about(self, entity: str) -> list[Claim]:
         return [c for c in self.claims.values() if c.entity == entity]
+
+    def recap(self, max_claims: int = 12) -> str:
+        """
+        A compact, plain-text summary of the incident so far.
+
+        ── WHY THIS EXISTS: CONTEXT SURVIVES THE AGENT, THE AGENT DOES NOT ──
+        Agora fixes `remote_rtc_uids` at creation, so admitting a new speaker
+        means building a NEW agent — and a new agent starts with an empty
+        `max_history`. Everything said before it existed is gone from its
+        working memory, so the third person to join could ask "what did we
+        just establish?" and be told nothing had been.
+
+        The Ledger is the durable record and outlives every agent, so a
+        replacement is handed this recap in its system prompt and resumes
+        mid-incident instead of starting cold.
+
+        Deliberately ATTRIBUTED and deliberately NOT diagnostic: it repeats
+        who said what, never what it means. Feeding an unsourced summary into
+        the prompt would let the model treat it as its own knowledge, which is
+        exactly the failure §6 exists to prevent.
+        """
+        if not self.claims and not self.timeline:
+            return ""
+
+        lines: list[str] = []
+
+        claims = sorted(self.claims.values(), key=lambda c: c.at)[-max_claims:]
+        if claims:
+            lines.append("Already on the record (most recent last):")
+            for c in claims:
+                status = getattr(c, "epistemic_status", "") or ""
+                # INFERRED claims never enter a prompt — §6.2 Rule 3. They are
+                # the model's own guesses and must not return to it as fact.
+                if status == "INFERRED":
+                    continue
+                who = getattr(c, "speaker_role", None) or "someone"
+                lines.append(f"  - {who} said: {c.text}")
+
+        unchecked = [u for u in self.open_unchecked()][:5]
+        if unchecked:
+            lines.append("Nobody has verified:")
+            for u in unchecked:
+                lines.append(f"  - {u.text}")
+
+        return chr(10).join(lines)
 
     # -- the read the Fast Loop's tool hits (§5.2) -------------------------
 
