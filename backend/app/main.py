@@ -172,6 +172,38 @@ async def tunnel_gate(request: Request, call_next):  # type: ignore[no-untyped-d
     if request.url.path in ("/health", "/"):
         return await call_next(request)
 
+    # ── CORS PREFLIGHTS CANNOT CARRY THE TOKEN ─────────────────────────────
+    #
+    # A browser sends OPTIONS *before* the real request and is forbidden from
+    # attaching custom headers to it, so `x-echo-tool-token` is never present.
+    # Refusing it 401 kills the request that follows, and the browser reports
+    # only "Failed to fetch" — which surfaced here as
+    # "Transcript forwarding paused: Failed to fetch", naming neither CORS nor
+    # this gate.
+    #
+    # Answering the preflight grants nothing: it returns headers, never data,
+    # and the POST behind it is still gated below.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # ── THE CONSOLE'S OWN BROWSER PATHS ────────────────────────────────────
+    #
+    # This gate was written for ONE remote caller: Agora's servers invoking
+    # /tools/*. Sharing the console over a tunnel added a second, which the
+    # gate had never seen — the guest's BROWSER, which holds no secret and
+    # must never be given one (it would be readable by anyone with the link).
+    #
+    # These two are what a participating browser needs, and neither is a
+    # control surface: /observer/transcript ingests speech the sender just
+    # spoke aloud on the bridge, and /ws/deltas is the same read-only view the
+    # dashboard already renders.
+    #
+    # Everything that CHANGES the world — /incident/reset, /bridge/say,
+    # /approval/redeem, /tools/* — stays behind the token. That is the line
+    # this gate exists to hold, and it still holds.
+    if request.url.path in ("/observer/transcript", "/ws/deltas"):
+        return await call_next(request)
+
     secret = config.tool_secret()
     if not secret:
         log.warning("refused remote %s %s — AGENT_TOOL_SECRET is not set", request.method, host)
@@ -257,6 +289,9 @@ async def start_agent(body: dict[str, Any]) -> JSONResponse:
             channel=channel,
             agent_uid=int(body.get("agentUid") or 0),
             user_uid=int(body.get("userUid") or 0),
+            # Everyone else already on the bridge, so Echo can hear the whole
+            # room rather than only the console that invited it.
+            other_uids=[int(u) for u in (body.get("otherUids") or []) if int(u) > 0],
             system_prompt=prompt,
             tts=body.get("tts") or {},
             greeting=body.get("greeting"),

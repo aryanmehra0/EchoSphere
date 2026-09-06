@@ -10,6 +10,7 @@ import {
 import { selectFastLoopModel } from "@/lib/server/groq-budget";
 import {
   AGENT_UID,
+  getRoster,
   putEntry,
   RosterWriteError,
 } from "@/lib/server/roster";
@@ -175,7 +176,7 @@ export async function POST(request: Request) {
   const existing = getActiveAgent(channel);
   let reuseExisting = false;
 
-  if (existing && existing.userUid !== userUid) {
+  if (existing && !existing.subscribedUids.includes(userUid)) {
     /*
       ── THE AGENT LISTENS TO ONE UID, AND THIS CONSOLE IS NOT IT ────────────
       Agora fixes `remote_rtc_uids` when the agent is created and it cannot be
@@ -299,10 +300,22 @@ export async function POST(request: Request) {
       serverEnv.agentToolSecret,
     ) as { tools?: unknown[] };
 
+    /*
+      ── EVERY HUMAN, NOT JUST THE INVITER ─────────────────────────────────
+      The agent subscribes to the uids named here and is deaf to everyone
+      else. Passing only `userUid` meant whoever pressed J first was the only
+      person Echo could hear — the other roles spoke to an agent that never
+      ran a recogniser on their audio.
+    */
+    const humans = (await getRoster(channel))
+      .filter((e) => e.kind === "human" && e.uid !== userUid)
+      .map((e) => e.uid);
+
     const started = await startAgentViaSlowLoop({
       channel,
       agentUid: AGENT_UID,
       userUid,
+      otherUids: humans,
       systemPrompt: buildSystemPrompt(toolsEnabledNow),
       /*
         Let the ENGINE speak the greeting, the way the quickstart does.
@@ -378,9 +391,10 @@ export async function POST(request: Request) {
         channel,
         startedAt: Date.now(),
         expiresAt: agentTokens.expiresAt,
-        // Recorded so a later console with a DIFFERENT uid replaces this agent
-        // instead of reusing one that cannot hear it.
         userUid,
+        // Recorded so a console whose uid is NOT covered replaces this agent
+        // instead of reusing one that cannot hear it.
+        subscribedUids: [userUid, ...humans],
       });
     }
     const toolsEnabled = toolsEnabledNow;

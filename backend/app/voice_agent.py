@@ -126,6 +126,9 @@ async def start(
     channel: str,
     agent_uid: int,
     user_uid: int,
+    # Every OTHER human already on the bridge. The agent subscribes to all of
+    # them plus `user_uid`; without this it can only hear whoever invited it.
+    other_uids: list[int] | None = None,
     system_prompt: str,
     tts: dict[str, Any],
     greeting: str | None = None,
@@ -148,6 +151,14 @@ async def start(
         raise VoiceAgentError("channel is required")
     if agent_uid <= 0 or user_uid <= 0:
         raise VoiceAgentError("agent_uid and user_uid must be positive")
+
+    # Deduplicated and ordered with the inviter first, so a repeated uid or a
+    # console that passes itself in `other_uids` cannot produce a duplicate
+    # subscription.
+    remote_uids: list[int] = [user_uid]
+    for u in other_uids or []:
+        if u > 0 and u not in remote_uids:
+            remote_uids.append(u)
 
     client = _agora_client()
 
@@ -261,18 +272,32 @@ async def start(
     session = agent.create_async_session(
         channel=channel,
         agent_uid=str(agent_uid),
-        # Agora supports exactly ONE subscribed user. A wildcard here is read
-        # as a literal uid named "*", which matches nobody — the agent then
-        # joins and hears silence, with the create call still returning 200.
-        remote_uids=[str(user_uid)],
+        # ── EVERY HUMAN ON THE BRIDGE, NOT JUST THE ONE WHO INVITED ────────
+        #
+        # This was `[str(user_uid)]`, and the comment above it asserted that
+        # Agora supports exactly one subscribed user. That is what the SDK's
+        # own field docs still say — "Currently, only one user ID is
+        # supported" — but the field is typed `List[str]` and the live API
+        # accepts a list, so the docstring is behind the service.
+        #
+        # With one uid the agent is deaf to everyone else in the room: only
+        # the person whose console created it can be heard, and the other two
+        # roles talk to an agent that never runs a recogniser on their audio.
+        # Reported exactly that way — Echo answering the Support Engineer and
+        # ignoring DevOps and the DBA.
+        #
+        # `remote_uids` is now every human uid the caller knows about. The
+        # inviting console's uid is always included, so the single-human case
+        # is unchanged.
+        remote_uids=[str(u) for u in remote_uids],
         enable_string_uid=False,
         idle_timeout=300,
         expires_in=3600,
     )
 
     log.info(
-        "voice_agent: starting channel=%s agent_uid=%s user_uid=%s mode=%s",
-        channel, agent_uid, user_uid, llm_mode,
+        "voice_agent: starting channel=%s agent_uid=%s remote_uids=%s mode=%s",
+        channel, agent_uid, remote_uids, llm_mode,
     )
     try:
         agent_id = await session.start()

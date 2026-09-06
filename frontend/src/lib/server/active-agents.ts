@@ -44,15 +44,19 @@ interface ActiveAgent {
   channel: string;
   startedAt: number;
   expiresAt: number;
-  /**
-   * The ONE participant this agent subscribes to.
-   *
-   * Agora's Conversational AI Engine listens to exactly one uid, fixed at
-   * creation. Reusing an agent for a console that has since been allocated a
-   * different uid gives you an agent that is alive, healthy and deaf to the
-   * person actually in the room — the failure that made this field necessary.
-   */
+  /** The uid of the console that created this agent. */
   userUid: number;
+
+  /**
+   * EVERY participant this agent subscribes to.
+   *
+   * Agora fixes `remote_rtc_uids` at creation and it cannot be changed
+   * afterwards, so an agent is permanently deaf to anyone not named here.
+   * A console whose uid is missing from this list must REPLACE the agent
+   * rather than reuse it — otherwise it gets one that is alive, healthy and
+   * cannot hear the person actually in the room.
+   */
+  subscribedUids: number[];
 }
 
 const agents = new Map<string, ActiveAgent>();
@@ -224,6 +228,8 @@ export async function startAgentViaSlowLoop(payload: {
   channel: string;
   agentUid: number;
   userUid: number;
+  /** Every OTHER human on the bridge, so the agent can hear all of them. */
+  otherUids?: number[];
   systemPrompt: string;
   tts: Record<string, unknown>;
   /** Spoken by the Engine on join — the quickstart's `greeting_message`. */

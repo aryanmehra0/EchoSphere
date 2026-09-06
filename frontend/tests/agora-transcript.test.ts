@@ -221,3 +221,47 @@ describe("the toolkit's uid-0 sentinel", () => {
     );
   });
 });
+
+describe("two humans on one bridge — attribution", () => {
+  /*
+    The toolkit stamps `uid: "0"` on EVERY user.transcription, not only your
+    own, so with two people in the room both consoles relabelled the OTHER
+    person's speech as their own. Each forwarded it under their own uid and
+    role, and the Ledger recorded every sentence twice with one copy
+    misattributed — reported as "it tells my update to the other person and
+    vice versa".
+
+    `voice-agent.ts::drain` now resolves the speaker from `stream_id`, which
+    the toolkit carries through untouched. These assert the decision either
+    side of that resolution.
+  */
+  test("the other person's turn is not forwarded as mine", () => {
+    // Bob (1002) spoke; this console is Alice (1001).
+    assert.equal(
+      forwardDecision(
+        { uid: 1002, text: "Redis looks fine", isFinal: true, messageId: "b1", object: "" },
+        1001,
+      ),
+      "skip:not-mine",
+    );
+  });
+
+  test("my own turn still forwards", () => {
+    assert.equal(
+      forwardDecision(
+        { uid: 1001, text: "Checkout is erroring", isFinal: true, messageId: "a1", object: "" },
+        1001,
+      ),
+      "forward",
+    );
+  });
+
+  test("the misresolution this fixes would have forwarded both", () => {
+    // Before the fix BOTH turns arrived as selfUid, so both said "forward" —
+    // which is exactly how one speaker's words entered under another's name.
+    for (const speaker of [1001, 1002]) {
+      const asIfMine = { uid: 1001, text: `from ${speaker}`, isFinal: true, messageId: `m${speaker}`, object: "" };
+      assert.equal(forwardDecision(asIfMine, 1001), "forward");
+    }
+  });
+});

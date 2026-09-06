@@ -194,6 +194,25 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     socket.current = null;
     await agora.current?.leave();
     setAgentTrack(null);
+
+    /*
+      ── CLEAR THE BANNER BEFORE TRYING, NOT ONLY AFTER SUCCEEDING ──────────
+      A previous failed join leaves "NO MICROPHONE — you can watch, but the
+      room cannot hear you" on screen, and it was only lowered at the END of a
+      SUCCESSFUL join. So a retry that worked still showed the old warning for
+      its whole duration, and a retry that reached "Listening" while the banner
+      stayed up produced a screen that contradicted itself: a red NO MICROPHONE
+      bar directly above a live "Microphone open" control.
+
+      An operator cannot act on a contradiction. Clear the stale verdict up
+      front; this attempt will publish its own.
+    */
+    dispatch({
+      type: "DELTA",
+      payload: {
+        degraded: { voice: false, extraction: false, model: null, banner: null },
+      },
+    });
     setMicOn(true);
     dispatch({ type: "RESET" });
     dispatch({ type: "BRIDGE", state: "connecting" });
@@ -322,6 +341,25 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
         });
 
       await agora.current?.join(cleanChannel, credentials);
+
+      /*
+        ── A SUCCESSFUL JOIN CLEARS THE BANNER ────────────────────────────────
+        Nothing else ever did. `onError` raises the degradation banner and no
+        path lowered it, so any transient failure — a lost subscribe race, a
+        tunnel blip, an invite that succeeded on retry — left "NO VOICE" on
+        screen permanently over a bridge that was working perfectly.
+
+        A banner that cannot clear itself stops being information and becomes
+        noise people learn to ignore, which is worse than not having one: the
+        NEXT genuine failure is the one nobody looks at. So reaching the end of
+        a join with no throw is treated as the positive evidence it is.
+      */
+      dispatch({
+        type: "DELTA",
+        payload: {
+          degraded: { voice: false, extraction: false, model: null, banner: null },
+        },
+      });
     } catch (error) {
       // Voice is gone; the incident record is not. This is the ANALYTICS-ONLY
       // rung of §13's ladder, and the operator is told rather than left to

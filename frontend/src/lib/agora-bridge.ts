@@ -43,6 +43,27 @@ export class AgoraBridge {
   private mic: ILocalAudioTrack | null = null;
   private rtm: RTMClient | null = null;
   private silenceTimer: number | null = null;
+
+  /**
+   * UIDs with a `subscribe` call in flight or already satisfied.
+   *
+   * ── WHY A SET AND NOT JUST A TRY/CATCH ──────────────────────────────────
+   * `user-published` is not a once-per-user event. Agora re-fires it whenever
+   * a remote republishes — which Echo does on every reconnect, interrupt and
+   * TTS restart — and the handler is `async`, so two firings overlap: the
+   * second `subscribe` is issued while the first is still on the wire, and the
+   * server rejects the pair with
+   *
+   *     ERR_SUBSCRIBE_REQUEST_INVALID: Repeat subscribe request (code 2021)
+   *
+   * Nothing is actually wrong when that happens — the first subscribe
+   * succeeds and audio plays — but it throws, so it surfaced as a red console
+   * error on a working bridge.
+   *
+   * Cleared per-uid on `user-unpublished` and `user-left`, and wholesale on
+   * `leave()`, so a genuine resubscribe after a republish still goes through.
+   */
+  private readonly subscribing = new Set<number>();
   private channel: string | null = null;
   private credentials: BridgeCredentials | null = null;
 
@@ -116,6 +137,13 @@ export class AgoraBridge {
 
     client.on("user-published", async (user, mediaType) => {
       if (mediaType !== "audio") return;
+
+      // Already subscribed, or a subscribe is on the wire. A second call now
+      // is the "Repeat subscribe request" the server rejects.
+      const uid = Number(user.uid);
+      if (this.subscribing.has(uid)) return;
+      this.subscribing.add(uid);
+
       try {
         await client.subscribe(user, "audio");
         const track = user.audioTrack;
@@ -126,11 +154,49 @@ export class AgoraBridge {
           this.events.onAgentState("listening");
         }
       } catch (error) {
-        this.events.onError(`Could not subscribe to remote audio: ${message(error)}`);
+        /*
+          ── A LOST RACE IS NOT A FAULT ──────────────────────────────────────
+          `user-published` and `subscribe` are two round trips apart, and the
+          publisher can be gone in between. Agora then throws
+
+              UNEXPECTED_ERROR: can not find remote track in user object
+
+          which is not unexpected at all here: Echo is torn down and recreated
+          constantly (a reset, a re-invite, an idle timeout), so the console
+          routinely learns about a track that no longer exists by the time it
+          asks for it. `user-left` fires immediately after and the UI settles
+          correctly on its own.
+
+          Reporting it through `onError` was actively harmful once that hook
+          started raising the degradation banner: a transient race put
+          "NO VOICE" on screen over a bridge that was working, and the banner
+          does not clear itself. So this one is logged and swallowed, and only
+          genuine subscribe failures are surfaced.
+        */
+        // The subscribe did not take, so this uid must be eligible again —
+        // otherwise a track that republishes later would never be picked up.
+        this.subscribing.delete(uid);
+
+        const detail = message(error);
+        if (/can not find remote track|UNEXPECTED_ERROR|Repeat subscribe request/i.test(detail)) {
+          console.info(
+            `[agora rtc] subscribe to uid ${user.uid} did not take (${detail.slice(0, 80)}) — ignoring`,
+          );
+          return;
+        }
+        this.events.onError(`Could not subscribe to remote audio: ${detail}`);
       }
     });
 
+    // A republish must be resubscribable, so the guard is released the moment
+    // the track goes away rather than being held until leave().
+    client.on("user-unpublished", (user, mediaType) => {
+      if (mediaType !== "audio") return;
+      this.subscribing.delete(Number(user.uid));
+    });
+
     client.on("user-left", (user) => {
+      this.subscribing.delete(Number(user.uid));
       if (Number(user.uid) === AGENT_UID) this.clearAgentTrack();
     });
 
@@ -180,6 +246,9 @@ export class AgoraBridge {
       this.silenceTimer = null;
     }
     this.clearAgentTrack();
+    // Without this a rejoin would see every uid as "already subscribing" and
+    // silently never subscribe to anyone.
+    this.subscribing.clear();
     await this.voice.stop();
 
     const mic = this.mic;

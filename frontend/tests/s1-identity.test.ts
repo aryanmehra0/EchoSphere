@@ -67,7 +67,23 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
     assert.ok(a > 1000 && b > 1000);
   });
 
-  test("UIDs are scoped per channel", async () => {
+  test("UIDs are unique ACROSS channels, not per channel", async () => {
+    /*
+      This test used to assert the opposite — "a different bridge starts
+      fresh, 1001 on inc-2 is a different person" — and that assumption is
+      what RTM rejects.
+
+      RTM identity is app-wide: `agora-tokens.ts` builds the RTM token from
+      `String(uid)` with no channel in it, and Agora allows ONE login per user
+      id per app. Two people on two channels both being handed 1001 threw the
+      second out with
+
+          error code -10027 · the user ID is already in use
+
+      and because RTM carries the transcript feed, the loser got no
+      transcripts at all while both published audio as the same participant.
+      Reported live, from two machines on two channels.
+    */
     const a = allocateHumanUid("inc-1");
     await putEntry({
       channel: "inc-1",
@@ -79,8 +95,11 @@ describe("Roster — the write-before-token invariant (closes G3)", () => {
       expiresAt: 2,
     });
 
-    // A different bridge starts fresh — 1001 on inc-2 is a different person.
-    assert.equal(allocateHumanUid("inc-2"), a);
+    assert.notEqual(
+      allocateHumanUid("inc-2"),
+      a,
+      "a uid taken on one channel must not be reissued on another",
+    );
   });
 
   test("a malformed entry is rejected rather than silently stored", async () => {

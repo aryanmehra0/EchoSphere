@@ -96,18 +96,40 @@ function channelMap(channel: string): Map<number, RosterEntry> {
 }
 
 /**
- * Allocate the next free human UID on a channel.
+ * Allocate a human UID that is free ACROSS EVERY CHANNEL.
  *
- * Sequential rather than random: a demo where the DevOps Lead is reliably 1001
- * is far easier to narrate and debug than one with random six-digit ids, and
- * collision risk is nil at bridge scale.
+ * ── WHY THIS IS NOT PER-CHANNEL, THOUGH THE ROSTER IS ──────────────────────
+ * It used to scan only `channelMap(channel)`, so each new channel restarted at
+ * 1001. Two people on two different channels were both handed uid 1001, and
+ * the second one to join was thrown out of RTM:
+ *
+ *     NO TRANSCRIPTS — RTM is unavailable ...
+ *     error code -10027 · the user ID is already in use
+ *
+ * RTM identity is app-wide. `agora-tokens.ts` builds the RTM token from
+ * `String(uid)` with no channel in it, and Agora's RTM service allows one
+ * login per user id per app — a second login with the same id evicts or
+ * refuses the first. Channel scoping is an RTC concept; RTM does not share it.
+ *
+ * The visible damage is worse than a name clash. RTM carries the transcript
+ * feed (the agent is started with `data_channel: "rtm"`), so the losing
+ * browser gets no transcripts at all, and because both consoles are publishing
+ * audio as the same participant their voices collide in the channel too —
+ * which is exactly the "I can't hear my friend" half of the report.
+ *
+ * Still sequential and still starting at 1001, so the first person on the
+ * first channel is 1001 and the demo narrates the same way it always did.
  */
 export function allocateHumanUid(channel: string): number {
-  const m = channelMap(channel);
-  for (let uid = HUMAN_UID_MIN + 1; uid <= HUMAN_UID_MAX; uid++) {
-    if (!m.has(uid)) return uid;
+  const taken = new Set<number>();
+  for (const entries of store.values()) {
+    for (const uid of entries.keys()) taken.add(uid);
   }
-  throw new RosterWriteError(`No free UID on channel ${channel}`);
+
+  for (let uid = HUMAN_UID_MIN + 1; uid <= HUMAN_UID_MAX; uid++) {
+    if (!taken.has(uid)) return uid;
+  }
+  throw new RosterWriteError(`No free UID left (channel ${channel})`);
 }
 
 /**
