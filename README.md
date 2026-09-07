@@ -113,57 +113,138 @@ npm run payload
 
 ---
 
-## Quick start
+## Running it
 
-### The short way
+Everything below is **PowerShell**, from the repository root unless a step says
+otherwise.
 
-From the repository root, in **PowerShell**:
+> **Do not chain these with `&&`.** Windows PowerShell 5.1 has no `&&`
+> operator and treats it as a *parse error* — the command does not run and
+> does not explain why, which reads as the project being broken. Use separate
+> lines, `;`, or the scripts below.
 
-```powershell
-.\start.ps1 -Tunnel    # console + Slow Loop + the tunnel Echo needs
-.alidate.ps1         # prove it works, end to end, against live Agora
-```
+### 0. Prerequisites
 
-`start.ps1` brings everything up and waits until each service genuinely
-answers. `validate.ps1` then runs 28 checks against the LIVE system — it
-invites a real Agora agent, feeds a real incident, reads what Agora itself
-recorded, calls the tool endpoint the way Agora calls it, and tries to get
-past the auth gate. It prints one verdict.
+| | |
+|---|---|
+| **Node** 20+ | the console and the demo scripts |
+| **Python** 3.12–3.14 | the Slow Loop |
+| **cloudflared** | only for `-Tunnel`. `winget install --id Cloudflare.cloudflared` |
 
-A green test suite is not a working product: four real UI defects here once
-passed typecheck, lint and build. That is why validation asserts against the
-vendor's own records rather than our logging. Then open **http://localhost:3000**, press **`J`**, and run
-`npm run demo feed` from `frontend/`. Echo announces itself out loud on
-joining — that greeting is your proof the voice path is live.
-
-**`-Tunnel` is what makes Echo conversational.** Agora's Engine calls tool
-endpoints from *its own servers*, so `127.0.0.1` is unreachable and without a
-public URL the agent is created with no tools at all. Echo can then hear and
-speak but has nothing it is permitted to say about the incident, because Rule 3
-forbids answering from memory. With the tunnel, "Echo, what do we know so far?"
-performs a real read against the same Ledger the dashboard renders from.
-
-The tunnel exposes the Slow Loop publicly for as long as it runs. The script
-generates `AGENT_TOOL_SECRET`, and the backend refuses any non-local request
-that does not present it — fail-closed, so a tunnel with no secret serves
-nothing rather than serving everything. Close it when you are done:
-`Get-Process cloudflared | Stop-Process`.
-
-> **Windows note.** Do not chain these with `&&`. Windows PowerShell 5.1 has
-> no `&&` operator and treats it as a *parse error* — the command does not run
-> and does not explain why, which reads as the project being broken. Use `;`,
-> separate lines, or `.\start.ps1`.
-
-### The long way
-
-Three processes. Two terminals plus a browser.
-
-**Terminal 1 — the Slow Loop (Python, Zone 3):**
+### 1. First time only
 
 ```powershell
 cd backend
 python -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
+```
+
+```powershell
+cd frontend
+npm install
+copy .env.local.example .env.local
+```
+
+Then fill in `frontend/.env.local` — see [Credentials](#credentials). The
+example file documents all 17 keys; five are required.
+
+> On macOS or Linux the venv binaries are in `.venv/bin/` and `cp` replaces
+> `copy`. `start.ps1` and `validate.ps1` are PowerShell only; run the two
+> services by hand as in step 6.
+
+### 2. Start everything
+
+```powershell
+.\start.ps1 -Tunnel -Reset
+```
+
+One command. It opens a tunnel, writes the tool credentials, starts both
+services, waits until each genuinely answers, clears the board, and runs the
+pre-flight. **Wait for `GO` with 8 ticks** — about 40 seconds.
+
+```
+  OK   tunnel live  https://<random>.trycloudflare.com
+  OK   Slow Loop is up
+  OK   console is up
+  OK   Agora can reach the Ledger through the tunnel
+  ...
+  GO  — open http://localhost:3000, press J
+```
+
+Flags: `-Tunnel` opens the tunnel (see below), `-Reset` clears the board,
+`-SkipPreflight` skips the checks. Plain `.\start.ps1` starts the services and
+reports on any tunnel that is *already* live.
+
+**`-Tunnel` is what makes Echo conversational.** Agora's Engine calls tool
+endpoints from *its own servers*, so `127.0.0.1` resolves to Agora's machine,
+not yours. Without a public URL the agent is created with **no tools**, and
+Echo — forbidden by Rule 3 from answering from memory — has nothing it is
+permitted to say about the incident. With the tunnel, "Echo, what do we know
+so far?" performs a real read against the same Ledger the dashboard renders
+from.
+
+A quick tunnel gets a **new URL every run and expires on its own**, so re-run
+this before each session. It exposes the whole Slow Loop, so the script
+generates `AGENT_TOOL_SECRET` and the backend refuses any non-local request
+without it — fail-closed. Close it when you finish:
+`Get-Process cloudflared | Stop-Process`.
+
+### 3. Load the board — before you join
+
+```powershell
+cd frontend
+npm run demo feed
+```
+
+Four utterances at conversational pace, ~40 seconds, then give the panel
+another ~20 to finish deliberating.
+
+**Do this before pressing `J`, not after.** `idle_timeout` is 300 s and Agora
+counts idleness in the *channel* — and `demo feed` posts over HTTP, putting no
+audio in the channel at all. Join first and the agent can time out before you
+speak a word, leaving an Echo that looks registered and is gone.
+
+### 4. Open the console
+
+**http://localhost:3000** → press **`J`** → allow the microphone.
+
+Echo announces itself out loud: *"Echo is on the bridge. I am listening and
+keeping the record."* **That greeting is your proof the whole voice path is
+live** before you have staked anything on it. The status bar should read
+**LIVE DATA**.
+
+### 5. Talk to it
+
+Into your microphone, within a minute of joining:
+
+> **"Echo, what do we know so far?"**
+
+It calls `query_incident_state` over the tunnel and answers from the Ledger,
+attributed. Then push it:
+
+> **"Echo, is Redis the cause?"**
+
+It will refuse. That refusal is the product.
+
+To see which link breaks if it does not answer:
+
+```powershell
+npm run demo converse
+```
+
+It streams Agora's own transcript while you talk and names the failure:
+nothing segmented, turns transcribed empty, Echo refusing because it cannot
+read the Ledger, or Echo answering. It discounts Echo's own proactive lines so
+they cannot be mistaken for an answer.
+
+### 6. Running the two services by hand
+
+If you would rather not use `start.ps1` — or you are not on Windows:
+
+**Terminal 1 — the Slow Loop (Python, Zone 3):**
+
+```powershell
+cd backend
 .\.venv\Scripts\python -m uvicorn app.main:app --port 8000
 ```
 
@@ -171,44 +252,74 @@ python -m venv .venv
 
 ```powershell
 cd frontend
-npm install
-copy .env.local.example .env.local    # then fill it in — see Credentials
-npm run dev                           # http://localhost:3000
+npm run dev
 ```
 
-On macOS or Linux the venv binaries live in `.venv/bin/` instead, and `cp`
-replaces `copy`.
+Confirm both are answering:
 
-Then, from `frontend/`:
-
-```bash
-npm run demo reset     # clean board, stop any agent left running
-npm run demo           # pre-flight — refuses to print GO if anything is off
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health      # want ready = True
+Invoke-RestMethod http://localhost:3000/api/health  # want ready = True
 ```
 
-Open **http://localhost:3000**, press **`J`**, wait for the status bar to read
-**LIVE DATA**, then:
+> `curl` on Windows PowerShell is an alias for `Invoke-WebRequest` and takes
+> different arguments. Use `Invoke-RestMethod` as above.
 
-```bash
-npm run demo feed      # speak Demo Script v2 into the live pipeline
-npm run demo speech    # or say a line yourself and watch the Ledger
+Without a tunnel, tools are disabled: Echo greets, hears and speaks, and says
+so honestly when asked a factual question. If the Slow Loop is not running at
+all the console falls back to a scripted replay and the status bar says
+**REHEARSAL** rather than **LIVE DATA** — deliberate, so a replay is never
+mistaken for a live incident.
+
+### 7. Between runs, and afterwards
+
+```powershell
+cd frontend
+npm run demo reset       # clear the board, stop any stray agent
+npm run demo             # pre-flight: refuses GO if anything is off
+npm run demo stop        # stop the agent (also happens when you press J to leave)
 ```
 
-`npm run demo` checks seven things that have each gone wrong here and none of
-which announce themselves: credentials, both services, a leftover agent from
-the last rehearsal, a dirty board, recording left off, a degradation banner,
-and whether there is any Groq budget left today.
-
-Check you are wired up before anything else:
-
-```bash
-curl localhost:3000/api/health     # want {"ready":true,...}
-curl 127.0.0.1:8000/health         # want {"ready":true,...}
+```powershell
+Get-Process cloudflared | Stop-Process    # close the public tunnel
 ```
 
-If the Slow Loop is not running the console still works — it falls back to a
-scripted replay and the status bar says **REHEARSAL** rather than **LIVE DATA**.
-That is deliberate: a replay must never be mistaken for a live incident.
+**Stop the agent when you finish.** The Cloud Agent is a separate process that
+keeps running, and billing, until Agora times it out.
+
+---
+
+## Every command
+
+| Command | Where | What |
+|---|---|---|
+| `.\start.ps1 -Tunnel -Reset` | root | Start everything, tunnel included |
+| `.\validate.ps1` | root | 28 live checks against Agora, one verdict |
+| `npm run demo` | `frontend/` | Pre-flight — 8 checks, prints GO or NO-GO |
+| `npm run demo feed` | `frontend/` | Play Demo Script v2 into the pipeline |
+| `npm run demo converse` | `frontend/` | Talk to Echo; names the failing link |
+| `npm run demo speech` | `frontend/` | Say one line, watch the Ledger fill |
+| `npm run demo reset` | `frontend/` | Clear the board, stop stray agents |
+| `npm run demo stop` | `frontend/` | Stop the Agora agent |
+| `npm run payload` | `frontend/` | Print the exact create-agent body we send |
+| `npm run verify` | `frontend/` | typecheck → lint → tests → build |
+| `python -m rig.tier3 --runs 1` | `backend/` | The S6 gate, 12 checks |
+
+---
+
+## When it does not work
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `The term '.\start.ps1' is not recognized` | PowerShell will not run a script from the current directory without a path | Keep the `.\` prefix |
+| Console fails to start, syntax error | Unresolved merge conflict markers in a source file | `git diff --name-only --diff-filter=U` |
+| `tunnel is dead` in validate | Quick tunnels expire on their own | `.\start.ps1 -Tunnel` again |
+| Echo joins but never answers | No tunnel, so no tools | `.\start.ps1 -Tunnel` |
+| Echo greeted, then nothing | Agent timed out — 300 s of channel silence | `npm run demo reset`, press `J`, speak promptly |
+| `ASR RAN BUT TRANSCRIBED NOTHING` | Browser captured a different microphone, or you spoke over the greeting | Check the browser's mic, wait for the greeting to finish |
+| Pre-flight: `agent is alive on Agora` fails | Registered agent was stopped by Agora | `npm run demo reset` |
+| Board empty after `demo feed` | The feed takes ~40 s plus deliberation | Wait, then re-check — do not judge it early |
+| Contradiction did not fire | Adjudication is a model call under an 8000 tok/min ceiling; lands ~2 runs in 3 | `npm run demo reset`, feed again |
 
 ---
 
@@ -243,10 +354,10 @@ Two traps that have each cost hours here:
 
 ```powershell
 cd frontend
-npm run verify        # typecheck -> lint -> 118 tests -> build
+npm run verify        # typecheck -> lint -> 139 tests -> build
 
 cd ..\backend
-.\.venv\Scripts\python -m unittest discover -s tests -t .    # 195 tests
+.\.venv\Scripts\python -m unittest discover -s tests -t .    # 213 tests
 ```
 
 **No slot is done until `npm run verify` passes.** And a green build says
@@ -397,9 +508,19 @@ discounts turns marked `start_type: "api_speak"` — Echo's own proactive lines
 
 ## Demo requirements
 
-**Two machines, two UIDs, headsets.** Per-UID separation is the whole
-architecture; two presenters sharing one machine collapses it to one speaker.
-Headsets prevent acoustic bleed between the streams.
+**One machine is enough to demo.** Echo subscribes to `["*"]`, so a single
+browser joined to the channel is a working conversation, and `npm run demo
+feed` supplies the two-speaker incident the contradiction needs.
+
+**Two machines make it stronger, and cost more to get right.** Two real
+speakers means two real UIDs and genuine per-speaker attribution on screen.
+If you do that: **different roles, and headsets on both.** Not speakers —
+speakers let each laptop's microphone pick up the other's audio, and you get
+crossed attribution by a slower route.
+
+**What you cannot do is two tabs on one laptop.** One machine has one
+microphone, so both tabs hear the same voice and forward the same sentence
+under two different roles. Echo then compares a person to themselves.
 
 ---
 
@@ -424,10 +545,14 @@ Stated plainly rather than discovered by a reviewer.
   join between them needs a person at a microphone, because Agora has no
   text-injection endpoint (see Validation above). Budget a minute for
   `npm run demo converse` in every rehearsal.
-- **Echo subscribes to exactly one UID.** `remote_rtc_uids` takes one
-  participant — the schema says *"currently, only one user ID is supported"* —
-  so Echo hears whoever joined first. Per-speaker audio for everyone else is
-  the Observer work below.
+- **Echo hears the whole room, but does not receive separated audio.**
+  `remote_rtc_uids` is `["*"]`, which Agora's docs define as *"all UIDs present
+  in the channel"*. An earlier version of this file claimed a wildcard was
+  unsupported, quoting a stale SDK docstring; a test pinned that belief, and
+  three people once talked on three machines while Echo heard none of them.
+  What is still missing is the *structural* guarantee — one unmixed PCM stream
+  per speaker — which is the Observer item above. Attribution today comes from
+  the Roster mapping UID to role, which is sound but not physically enforced.
 - **The OPPOSED contradiction fires about two runs in three.** Adjudication is
   a model call under an 8000-tokens-per-**minute** ceiling. The epistemic
   separation underneath it — facts versus the hedge, all attributed — is
