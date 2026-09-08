@@ -5,7 +5,7 @@ import { clock } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { Dot, Rule } from "@/components/ui/Signal";
 import { Kbd } from "@/components/ui/Button";
-import { ASR_LABEL, llmLabel, TTS_LABEL, VAD_LABEL } from "@/lib/pipeline-facts";
+import { analysisLabel, ASR_LABEL, llmLabel, TTS_LABEL, VAD_LABEL } from "@/lib/pipeline-facts";
 
 /**
  * The foot of the console.
@@ -98,8 +98,14 @@ export function StatusBar() {
         which mirrors `backend/app/voice_agent.py` — the file that really builds
         the pipeline.
       */}
-      <Item label="LLM" value={llmLabel()} title="Fast Loop brain — Agora-managed gpt-4o-mini (cascaded, not audio-to-audio)" />
-      <Item label="VAD" value={VAD_LABEL} title="Turn detection — barge-in threshold; end-of-speech is 480ms" />
+      <Item label="LLM" value={llmLabel()} title="Fast Loop brain — what Echo SPEAKS with. Agora-managed and cascaded, not audio-to-audio." />
+      {/*
+        The Slow Loop's model, which was invisible here. Two LLMs run in this
+        product and only one was on the bar, so a Gemma-configured analysis
+        pipeline looked like it was not running at all.
+      */}
+      <Item label="ANALYSIS" value={analysisLabel()} title="Slow Loop brain — extraction, contradiction adjudication and the Deliberation Panel. Separate from the voice model." />
+      <Item label="VAD" value={VAD_LABEL} title="Turn detection — barge-in / end-of-speech thresholds in ms" />
       <Item label="ASR" value={ASR_LABEL} title="Speech-to-text — Agora-managed Deepgram nova-3, no vendor key required" />
       <Item label="TTS" value={TTS_LABEL} title="Echo's voice — low-latency model, chosen because the cascade already costs us the §12.1 budget" />
 

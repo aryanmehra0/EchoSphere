@@ -27,6 +27,7 @@ with the code.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from ..adapters.agora_bridge import BridgeController
@@ -133,12 +134,77 @@ async def run_if_ready(
         # onto the id that already exists instead.
         known_aliases = entity_aliases(ledger)
 
+        # Every id this window rewrote: original -> final. Links and claims
+        # still refer to the ORIGINAL ids the model emitted, so without this
+        # they point at entities that no longer exist. See `_reindex` below.
+        renamed: dict[str, str] = {}
+
         def _entity(r: dict[str, Any]) -> Entity:
             proposed = str(r["id"]).strip()
             label = str(r.get("label", proposed)).strip()
             canonical = known_aliases.get(label.lower()) or known_aliases.get(proposed.lower())
+
+            resolved_id = canonical or proposed
+
+            """
+            ── A VAGUE ID MUST NOT KEEP A SPECIFIC LABEL ────────────────────
+            The extraction prompt says: when someone says "the database",
+            emit `database-unspecified` rather than guessing `postgres-primary`.
+            That is right — inventing a system name is worse than admitting
+            ignorance.
+
+            But it interacts badly with the alias merge above. Observed live:
+
+                "the database is down"  -> id database-unspecified
+                "the Redis is also down" -> label "Redis", merged onto that id
+
+            leaving a row reading `id=database-unspecified, label=Redis`. The
+            graph showed "Redis" and the record said database, which is
+            confusing on its own — and actively wrong later, because a genuine
+            Postgres claim would then resolve onto the alias table's
+            `database-unspecified` and land on the REDIS node. Two real
+            systems, one id, claims silently pooled.
+
+            So when a specific label arrives on an `-unspecified` id, the id is
+            promoted to match the label. The merge is still honoured (the
+            claims stay together, which is what fixed contradiction scoping),
+            but the id stops lying about which system it is.
+            """
+            if label and resolved_id.endswith("-unspecified"):
+                specific = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+                """
+                A LABEL IS ONLY SPECIFIC IF IT NAMES SOMETHING.
+
+                "the database" slugs to `the-database`, which is strictly worse
+                than `database-unspecified`: it reads like a real system name
+                while carrying exactly as little information, and it drops the
+                `-unspecified` marker that tells a reader nobody said WHICH
+                database. Vague labels are left alone.
+
+                `vague` is the generic-noun set the extraction prompt itself
+                warns about, plus a leading article, which is the form a vague
+                mention almost always takes on a bridge.
+                """
+                vague = {
+                    "database", "the-database", "a-database", "db", "the-db",
+                    "cache", "the-cache", "service", "the-service",
+                    "server", "the-server", "queue", "the-queue",
+                    "network", "the-network", "system", "the-system",
+                    "api", "the-api", "app", "the-app",
+                }
+                if specific and specific not in vague and not specific.endswith("-unspecified"):
+                    log.info(
+                        "pipeline: promoted entity %r -> %r (label %r names a system)",
+                        resolved_id, specific, label,
+                    )
+                    resolved_id = specific
+
+            # Record the rewrite so links and claims can follow it.
+            if resolved_id != proposed:
+                renamed[proposed] = resolved_id
+
             return Entity(
-                id=canonical or proposed,
+                id=resolved_id,
                 label=label or proposed,
                 aliases=[str(a) for a in (r.get("aliases") or [])],
                 kind=r.get("kind", "service"),
@@ -149,8 +215,37 @@ async def run_if_ready(
 
         _merge("entities", result["entities"], _entity, ledger.upsert_entity)
 
+        def _reindex(entity_id: Any) -> str:
+            """
+            Follow an entity id through this window's renames.
+
+            ── WHY THE GRAPH HAD NODES BUT NO EDGES ────────────────────────
+            `_entity` above rewrites ids in two ways — the alias merge, and
+            the `-unspecified` promotion — but links and claims still carry
+            the ORIGINAL id the model emitted. Measured live on one sentence
+            ("the checkout service reads from the primary Redis shard, and
+            Redis writes to the Postgres replica"):
+
+                entities:  checkout-service      primary-redis-shard
+                links:     checkout-service-unspecified -> redis-shard-unspecified
+
+            Both endpoints named entities that no longer existed, and React
+            Flow drops an edge whose endpoints match no node — SILENTLY. So
+            the canvas showed three unconnected boxes and the header read
+            `3n · 0e`, which looks like link extraction was never built.
+
+            It was built and working; the ids were rewritten out from under
+            it. `resolve_links` already guards against claim-ids and causal
+            labels, but it runs BEFORE this promotion and cannot know about
+            it.
+            """
+            raw = str(entity_id or "").strip()
+            return renamed.get(raw, raw)
+
         _merge("links", result["links"],
-               lambda r: Link(id=r["id"], source=r["source"], target=r["target"],
+               lambda r: Link(id=r["id"],
+                              source=_reindex(r["source"]),
+                              target=_reindex(r["target"]),
                               label=r.get("label", ""), kind=r.get("kind", "suspected")),
                ledger.upsert_link)
 
@@ -160,11 +255,57 @@ async def run_if_ready(
             ledger.upsert_claim(c)
             new_claims.append(c)
 
+        def _supersedes(row: dict[str, Any]) -> str | None:
+            """
+            The id this claim retires, if it genuinely retires one.
+
+            ── WHY THIS IS VALIDATED AND NOT PASSED STRAIGHT THROUGH ────────
+            `supersedes` was never read at all: the extraction prompt did not
+            ask for it, this lambda did not pass it, and every row in the
+            database had it NULL — including claims literally beginning
+            "Correction,". So a speaker revising their own measurement
+            ("correction, memory is actually 95 percent, not 40") produced a
+            SECOND claim alongside the first, the contradiction engine found
+            two incompatible values for one property, and Echo interrupted
+            the room to report that somebody disagreed with themselves.
+
+            Reported live, and it makes Echo look like it is not listening.
+
+            Now that the model is asked for the field, it will sometimes
+            invent an id. A dangling `supersedes` is worse than none: the
+            Ledger's `superseded_ids()` would retire nothing while the claim
+            it names is still live, and `open_hypotheses` would quietly
+            include a settled question. So the id must exist.
+
+            Self-reference is dropped too — a claim cannot supersede itself,
+            and a model that emits `id == supersedes` would otherwise retire
+            the very row being added.
+            """
+            raw = row.get("supersedes")
+            if not raw or not isinstance(raw, str):
+                return None
+            target = raw.strip()
+            if not target or target == str(row.get("id", "")).strip():
+                return None
+            if target not in ledger.claims:
+                log.info(
+                    "pipeline: dropped supersedes=%r on %r (no such claim)",
+                    target, row.get("id"),
+                )
+                return None
+            return target
+
         _merge("claims", result["claims"],
-               lambda r: Claim(id=r["id"], text=r["text"], entity=r.get("entity"),
+               # `_reindex` on the entity too: a claim pointing at a renamed
+               # id is worse than a dropped edge, because contradiction
+               # scoping keys on `entity` equality and would silently find no
+               # candidates — the exact silent failure §7 was built to end.
+               lambda r: Claim(id=r["id"], text=r["text"],
+                               entity=_reindex(r.get("entity")) or None,
                                epistemic_status=r["epistemicStatus"],
                                speaker_role=r["speakerRole"],
-                               confidence=float(r.get("confidence", 0.8))),
+                               confidence=float(r.get("confidence", 0.8)),
+                               supersedes=_supersedes(r)),
                _claim_upsert)
 
         _merge("unchecked", result["unchecked"],

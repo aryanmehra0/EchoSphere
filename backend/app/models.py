@@ -72,6 +72,62 @@ def coerce(value: Any, allowed: tuple[str, ...], fallback: str) -> str:
     return fallback
 
 
+def coerce_str_list(value: Any, *, drop_bare_string: bool = True) -> list[str]:
+    """
+    Force an LLM-supplied field into the `list[str]` the wire promises.
+
+    ── WHY A TYPE HINT IS NOT ENOUGH ───────────────────────────────────────
+    `evidence: list[str]` is a hint, and Python does not enforce it at
+    runtime. The dashboard does:
+
+        selectClaimsByIds -> ids.map(...)
+
+    guarded by `if (!ids?.length) return []`. A STRING has `.length`, so the
+    guard passes and `.map` then throws `ids.map is not a function`, React
+    unmounts the whole tree, and the console RESETS mid-incident — losing the
+    in-memory Ledger before write-behind had flushed it to Postgres.
+
+    That happened from one spoken sentence. Asked to extract a task from
+    "Priya, can you check the replica lag?", Gemma answered
+
+        "evidence": "Priya, can you check the replica lag in the next ten minutes?"
+
+    instead of a list of claim ids. Reasonable-looking output, wrong type,
+    and the blast radius was the entire session.
+
+    This is the same principle as `coerce()` above, applied to shape rather
+    than to enum membership: the wire is fed by a model now, so it cannot be
+    trusted to honour a declaration.
+
+    `drop_bare_string` distinguishes the two cases:
+
+      - IDs (`evidence`, `contradicts`) — a bare string is DROPPED. These
+        fields mean "claim ids", and a quoted sentence is not one. Wrapping it
+        would put a fake reference into the evidence chain, which is worse
+        than an empty chain on a product whose entire claim is an accurate
+        record.
+      - Prose (`aliases`, `speakers`) — a bare string is WRAPPED, because
+        "Redis" as a lone alias is genuinely one alias and dropping it would
+        silently break entity resolution.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if drop_bare_string or not text:
+            return []
+        return [text]
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, (str, int, float)):
+            text = str(item).strip()
+            if text:
+                out.append(text)
+    return out
+
+
 @dataclass
 class Claim:
     """
@@ -96,6 +152,8 @@ class Claim:
     contradicts: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        # Claim ids, so a bare string is dropped rather than wrapped.
+        self.contradicts = coerce_str_list(self.contradicts)
         if not self.speaker_role or not self.speaker_role.strip():
             raise ValueError(
                 f"Claim {self.id} has no speaker_role. "
@@ -151,6 +209,9 @@ class Entity:
         # The graph renders `GLYPH[kind]`; an unknown kind blanks the dashboard.
         self.kind = coerce(self.kind, ENTITY_KINDS, "service")  # type: ignore[assignment]
         self.status = coerce(self.status, ENTITY_STATUSES, "UNKNOWN")  # type: ignore[assignment]
+        # Prose, not ids: a lone "Redis" IS one alias, and dropping it would
+        # silently break the entity resolution that depends on this table.
+        self.aliases = coerce_str_list(self.aliases, drop_bare_string=False)
 
     def to_wire(self) -> dict[str, Any]:
         return _clean(asdict(self))
@@ -183,6 +244,8 @@ class Task:
 
     def __post_init__(self) -> None:
         self.status = coerce(self.status, TASK_STATUSES, "OPEN")  # type: ignore[assignment]
+        # Claim ids. A quoted sentence here crashed the Actions tab.
+        self.evidence = coerce_str_list(self.evidence)
 
     def to_wire(self) -> dict[str, Any]:
         return _clean({
@@ -216,6 +279,13 @@ class Contradiction:
     # a different thing to act on than a unanimous one, and hiding that would
     # be the same mistake as collapsing HYPOTHESIS into OBSERVED — one level up.
     panel: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        # Speaker roles, and prose rather than ids — a single role is a valid
+        # one-element list. Lower risk than `evidence` because this is built
+        # from claim fields rather than model output, but it is rendered the
+        # same way and costs nothing to make certain of.
+        self.speakers = coerce_str_list(self.speakers, drop_bare_string=False)
 
     def to_wire(self) -> dict[str, Any]:
         return _clean({

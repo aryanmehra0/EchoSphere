@@ -135,3 +135,71 @@ class TestEntityAliases(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EntityUpsertMergesRatherThanClobbers(unittest.TestCase):
+    """
+    Reported live, two symptoms with one cause.
+
+    `upsert_entity` was `self.entities[id] = entity` — a wholesale overwrite.
+    So every window that mentioned a system replaced everything the previous
+    window knew about it:
+
+      - a graph node displayed `95%` while the database column was EMPTY: the
+        metric was set by one window and blanked by the next, which mentioned
+        the same system without restating the number;
+      - `status` stayed CRITICAL after "Redis is not down right now", because
+        the correcting window proposed no status and the stale value survived
+        by accident.
+
+    The rule these pin: a later window may UPDATE a field, but SILENCE IS NOT
+    AN UPDATE.
+    """
+
+    def setUp(self):
+        from app.ledger import Ledger
+        self.led = Ledger()
+
+    def _ent(self, **over):
+        from app.models import Entity
+        base = dict(id="redis", label="Redis", kind="datastore", status="CRITICAL")
+        base.update(over)
+        return Entity(**base)
+
+    def test_a_metric_is_not_blanked_by_a_window_that_omits_it(self):
+        self.led.upsert_entity(self._ent(metric="95%"))
+        # Second window mentions Redis but restates no number. The model
+        # returns "" rather than None here, which is why the guard is falsy
+        # rather than `is None`.
+        self.led.upsert_entity(self._ent(metric=""))
+        self.assertEqual(self.led.entities["redis"].metric, "95%")
+
+    def test_UNKNOWN_does_not_overwrite_a_real_status(self):
+        self.led.upsert_entity(self._ent(status="CRITICAL"))
+        self.led.upsert_entity(self._ent(status="UNKNOWN"))
+        self.assertEqual(self.led.entities["redis"].status, "CRITICAL")
+
+    def test_but_a_REAL_status_change_still_lands(self):
+        """
+        The merge must not freeze the graph. "Redis is not down right now"
+        genuinely revises CRITICAL to OK, and extraction does emit that.
+        """
+        self.led.upsert_entity(self._ent(status="CRITICAL"))
+        self.led.upsert_entity(self._ent(status="OK"))
+        self.assertEqual(self.led.entities["redis"].status, "OK")
+
+    def test_aliases_accumulate_instead_of_being_replaced(self):
+        """
+        The alias table is what makes "the cache" resolve to Redis across
+        windows. Dropping earlier synonyms is what once split one system
+        across two ids and silently disabled contradiction detection.
+        """
+        self.led.upsert_entity(self._ent(aliases=["Redis", "the cache"]))
+        self.led.upsert_entity(self._ent(aliases=["the shard"]))
+        got = {a.lower() for a in self.led.entities["redis"].aliases}
+        self.assertEqual(got, {"redis", "the cache", "the shard"})
+
+    def test_a_first_write_is_unchanged(self):
+        self.led.upsert_entity(self._ent(status="OK", metric="40%"))
+        e = self.led.entities["redis"]
+        self.assertEqual((e.status, e.metric), ("OK", "40%"))

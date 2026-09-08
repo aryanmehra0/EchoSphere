@@ -283,10 +283,51 @@ export function incidentReducer(
  * Claims Echo may state aloud, with attribution: direct human measurements and
  * tool results. This is the "Established" pane.
  */
-export const selectEstablished = (s: IncidentState): Claim[] =>
-  s.claims.filter(
-    (c) => c.epistemicStatus === "OBSERVED" || c.epistemicStatus === "TOOL_RESULT",
+/**
+ * Ids of claims that some later claim has settled.
+ *
+ * Declared ABOVE its callers on purpose. A `const` arrow function is not
+ * hoisted, so a selector defined earlier that calls this one only works
+ * because the call happens at render time rather than at module load — which
+ * is true today and is exactly the kind of accident that breaks when
+ * somebody reorders a file.
+ */
+export const selectSupersededIds = (s: IncidentState): Set<string> => {
+  const ids = new Set<string>();
+  for (const c of s.claims) if (c.supersedes) ids.add(c.supersedes);
+  return ids;
+};
+
+export const selectEstablished = (s: IncidentState): Claim[] => {
+  /*
+    ── SUPERSEDED CLAIMS ARE EXCLUDED ────────────────────────────────────────
+    `selectOpenHypotheses` already filtered on `selectSupersededIds`; this did
+    not, and the asymmetry was visible on screen.
+
+    Reported live: after "Correction, memory is actually at ninety five
+    percent, not forty", the ESTABLISHED pane listed BOTH readings at 100%
+    confidence —
+
+        Memory is at forty percent right now.        100%
+        The memory is at ninety five percent right.  100%
+
+    — which is precisely the "two incompatible facts presented as settled"
+    failure this product exists to prevent, displayed by the product itself.
+    The backend's `Ledger.established()` had the same gap and was fixed with
+    it; the two must stay in step, because `query_incident_state` reads one
+    and the dashboard renders the other.
+
+    The retired claim stays IN `s.claims` deliberately. It is still part of
+    the record — "what did we believe at 02:08" is a real question — it is
+    simply no longer current.
+  */
+  const settled = selectSupersededIds(s);
+  return s.claims.filter(
+    (c) =>
+      (c.epistemicStatus === "OBSERVED" || c.epistemicStatus === "TOOL_RESULT") &&
+      !settled.has(c.id),
   );
+};
 
 /** Proposed causes. Echo may raise these only as open questions. */
 export const selectHypotheses = (s: IncidentState): Claim[] =>
@@ -302,13 +343,6 @@ export const selectHypotheses = (s: IncidentState): Claim[] =>
  */
 export const selectInferences = (s: IncidentState): Claim[] =>
   s.claims.filter((c) => c.epistemicStatus === "INFERRED");
-
-/** Ids of claims that some later claim has settled. */
-export const selectSupersededIds = (s: IncidentState): Set<string> => {
-  const ids = new Set<string>();
-  for (const c of s.claims) if (c.supersedes) ids.add(c.supersedes);
-  return ids;
-};
 
 /** A hypothesis nothing has settled yet. */
 export const selectOpenHypotheses = (s: IncidentState): Claim[] => {
@@ -342,9 +376,31 @@ export const selectUnresolvedRisks = (s: IncidentState) => {
   };
 };
 
-/** Resolve claim ids to claims — used to render a task's evidence chain. */
+/**
+ * Resolve claim ids to claims — used to render a task's evidence chain.
+ *
+ * ── WHY THE ARRAY CHECK IS `Array.isArray` AND NOT `?.length` ──────────────
+ * It was `if (!ids?.length) return []`, and a STRING has `.length`. So a
+ * `Task.evidence` that arrived as prose rather than a list of ids passed the
+ * guard and died on the next line with
+ *
+ *     TypeError: ids.map is not a function
+ *
+ * React then unmounted the tree and the console RESET mid-incident, losing
+ * the in-memory Ledger before write-behind had flushed it. One spoken
+ * sentence — "Priya, can you check the replica lag?" — took out the whole
+ * session, because the model answered `"evidence": "<the sentence>"`.
+ *
+ * `models.py::coerce_str_list` now fixes this at the boundary, which is the
+ * real fix. This stays as defence in depth: a selector that crashes the app
+ * on unexpected input is the wrong shape regardless of who is feeding it,
+ * and the next provider will have its own ideas about JSON.
+ */
 export const selectClaimsByIds = (s: IncidentState, ids?: string[]): Claim[] => {
-  if (!ids?.length) return [];
+  if (!Array.isArray(ids) || ids.length === 0) return [];
   const byId = new Map(s.claims.map((c) => [c.id, c]));
-  return ids.map((id) => byId.get(id)).filter((c): c is Claim => Boolean(c));
+  return ids
+    .filter((id): id is string => typeof id === "string")
+    .map((id) => byId.get(id))
+    .filter((c): c is Claim => Boolean(c));
 };

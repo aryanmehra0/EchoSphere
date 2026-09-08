@@ -9,6 +9,7 @@ import {
   selectInferences,
   selectOpenContradictions,
   selectOpenHypotheses,
+  selectClaimsByIds,
   selectOpenTasks,
   selectUnresolvedRisks,
   type IncidentAction,
@@ -458,5 +459,108 @@ describe("Ledger projections (v6 §9.1)", () => {
 
   test("open tasks exclude completed work", () => {
     assert.deepEqual(selectOpenTasks(seeded).map((t) => t.id), ["t1"]);
+  });
+});
+
+describe("selectClaimsByIds — a bad shape must not crash the console", () => {
+  /*
+    `Task.evidence` is fed by the analysis model, and one live extraction
+    returned it as PROSE rather than a list of claim ids:
+
+        "evidence": "Priya, can you check the replica lag in the next ten minutes?"
+
+    The guard was `if (!ids?.length) return []`. A string has `.length`, so it
+    passed, and `.map` threw `ids.map is not a function` — React unmounted the
+    tree and the whole console reset mid-incident, losing the in-memory Ledger
+    before write-behind had flushed it to Postgres.
+
+    The real fix is `coerce_str_list` in models.py. This is the second line of
+    defence: a selector that crashes the app on unexpected input is the wrong
+    shape no matter who is feeding it.
+  */
+  const state = {
+    ...initialIncidentState,
+    claims: [
+      { id: "c1", text: "memory at 40 percent", epistemicStatus: "OBSERVED",
+        speakerRole: "DevOps Lead", confidence: 0.9, at: 1 },
+      { id: "c2", text: "cache read timeouts", epistemicStatus: "OBSERVED",
+        speakerRole: "Support Engineer", confidence: 0.9, at: 2 },
+    ],
+  } as typeof initialIncidentState;
+
+  test("a prose string returns empty instead of throwing", () => {
+    const ids = "Priya, can you check the replica lag?" as unknown as string[];
+    assert.doesNotThrow(() => selectClaimsByIds(state, ids));
+    assert.deepEqual(selectClaimsByIds(state, ids), []);
+  });
+
+  test("a real id list still resolves", () => {
+    assert.deepEqual(
+      selectClaimsByIds(state, ["c1", "c2"]).map((c) => c.id),
+      ["c1", "c2"],
+    );
+  });
+
+  test("unknown ids are dropped, known ones kept", () => {
+    assert.deepEqual(
+      selectClaimsByIds(state, ["c1", "nope"]).map((c) => c.id),
+      ["c1"],
+    );
+  });
+
+  test("undefined, null and objects are all survivable", () => {
+    for (const bad of [undefined, null, 42, {}, { length: 3 }]) {
+      assert.doesNotThrow(() => selectClaimsByIds(state, bad as unknown as string[]));
+      assert.deepEqual(selectClaimsByIds(state, bad as unknown as string[]), []);
+    }
+  });
+});
+
+describe("a correction retires the claim it replaces", () => {
+  /*
+    Reported live. After "Correction, memory is actually at ninety five
+    percent, not forty", the ESTABLISHED pane listed BOTH readings at 100%:
+
+        Memory is at forty percent right now.        100%
+        The memory is at ninety five percent right.  100%
+
+    Two incompatible facts, both presented as settled — the exact failure
+    this product exists to prevent, displayed by the product itself.
+
+    `selectOpenHypotheses` already filtered on `selectSupersededIds`;
+    `selectEstablished` did not. The backend's `Ledger.established()` had the
+    same gap and was fixed with it — the two must stay in step, because
+    `query_incident_state` reads one and the dashboard renders the other.
+  */
+  const claim = (id: string, text: string, supersedes?: string) => ({
+    id, text, epistemicStatus: "OBSERVED" as const,
+    speakerRole: "DevOps Lead", confidence: 1, at: 1, entity: "memory",
+    ...(supersedes ? { supersedes } : {}),
+  });
+
+  const corrected = {
+    ...initialIncidentState,
+    claims: [
+      claim("c1", "Memory is at forty percent"),
+      claim("c2", "memory is actually at ninety five percent", "c1"),
+    ],
+  } as typeof initialIncidentState;
+
+  test("the corrected reading is not established any more", () => {
+    const ids = selectEstablished(corrected).map((c) => c.id);
+    assert.deepEqual(ids, ["c2"], "the retired 40 percent reading is still shown");
+  });
+
+  test("but it is still ON the record", () => {
+    // "What did we believe at 02:08" is a question an incident review asks.
+    assert.equal(corrected.claims.length, 2);
+  });
+
+  test("with no correction, nothing is hidden", () => {
+    const plain = {
+      ...initialIncidentState,
+      claims: [claim("c1", "Memory is at forty percent")],
+    } as typeof initialIncidentState;
+    assert.deepEqual(selectEstablished(plain).map((c) => c.id), ["c1"]);
   });
 });

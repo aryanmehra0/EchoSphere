@@ -41,7 +41,7 @@ export const ASR_LABEL = "deepgram/nova-3";
   note. That file builds the agent, so it owns these numbers; this mirror is
   display only, and `tests/pipeline-facts.test.ts` checks what it can.
 */
-export const VAD_INTERRUPT_MS = 300;
+export const VAD_INTERRUPT_MS = 640;
 export const VAD_SILENCE_MS = 1500;
 
 /*
@@ -69,6 +69,36 @@ export const TTS_LABEL = "minimax/speech-2.6";
  */
 export const MANAGED_LLM_LABEL = "gpt-4o-mini (agora)";
 export const GROQ_LLM_LABEL = "groq/gpt-oss-120b";
+
+/**
+ * The SLOW Loop's analysis model — extraction, contradictions, the panel.
+ *
+ * ── WHY THIS ROW EXISTS ─────────────────────────────────────────────────────
+ * The status bar showed only Fast Loop components (LLM / VAD / ASR / TTS), so
+ * there was NO WAY to tell which model was doing the analysis. That produced
+ * exactly the confusion it should have prevented: with `ANALYSIS_PROVIDER=gemma`
+ * configured and Gemma demonstrably running the Deliberation Panel — the
+ * persisted verdict names `gemma4` on both personas — the bar still read
+ * `gpt-4o-mini`, and the reasonable conclusion was that Gemma was not wired up.
+ *
+ * Both were true at once. `gpt-4o-mini` IS Echo's voice; Gemma IS the analysis.
+ * The bar was not wrong, it was incomplete, and an incomplete status bar on a
+ * product whose whole claim is an accurate record is its own small betrayal.
+ *
+ * Mirrors `ANALYSIS_PROVIDER` / `GEMMA_MODEL` in `.env.local`, the same way the
+ * rows above mirror the backend's turn detection. `NEXT_PUBLIC_` prefixed
+ * because the browser needs it and it names a model, never a key.
+ */
+export function analysisLabel(): string {
+  const provider = (process.env.NEXT_PUBLIC_ANALYSIS_PROVIDER ?? "groq")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  if (provider === "gemma") {
+    return process.env.NEXT_PUBLIC_GEMMA_MODEL?.trim() || "gemma4 (local)";
+  }
+  return "groq/gpt-oss-120b";
+}
 
 export function llmLabel(mode: "managed" | "groq" = "managed"): string {
   return mode === "groq" ? GROQ_LLM_LABEL : MANAGED_LLM_LABEL;

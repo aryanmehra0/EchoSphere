@@ -37,6 +37,21 @@ _redaction_total = 0
 def redaction_count() -> int:
     return _redaction_total
 
+
+def note_redactions(n: int) -> None:
+    """
+    Record spans redacted OUTSIDE this module.
+
+    Redaction now runs at the ingest boundary (`routers/ingest.py`) so that
+    nothing downstream — the durable store, the dashboard, the voice channel —
+    ever sees a raw credential. That moved the count out of this module, and
+    `/privacy/inventory` exists precisely so "we redact PII" is a number
+    rather than an assurance. A counter that stopped counting would make that
+    endpoint lie.
+    """
+    global _redaction_total
+    _redaction_total += max(0, int(n))
+
 log = logging.getLogger("echo.extraction")
 
 # §4.4 flush triggers.
@@ -97,13 +112,30 @@ effectively lost.
 Every claim MUST carry speakerRole copied from the transcript line it came
 from. A claim without a source is unusable downstream.
 
+A CORRECTION IS NOT A CONTRADICTION. When a speaker revises their own
+earlier statement — "correction, memory is actually at 95 percent, not 40",
+"scratch that", "I misread it, it's X" — set "supersedes" on the NEW claim to
+the id of the claim it replaces. The Compacted State lists the ids already on
+the record; use the exact id from there.
+
+Signals that this is a correction rather than a conflict: the words
+correction / actually / scratch that / I was wrong / I misread / not X but Y,
+and the SAME speaker revising the SAME property of the SAME entity.
+
+This matters. A superseded claim is retired from the record rather than being
+argued with, so getting it wrong makes Echo interrupt the room to point out
+that someone disagrees with themselves. Two DIFFERENT people disagreeing is
+still a contradiction — do not set supersedes across speakers.
+
+Omit "supersedes" entirely when a claim replaces nothing.
+
 Return JSON with exactly these keys:
 {
   "entities":  [{"id","label","kind","status","detail","metric","aliases"}],
   "links":     [{"id","source","target","label","kind"}],
                // source and target are ENTITY ids from the list above
                // ("e1", "e2"), never claim ids. A link joins two SYSTEMS.
-  "claims":    [{"id","text","entity","epistemicStatus","speakerRole","confidence"}],
+  "claims":    [{"id","text","entity","epistemicStatus","speakerRole","confidence","supersedes"}],
   "tasks":     [{"id","assigneeRole","description","status","evidence"}],
   "timeline":  [{"id","kind","text","actor"}],
   "unchecked": [{"id","description","suggestedOwner"}]

@@ -22,6 +22,70 @@ from dataclasses import dataclass, field
 # Ordered deliberately: the more specific patterns run first, so an email is not
 # half-eaten by the phone-number rule.
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    # ── SECRETS FIRST, AND THIS ROW IS WHY THE FILE EXISTS ─────────────────
+    #
+    # There was NO credential pattern here at all, and the consequence was
+    # reported live. Spoken on the bridge:
+    #
+    #     "The admin password is Hunter two, and the API key is
+    #      sk-test-12345"
+    #
+    # and every layer did its job on it: the transcript rendered it, the
+    # Ledger filed two OBSERVED claims at 100% confidence, Postgres persisted
+    # both, and when the room then asked "what is the admin password?" Echo
+    # read it back ALOUD from the record. A perfect audit trail of a secret.
+    #
+    # The phrase is what gets replaced, not just the value: "the admin
+    # password is X" with only X removed still tells a reader that a password
+    # was said and roughly where to look.
+    #
+    # Deliberately GREEDY. A false positive costs a placeholder in the
+    # transcript; a false negative writes a live credential to disk and then
+    # speaks it. Those are not comparable, so the regex leans hard toward
+    # over-matching.
+    (
+        "SECRET",
+        re.compile(
+            # "password is hunter2", "the passphrase was X", "pin: 1234".
+            # Tail runs to the end of the clause for the same reason as the
+            # key pattern below: a spoken secret is several tokens, not one.
+            r"\b(?:pass(?:word|phrase|code)?|pwd|pin|secret|credential)s?\b"
+            r"(?:\s+(?:for|to|of)\s+\S+)?"
+            r"\s*(?:is|was|are|=|:)?\s*[^.,;?!\n]*",
+            re.I,
+        ),
+    ),
+    (
+        "SECRET",
+        re.compile(
+            # "api key is sk-test-123", "token: abc", "bearer xyz".
+            #
+            # `key` is qualified — a bare "key" is ordinary incident English
+            # ("the key metric", "keyspace"), so it must be preceded by
+            # api/access/secret/private/ssh or followed by is/:/=.
+            #
+            # The tail runs TO THE END OF THE CLAUSE, not one token. ASR
+            # spells a key out as words — "s k dash test dash one two three
+            # four five" — so `\S+` stopped after "s" and published the rest.
+            # That is exactly how the reported leak survived a first attempt
+            # at this pattern.
+            r"\b(?:(?:api|access|secret|private|ssh|auth|bearer)[\s_-]*(?:key|token)"
+            r"|token|keypair)s?\b"
+            r"\s*(?:is|was|are|=|:)?\s*[^.,;?!\n]*",
+            re.I,
+        ),
+    ),
+    (
+        "SECRET",
+        # Vendor-shaped literals, caught even with no introducing phrase, so a
+        # credential pasted or read out bare is still caught. AKIA/ASIA have
+        # no separator, hence the separate alternation.
+        re.compile(
+            r"\b(?:sk|pk|rk|ghp|gho|xox[baprs])[-_][A-Za-z0-9\-_]{4,}\b"
+            r"|\b(?:AKIA|ASIA)[A-Z0-9]{8,}\b"
+            r"|\beyJ[A-Za-z0-9_-]{10,}",
+        ),
+    ),
     ("EMAIL", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")),
     # 13–16 digits, optionally spaced or hyphened. Deliberately loose: a false
     # positive costs a placeholder, a false negative leaks a card number.

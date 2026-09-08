@@ -415,3 +415,76 @@ class GraphLinks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LlmSuppliedListShapes(unittest.TestCase):
+    """
+    A model-fed `list[str]` field can arrive as a bare string, and the type
+    hint does not stop it.
+
+    Live: asked to extract a task from "Priya, can you check the replica lag?",
+    the analysis model returned
+
+        "evidence": "Priya, can you check the replica lag in the next ten minutes?"
+
+    The dashboard's `selectClaimsByIds` guarded with `if (!ids?.length)` — and
+    a string has `.length` — so `.map` threw `ids.map is not a function`,
+    React unmounted the tree, and the console reset mid-incident, losing the
+    in-memory Ledger before it had been flushed to Postgres.
+
+    One sentence, whole session. These pin the coercion that stops it.
+    """
+
+    def test_a_prose_evidence_string_is_dropped_not_wrapped(self):
+        from app.models import Task
+
+        t = Task(
+            id="t1", assignee_role="Priya", description="check replica lag",
+            status="OPEN",
+            evidence="Priya, can you check the replica lag in the next ten minutes?",
+        )
+        # Dropped: `evidence` means claim ids, and a quoted sentence is not
+        # one. A fake reference in the evidence chain is worse than none.
+        self.assertEqual(t.evidence, [])
+        self.assertIsInstance(t.evidence, list)
+
+    def test_a_real_id_list_survives_untouched(self):
+        from app.models import Task
+
+        t = Task(id="t1", assignee_role="DBA", description="x", status="OPEN",
+                 evidence=["c1", "c2"])
+        self.assertEqual(t.evidence, ["c1", "c2"])
+
+    def test_junk_entries_are_filtered(self):
+        from app.models import Task
+
+        t = Task(id="t1", assignee_role="DBA", description="x", status="OPEN",
+                 evidence=["c1", None, "", {"a": 1}, "  c2  "])
+        self.assertEqual(t.evidence, ["c1", "c2"])
+
+    def test_claim_contradicts_is_coerced_the_same_way(self):
+        from app.models import Claim
+
+        c = Claim(id="c1", text="x", epistemic_status="OBSERVED",
+                  speaker_role="DevOps Lead", confidence=0.9,
+                  contradicts="some prose the model invented")
+        self.assertEqual(c.contradicts, [])
+
+    def test_a_lone_alias_is_KEPT_because_prose_is_not_an_id(self):
+        """
+        The opposite decision from `evidence`, deliberately. "Redis" as a
+        single alias is genuinely one alias, and dropping it would silently
+        break the entity resolution that the alias table drives.
+        """
+        from app.models import Entity
+
+        e = Entity(id="redis", label="Redis", kind="datastore",
+                   status="OK", aliases="the cache")
+        self.assertEqual(e.aliases, ["the cache"])
+
+    def test_none_is_an_empty_list_not_a_crash(self):
+        from app.models import Task
+
+        t = Task(id="t1", assignee_role="DBA", description="x", status="OPEN",
+                 evidence=None)
+        self.assertEqual(t.evidence, [])

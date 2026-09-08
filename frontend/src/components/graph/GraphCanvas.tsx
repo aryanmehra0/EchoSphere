@@ -52,21 +52,60 @@ const EDGE_STYLE: Record<EdgeKind, { dashed: boolean; width: number }> = {
   depends: { dashed: false, width: 1.2 },
 };
 
+/**
+ * Fallback layout for entities the pipeline gave no coordinates.
+ *
+ * A grid rather than a circle or a force simulation: it is deterministic, so
+ * a node keeps its place as the incident grows, and `fitView` below frames
+ * whatever exists. Three columns keeps a typical 3–6 entity incident close to
+ * square in a panel that is taller than it is wide.
+ *
+ * Spacing is generous because `EntityNode` cards carry a label, a status dot
+ * and sometimes a metric; tighter values overlapped the cards, which looks
+ * like the same bug this replaced.
+ */
+const GRID_COLUMNS = 3;
+const GRID_X = 260;
+const GRID_Y = 150;
+
+function gridPosition(index: number): { x: number; y: number } {
+  return {
+    x: (index % GRID_COLUMNS) * GRID_X,
+    y: Math.floor(index / GRID_COLUMNS) * GRID_Y,
+  };
+}
+
 function Canvas() {
   const { state } = useIncident();
   const { fitView } = useReactFlow();
 
   const nodes = useMemo<EntityNodeType[]>(
     () =>
-      state.entities.map((e) => ({
+      state.entities.map((e, i) => ({
         id: e.id,
         type: "entity" as const,
-        position: e.position ?? { x: 0, y: 0 },
+        /*
+          ── EVERY NODE NEEDS ITS OWN COORDINATES ─────────────────────────
+          This was `e.position ?? { x: 0, y: 0 }`, and NOTHING sets
+          `position`: the backend's `Entity.position` is optional and the
+          extraction pipeline never fills it in. So every entity fell to the
+          same fallback and they stacked exactly on top of each other at the
+          origin.
+
+          Reported as "only one node appears in the graph". The header was
+          reading `4n · 1e` at the time, which was correct — four nodes
+          existed, three were hidden underneath the fourth. The count and the
+          canvas disagreed, and the count was right.
+
+          A server-supplied position still wins, so a future layout pass on
+          the Slow Loop needs no change here. Absent one, nodes are laid out
+          on a grid derived from their INDEX, which is stable: entity order
+          is preserved across deltas (there is a test for that), so a node
+          does not jump around as the incident grows.
+        */
+        position: e.position ?? gridPosition(i),
         data: e,
         draggable: false,
-        // Entities the LLM discovers late have no layout hint; they land at the
-        // origin rather than being silently dropped, which makes the gap
-        // visible instead of mysterious.
         selectable: true,
       })),
     [state.entities],
@@ -74,9 +113,17 @@ function Canvas() {
 
   const edges = useMemo<Edge[]>(() => {
     const byId = new Map(state.entities.map((e) => [e.id, e]));
+    // The SAME positions the nodes were rendered with. Reading `e.position`
+    // here would be undefined for every grid-placed node, so `dx`/`dy` both
+    // came out 0 and every edge picked the same handle pair regardless of
+    // which way it actually travelled.
+    const placed = new Map(
+      state.entities.map((e, i) => [e.id, e.position ?? gridPosition(i)]),
+    );
 
     return state.links.map((l) => {
-      const src = byId.get(l.source);
+      // `src` is gone: its only use was reading `.position`, which is now
+      // taken from `placed` above so grid-laid-out nodes route correctly.
       const tgt = byId.get(l.target);
       const status = tgt?.status ?? "UNKNOWN";
       const stroke = EDGE_STROKE[status];
@@ -85,8 +132,8 @@ function Canvas() {
       // Choose the handle pair facing the direction of travel. Without this,
       // a link to the node directly above exits rightward and loops back over
       // its own source card.
-      const dx = (tgt?.position?.x ?? 0) - (src?.position?.x ?? 0);
-      const dy = (tgt?.position?.y ?? 0) - (src?.position?.y ?? 0);
+      const dx = (placed.get(l.target)?.x ?? 0) - (placed.get(l.source)?.x ?? 0);
+      const dy = (placed.get(l.target)?.y ?? 0) - (placed.get(l.source)?.y ?? 0);
       const horizontal = Math.abs(dx) >= Math.abs(dy);
 
       const sourceHandle = horizontal

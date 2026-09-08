@@ -185,10 +185,36 @@ async def start(
     # returns an empty completion, and VAD fires on coughs and room noise, so a
     # non-empty value is read aloud on every stray sound. Live runs recorded
     # "One moment." five times into a silent room.
+    # ── max_history IS A SECRETS CONTROL, NOT ONLY A CONTEXT BUDGET ────────
+    #
+    # This is the number of RAW recognised turns Agora keeps inside its own
+    # LLM context. Our redaction runs at the ingest boundary and keeps
+    # credentials out of the transcript, the Ledger and Postgres — verified,
+    # zero rows — but Agora's ASR feeds Agora's LLM directly. That copy is
+    # not ours to scrub.
+    #
+    # The consequence was reported live: a password spoken aloud did NOT
+    # appear anywhere in our record, and Echo still said it back when asked,
+    # because it was remembering rather than reading.
+    #
+    # 32 turns is a long memory for that exposure. 12 keeps Echo coherent
+    # across a normal exchange — plenty for "what did I just say", follow-up
+    # questions and a clarification — while making an accidental secret age
+    # out of context in a couple of minutes of conversation rather than
+    # persisting for the whole incident.
+    #
+    # This is the STRUCTURAL half of the fix. The prompt clause
+    # (`SECRETS_CLAUSE` in agent-config.ts) is the soft half, and a prompt is
+    # a request. Neither is sufficient alone: the prompt covers the window
+    # that is still in memory, this bounds how long that window lasts.
+    #
+    # The Ledger is unaffected — it is the durable record, and `recap()` hands
+    # a replacement agent an attributed, non-diagnostic summary. Shrinking
+    # Agora's short-term memory does not shorten the incident's memory.
     llm_kwargs: dict[str, Any] = {
         "greeting_message": greeting or "",
         "failure_message": "",
-        "max_history": 32,
+        "max_history": 12,
         "system_messages": [{"role": "system", "content": system_prompt}],
     }
     if llm_mode == "groq":
@@ -279,7 +305,29 @@ async def start(
             "start_of_speech": {
                 "mode": "vad",
                 "vad_config": {
-                    "interrupt_duration_ms": 300,
+                    # ── 640, NOT 300: ECHO WAS BEING CUT OFF MID-SENTENCE ──
+                    # This is how much detected speech BARGES IN on Echo. At
+                    # 300ms almost anything qualifies — a cough, an "mm-hm",
+                    # a chair creak, breathing near the mic — so Echo's
+                    # answers were being truncated part-way through. Reported
+                    # as "the voice of Echo is getting cut sometimes".
+                    #
+                    # The history here is instructive: it was 160ms, raised
+                    # to 300 for exactly this symptom, and 300 was still not
+                    # enough. Barge-in has to clear the noise floor of a real
+                    # room, not a quiet desk.
+                    #
+                    # 640ms is roughly two syllables — long enough that
+                    # genuine speech ("Echo, stop") still interrupts promptly,
+                    # short enough that it does not feel unresponsive when
+                    # somebody really does need to cut in.
+                    #
+                    # Trade-off, stated: interrupting Echo now needs a
+                    # deliberate utterance rather than any sound at all. On an
+                    # agent whose job is to be interruptible that is a real
+                    # cost — but being unable to finish a sentence is worse,
+                    # because the information never lands.
+                    "interrupt_duration_ms": 640,
                     "prefix_padding_ms": 800,
                 },
             },
@@ -294,7 +342,12 @@ async def start(
         client=client,
         instructions=system_prompt,
         failure_message="",
-        max_history=32,
+        # 12, not 32 — and this is the occurrence that SHIPS. There is a
+        # second `max_history` in `llm_kwargs` above; both were 32 and only
+        # changing one would have left the exposure in place while looking
+        # fixed, which is the worst possible outcome for a secrets control.
+        # See the long note on `llm_kwargs` for why this number matters.
+        max_history=12,
         turn_detection=turn_detection,
         advanced_features={"enable_rtm": True, "enable_tools": bool(tools)},
         parameters={

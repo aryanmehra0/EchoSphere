@@ -77,14 +77,43 @@ type ToolkitItem = TranscriptHelperItem<
 function toAgentState(raw: string | undefined): AgentState {
   switch ((raw ?? "").toLowerCase()) {
     case "listening":
+    case "idle":
+    case "ready":
+    case "connected":
+    case "silent":
       return "listening";
     case "thinking":
     case "processing":
       return "thinking";
     case "speaking":
       return "speaking";
-    default:
+    /*
+      ── UNKNOWN IS NOT OFFLINE ────────────────────────────────────────────
+      `default: return "offline"` was reported live as Echo showing
+      "Offline — Not attached to the bridge" while Agora's own status
+      endpoint said RUNNING for that exact agent id, and the backend was
+      still holding the registration.
+
+      The agent was fine. The console was mapping any status string it did
+      not recognise — a transient one between turns, a value Agora added, an
+      empty frame — onto the one badge that means "this is dead".
+
+      That reads as a broken bridge and invites a restart of something that
+      is working, which is the most expensive kind of wrong status. Only an
+      EXPLICIT terminal signal marks Echo offline now; anything unrecognised
+      is treated as attached-but-quiet, which is the truthful reading of "we
+      have a live agent and no idea what it is doing this instant".
+
+      `stop()` and `/agent/unregister` set offline deliberately, so a real
+      departure still shows.
+    */
+    case "offline":
+    case "disconnected":
+    case "stopped":
+    case "failed":
       return "offline";
+    default:
+      return "listening";
   }
 }
 

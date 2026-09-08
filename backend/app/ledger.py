@@ -119,6 +119,55 @@ class Ledger:
         return claim
 
     def upsert_entity(self, entity: Entity) -> Entity:
+        """
+        Merge an entity, keeping detail a later window simply did not mention.
+
+        ── WHY THIS IS A MERGE AND NOT A REPLACE ───────────────────────────
+        This was `self.entities[entity.id] = entity`, a wholesale overwrite,
+        and every window that touched a system clobbered whatever the last
+        one knew about it.
+
+        Two symptoms, both reported:
+
+          - A node showed `95%` and the database column was EMPTY. The metric
+            had been set by one window and then blanked by the next, which
+            mentioned the same system without restating the number.
+          - `status` stayed CRITICAL after "Redis is not down right now",
+            because the window carrying the correction proposed no status at
+            all and the previous CRITICAL survived by accident rather than
+            by judgement.
+
+        So the rule is: a later window may UPDATE a field, but silence is not
+        an update. `UNKNOWN` is silence for status — it is the schema's own
+        "nobody said" value and the fallback `coerce()` uses — so it must not
+        overwrite a real reading. A None metric or detail is the same.
+
+        Aliases accumulate rather than replace: the alias table is what makes
+        "the cache" resolve to Redis across windows, and dropping earlier
+        synonyms is what once split one system across two ids and silently
+        disabled contradiction detection.
+        """
+        prior = self.entities.get(entity.id)
+        if prior is not None:
+            if entity.status == "UNKNOWN" and prior.status != "UNKNOWN":
+                entity.status = prior.status
+            # `""` counts as silence, not as an update. Measured: the model
+            # returns `"metric": ""` and `"detail": ""` for a window that
+            # simply did not restate them, so an `is None` check alone let an
+            # empty string through and blanked the value anyway — which is the
+            # metric-vanishing bug wearing a different type.
+            if not entity.metric:
+                entity.metric = prior.metric
+            if not entity.detail:
+                entity.detail = prior.detail
+            if prior.position and not entity.position:
+                entity.position = prior.position
+            # Union, order-preserving, case-insensitive on duplicates.
+            seen = {a.lower() for a in entity.aliases}
+            entity.aliases = entity.aliases + [
+                a for a in prior.aliases if a.lower() not in seen
+            ]
+
         self.entities[entity.id] = entity
         store.save(entity, self.channel)
         return entity
@@ -205,10 +254,26 @@ class Ledger:
     # -- projections (mirror of the frontend selectors) --------------------
 
     def established(self) -> list[Claim]:
-        """Claims Echo may state aloud, with attribution."""
+        """
+        Claims Echo may state aloud, with attribution.
+
+        ── SUPERSEDED CLAIMS ARE EXCLUDED ──────────────────────────────────
+        `open_hypotheses` and `open_unchecked` already filtered on
+        `superseded_ids()`; this did not. So a measurement the speaker had
+        explicitly corrected stayed in the speakable set, and the close-out
+        would read out BOTH readings — "DevOps reported memory at 40 percent;
+        DevOps reported memory at 95 percent" — as though both still stood.
+
+        A retired claim is still IN the Ledger, deliberately: the audit trail
+        is the point, and "what did we believe at 01:48" is a question an
+        incident review asks. It is simply no longer current, so it is not
+        offered as something Echo may assert.
+        """
+        settled = self.superseded_ids()
         return [
             c for c in self.claims.values()
             if c.epistemic_status in ("OBSERVED", "TOOL_RESULT")
+            and c.id not in settled
         ]
 
     def hypotheses(self) -> list[Claim]:

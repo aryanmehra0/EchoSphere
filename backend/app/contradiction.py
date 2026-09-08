@@ -343,6 +343,28 @@ class ContradictionEngine:
                 return True
             return new.entity in _named_entities(c.text, table)
 
+        """
+        ── A CORRECTION IS NOT A CONTRADICTION ─────────────────────────────
+        Two exclusions below carry that rule, and neither existed:
+
+        `retired` — every id some later claim supersedes. A speaker saying
+        "correction, memory is actually 95 percent, not 40" retires their own
+        earlier measurement, and arguing with a retired claim is arguing with
+        something nobody stands behind any more.
+
+        `new.supersedes` — the new claim must not be compared against the
+        very claim it replaces. Without this the correction and the original
+        are still a candidate pair, which is precisely the interruption that
+        was reported: Echo told the room that somebody disagreed with
+        themselves, seconds after they had corrected themselves.
+
+        What is deliberately NOT excluded: two DIFFERENT speakers disagreeing.
+        That is the real thing, and `supersedes` is only set within one
+        speaker's own revisions (see the extraction prompt).
+        """
+        retired = {c.supersedes for c in existing if c.supersedes}
+        retired.update(c.supersedes for c in [new] if c.supersedes)
+
         return [
             c for c in existing
             if c.id != new.id
@@ -353,6 +375,10 @@ class ContradictionEngine:
             and c.epistemic_status in ("OBSERVED", "TOOL_RESULT")
             and c.at >= cutoff
             and not _same_utterance(c)
+            # Retired by a later correction, or the very claim this one
+            # corrects.
+            and c.id not in retired
+            and c.id != new.supersedes
         ]
 
     def retrieve(self, new: Claim, candidates: list[Claim]) -> list[tuple[Claim, float]]:

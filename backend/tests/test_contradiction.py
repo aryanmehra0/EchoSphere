@@ -374,3 +374,96 @@ class TestPanelIsTheDefaultJudge(unittest.TestCase):
         self.assertTrue(all(m for m in seen), "a persona ran unpinned")
         self.assertEqual(len(set(map(tuple, seen))), len(seen),
                          "personas shared a model — independence lost")
+
+
+class ACorrectionIsNotAContradiction(unittest.TestCase):
+    """
+    Reported live.
+
+    Spoken: "Memory is at forty percent." then, moments later, "Correction,
+    memory is actually at ninety five percent, not forty."
+
+    Echo raised a CONTRADICTION and interrupted the room to report that
+    DevOps disagreed with DevOps. The speaker had just corrected themselves,
+    which is the opposite of a conflict — and it makes Echo look like it is
+    not listening.
+
+    Three layers were all missing the same field. `supersedes` existed on the
+    model and in the schema, but the extraction prompt never ASKED for it,
+    the pipeline never READ it, and `scope` never CHECKED it. Every row in the
+    database had it NULL, including claims beginning "Correction,".
+    """
+
+    def setUp(self):
+        self.eng = ContradictionEngine()
+
+    def _claim(self, cid, text, *, role="DevOps Lead", at=None, supersedes=None):
+        return Claim(
+            id=cid, text=text, epistemic_status="OBSERVED", speaker_role=role,
+            confidence=1.0, entity="redis",
+            at=at if at is not None else now_ms(),
+            supersedes=supersedes,
+        )
+
+    def test_a_self_correction_is_not_scoped_against_what_it_replaces(self):
+        original = self._claim("c1", "Memory is at forty percent", at=now_ms() - 20_000)
+        correction = self._claim(
+            "c2", "memory is actually at ninety five percent", supersedes="c1",
+        )
+        # The claim being corrected must not be a candidate at all.
+        self.assertNotIn(
+            "c1",
+            [c.id for c in self.eng.scope(correction, [original])],
+            "Echo would interrupt to say the speaker disagrees with themselves",
+        )
+
+    def test_a_retired_claim_is_not_argued_with_by_LATER_claims_either(self):
+        original = self._claim("c1", "Memory is at forty percent", at=now_ms() - 30_000)
+        correction = self._claim(
+            "c2", "memory is actually at ninety five percent",
+            supersedes="c1", at=now_ms() - 20_000,
+        )
+        later = self._claim("c3", "Memory is at ninety five percent")
+        # `c1` is retired, so a third claim must not conflict with it.
+        self.assertNotIn(
+            "c1", [c.id for c in self.eng.scope(later, [original, correction])],
+        )
+
+    def test_two_DIFFERENT_speakers_still_contradict(self):
+        """
+        The rule must not swallow the real thing. `supersedes` is only set
+        within one speaker's own revisions; cross-speaker disagreement is the
+        headline feature and stays intact.
+        """
+        a = self._claim("c1", "The cache is fine", role="DevOps Lead",
+                        at=now_ms() - 20_000)
+        b = self._claim("c2", "cache read timeouts on checkout",
+                        role="Support Engineer")
+        self.assertIn("c1", [c.id for c in self.eng.scope(b, [a])])
+
+
+class SupersededClaimsLeaveTheSpeakableSet(unittest.TestCase):
+
+    def test_established_excludes_a_corrected_measurement(self):
+        """
+        Otherwise the close-out reads BOTH readings aloud as though both
+        still stood: "DevOps reported 40 percent; DevOps reported 95 percent".
+        """
+        from app.ledger import Ledger
+
+        led = Ledger()
+        led.upsert_claim(Claim(
+            id="c1", text="Memory is at forty percent", epistemic_status="OBSERVED",
+            speaker_role="DevOps Lead", confidence=1.0, entity="redis",
+        ))
+        led.upsert_claim(Claim(
+            id="c2", text="memory is actually at ninety five percent",
+            epistemic_status="OBSERVED", speaker_role="DevOps Lead",
+            confidence=1.0, entity="redis", supersedes="c1",
+        ))
+
+        speakable = [c.id for c in led.established()]
+        self.assertNotIn("c1", speakable, "the corrected reading is still speakable")
+        self.assertIn("c2", speakable)
+        # But it is still ON the record — the audit trail is the point.
+        self.assertIn("c1", led.claims)

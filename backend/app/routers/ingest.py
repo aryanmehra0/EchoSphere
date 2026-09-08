@@ -15,7 +15,9 @@ from fastapi import APIRouter
 
 from .. import store
 from ..deps import session, speech
+from ..extraction import note_redactions
 from ..models import TimelineEvent, Transcript, now_ms
+from ..redaction import redact
 from ..services import pipeline
 from ..utterance import EpistemicViolation
 
@@ -127,11 +129,46 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
         return {"accepted": True, "recording": privacy.state.recording,
                 "announced": decision.announce, "spoken": spoke}
 
+    """
+    ── REDACT HERE, AT THE DOOR, NOT LATER ─────────────────────────────────
+    Redaction used to happen ONLY inside `extraction.extract()`, which runs
+    on the window a second or two later. Everything upstream of that saw raw
+    speech — and there is a lot upstream:
+
+        store.save(t)        -> the secret is now on disk, permanently
+        hub.publish(...)     -> it renders in every open dashboard
+        window.add(t)        -> it reaches the extraction LLM anyway
+
+    Reported live. Spoken on the bridge:
+
+        "The admin password is Hunter two, and the API key is sk-test-12345"
+
+    and every layer faithfully recorded it: transcript rendered, two OBSERVED
+    claims filed at 100% confidence, both rows persisted to Postgres. Then
+    somebody asked "what is the admin password?" and Echo READ IT BACK ALOUD,
+    correctly, from its own record.
+
+    The design intent was never in doubt — `privacy.py`'s own comment says
+    redaction "decides what a VENDOR sees". That was the mistake: a vendor is
+    not the only thing that must not see a credential. Our own disk, our own
+    dashboard and our own voice channel all must not either.
+
+    So it moves to the ingest boundary, where a single call covers every
+    downstream consumer at once. §10.4 says transcripts are session-scoped and
+    purged; it did not say they could be written in the clear on the way there.
+    """
+    redacted = redact(text)
+    if redacted.count:
+        note_redactions(redacted.count)
+        log.info(
+            "observer: redacted %d span(s) before storing or publishing", redacted.count,
+        )
+
     t = Transcript(
         message_id=body.get("messageId") or f"m-{now_ms()}",
         uid=uid,
         role=role,
-        text=text,
+        text=redacted.text,
         is_final=bool(body.get("isFinal", True)),
         at=int(body.get("at") or now_ms()),
     )

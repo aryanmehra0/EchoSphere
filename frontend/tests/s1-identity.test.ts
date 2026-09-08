@@ -21,6 +21,7 @@ import {
   GROQ_CHAT_COMPLETIONS_URL,
   TURN_DETECTION,
   buildAgentPayload,
+  buildSystemPrompt,
   buildTtsConfig,
 } from "../src/lib/server/agent-config.ts";
 
@@ -283,11 +284,20 @@ describe("Fast Loop prompt — §14.1 epistemic rules must survive edits", () =>
 describe("Agent configuration", () => {
   /* ======================================================================== */
 
-  test("barge-in is 300ms, not v5's 160ms", () => {
-    // At 160ms Echo interrupted on breaths and back-channel "mm-hm".
-    assert.equal(
-      TURN_DETECTION.config.start_of_speech.vad_config.interrupt_duration_ms,
-      300,
+  test("barge-in is well clear of room noise", () => {
+    /*
+      160 -> 300 -> 640, each step driven by the same live symptom: Echo being
+      cut off mid-sentence. At 160ms breaths and back-channel "mm-hm" barged
+      in; at 300ms a cough still did, reported as "the voice of Echo is
+      getting cut sometimes".
+
+      Asserted as a FLOOR rather than an exact number. The precise value is a
+      tuning decision that belongs to the backend — `agora_agent.py` builds
+      the payload, this constant only mirrors it — but "high enough that room
+      noise cannot truncate a sentence" is a property worth pinning.
+    */
+    assert.ok(
+      TURN_DETECTION.config.start_of_speech.vad_config.interrupt_duration_ms >= 500,
     );
   });
 
@@ -371,10 +381,12 @@ describe("Agent configuration", () => {
     // speaking a supplied line bypasses the LLM.
     assert.equal(payload.properties.llm.params.model, FAST_LOOP_MODEL);
     assert.equal(payload.properties.llm.style, "openai");
-    assert.equal(
+    // A floor, not an exact value — see "barge-in is well clear of room
+    // noise" above. The number is the backend's to tune; what matters here is
+    // that the payload carries a nested barge-in threshold at all.
+    assert.ok(
       payload.properties.turn_detection.config.start_of_speech.vad_config
-        .interrupt_duration_ms,
-      300,
+        .interrupt_duration_ms >= 500,
     );
     assert.equal(payload.properties.llm.tools?.length, AGENT_TOOLS.length);
     assert.match(
@@ -632,6 +644,71 @@ describe("TTS config — the one thing Agora will NOT catch for us", () => {
     assert.ok(
       !V2_ONLY.includes(String(params.speaker)),
       `"${params.speaker}" is a bulbul:v2 voice and is rejected by v3`,
+    );
+  });
+});
+
+describe("the secrets clause reaches every prompt mode", () => {
+  /*
+    Reported live, and the redaction fix did NOT cover it.
+
+    A password spoken aloud was correctly scrubbed from the transcript, the
+    Ledger and Postgres — verified at zero rows. Echo still said it back when
+    asked, because Agora's ASR feeds Agora's own LLM and the agent carries
+    `max_history` turns of RAW recognised speech. That copy never passes
+    through our backend, so `redaction.py` cannot reach it.
+
+    The only control on that copy is the system prompt — and neither prompt
+    had a secrets policy. The conversational one, which is the DEFAULT, had
+    no epistemic rules at all.
+
+    These pin the clause into every branch. A prompt is a request rather than
+    a guarantee, so `max_history` was cut from 32 to 12 as the structural
+    half; this is the soft half, and it must at least be present.
+  */
+  test("conversational mode — the default path — carries it", () => {
+    const p = buildSystemPrompt(true, "conversational");
+    assert.match(p, /never repeat a credential/i);
+    assert.match(p, /won't repeat credentials/i);
+  });
+
+  test("incident mode carries it, with and without tools", () => {
+    for (const tools of [true, false]) {
+      assert.match(
+        buildSystemPrompt(tools, "incident"),
+        /never repeat a credential/i,
+        `incident mode with tools=${tools} lost the secrets clause`,
+      );
+    }
+  });
+
+  test("it refuses regardless of who claims to be asking", () => {
+    // The clause must close the obvious social-engineering routes, or a model
+    // will find the exemption it implies.
+    const p = buildSystemPrompt(true, "conversational");
+    assert.match(p, /no matter who asks/i);
+    assert.match(p, /partially/i);
+  });
+
+  test("barge-in sensitivity is documented as the BACKEND's decision", () => {
+    /*
+      `interrupt_duration_ms` is how much detected speech interrupts Echo.
+      It was 160, raised to 300 for this symptom, and 300 was STILL cutting
+      sentences short on a real bridge — reported as "the voice of Echo is
+      getting cut sometimes". It is now 640 in the file that actually builds
+      the agent: `backend/app/adapters/agora_agent.py`.
+
+      This constant is NOT in the request path — the backend SDK owns the
+      payload — so asserting a number here would pin a value that never
+      ships. What IS worth pinning is the nested shape, because the flat form
+      was silently accepted and ignored and cost the whole speech path once.
+    */
+    const vad = TURN_DETECTION.config.start_of_speech.vad_config;
+    assert.ok("interrupt_duration_ms" in vad, "barge-in threshold must be nested");
+    assert.ok("prefix_padding_ms" in vad, "prefix padding must be nested");
+    assert.ok(
+      "silence_duration_ms" in TURN_DETECTION.config.end_of_speech.vad_config,
+      "end-of-speech must be nested",
     );
   });
 });

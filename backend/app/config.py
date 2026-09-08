@@ -346,13 +346,25 @@ def database_url() -> str:
     in-memory Ledger it has always used, not refuse to start.
 
     So this returns "" rather than raising, and `store.py` treats that as
-    "persistence disabled". `docker-compose.yml` publishes 5433, not 5432 —
-    developer machines very often already run a Postgres on the default port,
-    and connecting to the wrong server produces a confusing "database exists
-    but the tables are missing".
+    "persistence disabled".
+
+    ── THE PORT IS 5434, AND THE REASON IS A REAL FAILURE ──────────────────
+    `docker-compose.yml` publishes 5434, not 5432 — developer machines very
+    often already run a Postgres on the default port, and connecting to the
+    wrong server produces a confusing "database exists but the tables are
+    missing".
+
+    It was 5433 until Sep 9, when that collided with another project's
+    container already healthy on this machine. `store.connect()` reached a
+    real Postgres and was refused with `password authentication failed for
+    user "echo"`, so /health reported persistence disabled and the Ledger
+    silently ran in memory — losing the incident on every restart. The
+    credentials looked wrong; the port was wrong.
+
+    Keep this in step with `docker-compose.yml`.
     """
     return _optional(
-        "DATABASE_URL", "postgresql://echo:echo@127.0.0.1:5433/echosphere"
+        "DATABASE_URL", "postgresql://echo:echo@127.0.0.1:5434/echosphere"
     )
 
 

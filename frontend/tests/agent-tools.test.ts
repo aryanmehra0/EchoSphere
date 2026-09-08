@@ -16,6 +16,7 @@ import {
   FAST_LOOP_MODEL,
   FAST_LOOP_SYSTEM_PROMPT,
   NO_TOOLS_ADDENDUM,
+  SECRETS_CLAUSE,
 } from "../src/lib/server/agent-config.ts";
 
 /**
@@ -35,10 +36,25 @@ import {
  */
 
 describe("the system prompt adapts to whether the Ledger is readable", () => {
-  test("with tools, the prompt is exactly the reviewed constant", () => {
-    // Not "starts with" — the epistemic rules must not acquire an invisible
-    // tail in the normal case.
-    assert.equal(buildSystemPrompt(true, "incident"), FAST_LOOP_SYSTEM_PROMPT);
+  test("with tools, the prompt is the reviewed constant plus ONLY the secrets clause", () => {
+    /*
+      This asserted exact equality, to stop the epistemic rules acquiring an
+      invisible tail. The intent is right and is kept — but one deliberate
+      tail now exists, and it was added for a reported leak:
+
+      A password spoken aloud was scrubbed from the transcript, the Ledger and
+      Postgres, and Echo STILL said it back, because Agora keeps `max_history`
+      turns of raw ASR in its own LLM context. Our redaction cannot reach that
+      copy; only the prompt can.
+
+      So the assertion becomes "the constant, plus the secrets clause, and
+      nothing else" — which still catches an accidental tail while permitting
+      the one that was reviewed.
+    */
+    assert.equal(
+      buildSystemPrompt(true, "incident"),
+      FAST_LOOP_SYSTEM_PROMPT + SECRETS_CLAUSE,
+    );
   });
 
   test("without tools, it says so rather than leaving the model stuck", () => {

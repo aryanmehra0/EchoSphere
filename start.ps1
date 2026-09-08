@@ -373,17 +373,43 @@ if ($Tunnel) {
         Where-Object { $_.FullName -ne $tlog } |
         ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
 
+    # ── CAPTURE stdout, NOT --logfile ──────────────────────────────────────
+    #
+    # This used to pass `--logfile $tlog` and then grep that file for the
+    # URL. cloudflared does not put it there: the quick-tunnel hostname is
+    # printed to STDOUT inside a banner, while --logfile receives the
+    # structured JSON log. So the log ended at
+    #
+    #     "Requesting new quick Tunnel on trycloudflare.com..."
+    #
+    # and the URL never appeared in the file being watched. The loop below
+    # then timed out and reported "the tunnel did not come up" — four times in
+    # a row — while cloudflared was working perfectly. Measured directly: the
+    # tunnel was live in SEVEN SECONDS.
+    #
+    # A failure that blames a healthy dependency is worse than a crash: it
+    # sends you to Cloudflare's status page instead of to this line.
+    #
+    # `-RedirectStandardOutput` gives us the banner, and stderr goes alongside
+    # it so a genuine failure is still visible in the same file.
     Start-Process -FilePath $cf.Source `
-        -ArgumentList "tunnel", "--url", "http://localhost:8000", "--logfile", $tlog `
+        -ArgumentList "tunnel", "--url", "http://localhost:8000", "--no-autoupdate" `
+        -RedirectStandardOutput $tlog `
+        -RedirectStandardError "$tlog.err" `
         -WindowStyle Hidden
 
+    # BOTH streams are searched. cloudflared has moved this banner between
+    # stdout and stderr across versions, and watching only one is exactly the
+    # bug above wearing a different hat.
     foreach ($i in 1..45) {
         Start-Sleep -Milliseconds 1000
-        if (Test-Path $tlog) {
-            $m = Select-String -Path $tlog -Pattern "https://[a-z0-9-]+\.trycloudflare\.com" `
+        foreach ($candidate in @($tlog, "$tlog.err")) {
+            if (-not (Test-Path $candidate)) { continue }
+            $m = Select-String -Path $candidate -Pattern "https://[a-z0-9-]+\.trycloudflare\.com" `
                  -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($m) { $tunnelUrl = $m.Matches[0].Value; break }
         }
+        if ($tunnelUrl) { break }
     }
 
     if (-not $tunnelUrl) {

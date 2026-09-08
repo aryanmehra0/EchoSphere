@@ -32,10 +32,26 @@ services:
       POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
     ports:
       # Published on the host because the Slow Loop runs there, not in this
-      # network. 5433 rather than 5432: a developer machine very often already
-      # has a Postgres on the default port, and the failure is a confusing
+      # network. NOT 5432: a developer machine very often already has a
+      # Postgres on the default port, and the failure is a confusing
       # "database exists but the tables are missing" against the wrong server.
-      - "5433:5432"
+      #
+      # ── AND NOT 5433 EITHER, WHICH IS THE SAME BUG ONE PORT ALONG ─────────
+      # 5433 was the original choice and it collided with `lawgic-pg`, another
+      # project's database, already healthy on this machine. The symptom was
+      # exactly what the paragraph above warns about: `store.connect()`
+      # reached a real Postgres, was refused with
+      #
+      #     password authentication failed for user "echo"
+      #
+      # and /health reported persistence disabled — so the Ledger silently ran
+      # in memory and every restart lost the incident. Nothing pointed at the
+      # port; the credentials looked wrong instead.
+      #
+      # 5434 is checked free here. If it ever collides too, the fix is this
+      # line plus DATABASE_URL in config.py — and the real lesson is to read
+      # `docker ps` before believing an auth error.
+      - "5434:5432"
     volumes:
       - echosphere-pgdata:/var/lib/postgresql/data
       # Applied once, on first initialisation of an empty data directory.
