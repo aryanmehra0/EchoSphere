@@ -1479,6 +1479,21 @@ forward ONLY its own speech under its own role, so three speakers produce three
 correctly-attributed streams with no duplicates. The multi-participant design
 was already there and had one field throttling it.
 
+> **Sep 9 — two claims in the paragraph above are now false, and the wildcard
+> had regressed.** `forwardDecision` no longer filters to a browser's own
+> speech: it forwards every speaker the Roster can name, and duplicates are
+> handled server-side because `messageId` is `uid:stream_id:turn_id`, all from
+> Agora and therefore identical in every browser. And `remote_rtc_uids` had
+> gone back to an explicit uid list, so every late joiner forced a
+> replacement — restored to `["*"]` and re-confirmed against the live API
+> (agent created, `RUNNING`, stopped cleanly).
+>
+> A 3-person audit also found three defects this entry did not cover: roles
+> were not exclusive (three DevOps Leads, all with CRITICAL authority), any
+> one person's `Q` stopped the agent channel-wide, and an absent `stream_id`
+> fell back to `selfUid` — which on three consoles relabels other people's
+> speech as your own. All fixed; see README "Demo requirements".
+
 One consequence worth knowing: `idle_timeout` fires when everyone in
 `remote_rtc_uids` has left, and under `"*"` a stray agent in the channel counts
 as somebody — so `npm run demo reset` matters for more than tidiness.

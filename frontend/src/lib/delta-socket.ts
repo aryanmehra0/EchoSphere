@@ -313,12 +313,20 @@ export async function inviteAgent(channel: string, userUid: number): Promise<{
  * End Echo's session. Leaving the RTC channel does NOT do this — the Cloud
  * Agent is a separate process that runs, and bills, until Agora times it out.
  */
-export async function stopAgent(channel: string): Promise<void> {
+/**
+ * Leave the bridge.
+ *
+ * `uid` identifies WHO is leaving, and passing it is what stops one person's
+ * exit from silencing the room: the route releases that roster row and only
+ * stops the Cloud Agent when no participants remain. Omit it to stop the
+ * agent unconditionally, which is what `npm run demo stop` wants.
+ */
+export async function stopAgent(channel: string, uid?: number): Promise<void> {
   try {
     await fetch("/api/stop-agent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channel }),
+      body: JSON.stringify(uid ? { channel, uid } : { channel }),
     });
   } catch (error) {
     // Best-effort on the way out. An orphan times out on its own; blocking

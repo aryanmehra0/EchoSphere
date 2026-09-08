@@ -276,7 +276,41 @@ export class AgoraBridge {
 
     try {
       await client.join(credentials.appId, channel, credentials.rtcToken, credentials.uid);
-      this.mic = await AgoraRTC.createMicrophoneAudioTrack();
+      /*
+        ── WORK WITH WHATEVER MICROPHONE THE PERSON HAS ────────────────────
+        This was a bare `createMicrophoneAudioTrack()`, which takes the
+        browser's default device with no processing hints, and the docs
+        compensated by telling people to wear headsets.
+
+        That guidance existed for a real reason: on open speakers each
+        laptop's mic picks up the OTHER participants' audio and Echo's own
+        replies, so the same sentence is transcribed under two different
+        UIDs and the Ledger attributes one person's words to another. But
+        "buy a headset" is a requirement placed on the room, not a property
+        of the product, and the browser can do most of the work instead.
+
+        So the three WebRTC processing flags are asked for explicitly:
+
+          AEC — cancels what our own speakers are playing, which is both
+                Echo's TTS and the other participants. This is the one that
+                makes speakerphone usable at all.
+          ANS — suppresses steady room noise (fans, air conditioning) that
+                would otherwise trip VAD and produce empty turns.
+          AGC — levels a quiet or distant voice, so someone leaning back
+                from a laptop mic is still transcribed.
+
+        These are HINTS, not guarantees: a browser or OS may ignore any of
+        them, and no amount of AEC fully separates two people sitting a
+        metre apart with both mics open. Headsets are still BETTER. They are
+        no longer presented as required, and the attribution safety net does
+        not depend on them — an unattributable turn is dropped rather than
+        guessed (see `voice-agent.ts`).
+      */
+      this.mic = await AgoraRTC.createMicrophoneAudioTrack({
+        AEC: true,
+        ANS: true,
+        AGC: true,
+      });
       await client.publish([this.mic]);
 
       /*

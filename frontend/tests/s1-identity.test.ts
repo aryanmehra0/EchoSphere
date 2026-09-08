@@ -9,6 +9,7 @@ import {
   getRoster,
   isAuthorizedRole,
   putEntry,
+  releaseEntry,
   RosterWriteError,
   touchExpiry,
   __resetRoster,
@@ -710,5 +711,71 @@ describe("the secrets clause reaches every prompt mode", () => {
       "silence_duration_ms" in TURN_DETECTION.config.end_of_speech.vad_config,
       "end-of-speech must be nested",
     );
+  });
+});
+
+describe("three people on one bridge", () => {
+  /*
+    The app had only ever been run with one participant. An audit of the
+    3-person path found four defects; these pin the ones that are testable
+    without three machines on a channel.
+  */
+
+  test("releaseEntry frees the row and reports who is left", async () => {
+    /*
+      Nothing ever REMOVED a roster row — `allocateHumanUid` only reclaimed
+      expired ones, and a token lives an hour. So a person who left still held
+      their uid and role for that hour, and (now that roles are exclusive) the
+      next person to use that laptop would be refused by a ghost.
+
+      The count is what makes shared occupancy decidable: any one person
+      pressing Q used to call `/api/stop-agent`, which is channel-wide, so the
+      first to leave silenced Echo for everyone still talking.
+    */
+    const alive = Date.now() + 3_600_000;
+    for (const [uid, role] of [
+      [1001, "DevOps Lead"],
+      [1002, "Support Engineer"],
+      [1003, "Database Admin"],
+    ] as const) {
+      await putEntry({
+        channel: "inc-3p", uid, role, kind: "human",
+        authorized: role === "DevOps Lead", issuedAt: 1, expiresAt: alive,
+      });
+    }
+
+    const first = await releaseEntry("inc-3p", 1001);
+    assert.equal(first.released, true);
+    assert.equal(first.humansRemaining, 2, "Echo must keep running for the other two");
+
+    await releaseEntry("inc-3p", 1002);
+    const last = await releaseEntry("inc-3p", 1003);
+    assert.equal(last.humansRemaining, 0, "the last one out stops the agent");
+  });
+
+  test("releasing an absent uid is not an error", async () => {
+    // Leave is best-effort on the way out; a double-Q or a closed tab that
+    // already released must not throw.
+    const out = await releaseEntry("inc-3p-empty", 9999);
+    assert.equal(out.released, false);
+    assert.equal(out.humansRemaining, 0);
+  });
+
+  test("an expired participant does not count as present", async () => {
+    /*
+      Otherwise a stale row keeps Echo alive for a room that emptied an hour
+      ago, and keeps a role locked against the next joiner.
+    */
+    await putEntry({
+      channel: "inc-3p-exp", uid: 1001, role: "DevOps Lead", kind: "human",
+      authorized: true, issuedAt: 1, expiresAt: Date.now() + 3_600_000,
+    });
+    await putEntry({
+      channel: "inc-3p-exp", uid: 1002, role: "Support Engineer", kind: "human",
+      authorized: false, issuedAt: 1, expiresAt: Date.now() - 1_000,
+    });
+
+    const out = await releaseEntry("inc-3p-exp", 1001);
+    assert.equal(out.humansRemaining, 0, "an expired row was counted as a live participant");
   });
 });

@@ -195,32 +195,41 @@ export async function POST(request: Request) {
   */
   const inheritedUids = existing?.subscribedUids ?? [];
 
+  /*
+    ── NO LONGER REPLACED WHEN A NEW PERSON JOINS ────────────────────────────
+    This used to be:
+
+        if (existing && !existing.subscribedUids.includes(userUid)) {
+          forgetAgent(channel);   // replace it
+        }
+
+    and it was correct while the agent subscribed to an explicit uid list:
+    Agora fixes `remote_rtc_uids` at creation, so an agent created for 1001
+    genuinely could not hear 1002, and reusing it produced a RUNNING agent
+    that was deaf to the person in the room.
+
+    The backend now creates the agent with `remote_rtc_uids: ["*"]` — a real
+    wildcard meaning every UID present in the channel — so a newcomer is heard
+    with no replacement at all. Keeping this branch would make every join
+    after the first tear down a working agent, and each teardown risks a stray
+    that outlives it: live inspection previously found FOUR agents RUNNING on
+    one channel, all publishing interleaved transcript frames for the same
+    speech. That is where "Echo only hears one person" and "the transcript
+    catches only some of the words" both came from.
+
+    So joining is now idempotent for the 2nd and 3rd person. The liveness
+    guard below still replaces an agent Agora has actually ENDED, which is the
+    only case where a replacement is genuinely needed.
+
+    `subscribedUids` is still recorded — it is a useful diagnostic, and the
+    floor under the roster if the wildcard ever has to be reverted.
+  */
   if (existing && !existing.subscribedUids.includes(userUid)) {
-    /*
-      ── THE AGENT LISTENS TO ONE UID, AND THIS CONSOLE IS NOT IT ────────────
-      Agora fixes `remote_rtc_uids` when the agent is created and it cannot be
-      changed afterwards. The Roster allocates uids sequentially and never
-      releases them, so every reload of the console took the next one — 1001,
-      1002, 1003 — while the agent stayed pinned to the first.
-
-      Reusing it then produces the exact failure this cost days to find: an
-      agent that is RUNNING, converses happily in its own history, and is deaf
-      to the person actually in the room, because Agora runs no recogniser on
-      a participant nobody subscribed to. Nothing errors. The transcript panel
-      simply stays empty.
-
-      Measured: a browser joined as 1002 against an agent subscribed to 1001
-      and produced zero TRANSCRIPT_UPDATED events in 60 seconds.
-
-      A tab now remembers its uid (see `requestBridgeCredentials`), so this
-      should be rare — but when the uid does differ, the old agent is useless
-      to this console and must be replaced rather than reused.
-    */
-    console.warn(
-      `[/api/invite-agent] agent ${existing.agentId} subscribes to uid ` +
-        `${existing.userUid}, but this console is uid ${userUid} — replacing it`,
+    console.info(
+      `[/api/invite-agent] uid ${userUid} joined an existing agent ` +
+        `${existing.agentId} (subscribed: ${existing.subscribedUids.join(", ")}). ` +
+        "Reusing it — the agent listens on the wildcard, so no replacement is needed.",
     );
-    forgetAgent(channel);
   }
 
   const stillExisting = getActiveAgent(channel);

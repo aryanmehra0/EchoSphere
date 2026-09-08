@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { MissingEnvError, serverEnv } from "@/lib/server/env";
 import { agoraAuthHeader } from "@/lib/server/agora-tokens";
 import { forgetAgent, unregisterWithSlowLoop } from "@/lib/server/active-agents";
+import { releaseEntry } from "@/lib/server/roster";
 
 /**
  * POST /api/stop-agent — end Echo's session on a channel.
@@ -19,14 +20,44 @@ import { forgetAgent, unregisterWithSlowLoop } from "@/lib/server/active-agents"
  */
 export async function POST(request: Request) {
   let channel: string | undefined;
+  let uid: number | undefined;
   try {
-    channel = ((await request.json()) as { channel?: string }).channel?.trim();
+    const body = (await request.json()) as { channel?: string; uid?: number };
+    channel = body.channel?.trim();
+    uid = typeof body.uid === "number" && body.uid > 0 ? body.uid : undefined;
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
   if (!channel) {
     return NextResponse.json({ error: "channel is required" }, { status: 400 });
+  }
+
+  /*
+    ── ONE PERSON LEAVING MUST NOT SILENCE THE ROOM ──────────────────────────
+    This route is channel-wide: it stops the Cloud Agent for everyone. That
+    was correct while a bridge was one person, and wrong the moment three
+    joined — the first to press Q killed Echo for the two still talking, with
+    nothing on their screens to explain it.
+
+    So a leaver now releases its own roster row and the agent is stopped only
+    when nobody is left. `uid` is optional: a caller that does not send one
+    (the demo scripts, `npm run demo stop`) keeps the old unconditional
+    behaviour, which is what those callers actually want.
+
+    Deliberately NOT reference-counted in a separate structure — the roster
+    already knows who is on the channel, and a second source of truth about
+    occupancy would be one more thing to drift.
+  */
+  if (uid !== undefined) {
+    const { humansRemaining } = await releaseEntry(channel, uid);
+    if (humansRemaining > 0) {
+      return NextResponse.json({
+        stopped: false,
+        reason: `${humansRemaining} participant(s) still on the bridge`,
+        humansRemaining,
+      });
+    }
   }
 
   // Forget FIRST, so a failed leave cannot strand the channel with a

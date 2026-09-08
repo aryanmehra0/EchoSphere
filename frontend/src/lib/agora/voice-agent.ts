@@ -124,9 +124,12 @@ export class VoiceAgent {
     Session identity, held here because `drain()` receives only the toolkit's
     items and cannot be handed them per call.
 
-    `selfUid` is needed for one narrow case: the toolkit stamps `uid: "0"` on
-    every user transcription, so when no usable `stream_id` is present that
-    sentinel has to resolve back to this browser's own uid.
+    `selfUid` is used for the silence watchdog's diagnostic message and to
+    remember which uid this tab joined as. It is deliberately NOT used to
+    attribute a turn any more: the toolkit stamps `uid: "0"` on every user
+    transcription, so resolving that sentinel to self relabelled OTHER
+    people's speech as this browser's. An unattributable turn is dropped
+    instead — see `emit`.
 
     `selfRole` is a FALLBACK ONLY. Attribution comes from the Roster, because
     Echo subscribes to `["*"]` and this console minutes the whole room -
@@ -488,7 +491,6 @@ export class VoiceAgent {
 
   /** Forward one settled turn, attributed to whoever actually spoke it. */
   private emit(item: ToolkitItem, text: string): void {
-    const selfUid = this.selfUid;
     /*
       ── `stream_id` IS THE SPEAKER; `uid` IS NOT ────────────────────────────
       The toolkit stamps `uid: "0"` on EVERY user.transcription, not just your
@@ -516,13 +518,50 @@ export class VoiceAgent {
 
     const isAgentTurn = item.metadata?.object === MessageType.AGENT_TRANSCRIPTION;
     const streamUid = Number(item.stream_id);
+
+    /*
+      ── WITHOUT `stream_id` WE DO NOT KNOW WHO SPOKE, SO WE SAY NOTHING ─────
+      This used to fall back to `selfUid` when `stream_id` was unusable and
+      the toolkit had stamped `uid: "0"`. On one console that is harmless —
+      the only human present IS self. With three consoles it is the worst
+      failure this product can produce.
+
+      The toolkit stamps `uid: "0"` on EVERY human turn, not just your own, so
+      the fallback fires for other people's speech too. Each of the three
+      browsers would then relabel the other two speakers as itself and forward
+      it under its own role — and because `messageId` is keyed on
+      `resolvedUid`, the three copies get three DIFFERENT ids and none of them
+      dedupe. One sentence becomes three claims attributed to three wrong
+      people.
+
+      A MIS-SOURCED claim is worse than a missing one, and this codebase
+      already says so twice: §6.2 Rule 1 catches an unsourced claim and
+      nothing downstream catches a wrongly-sourced one. `forwardDecision`
+      already drops uids the Roster cannot name, on exactly this reasoning.
+
+      So an unattributable turn is DROPPED, loudly. Losing one line to a
+      malformed frame is recoverable; a confident false attribution in the
+      incident record is not.
+
+      Agent turns are exempt: `item.uid` is the agent's own 9000-series uid
+      and is reliable there, and `isAgentTranscript` filters them out anyway.
+    */
+    if (!isAgentTurn && !(Number.isFinite(streamUid) && streamUid > 0)) {
+      const fallbackUid = Number(item.uid);
+      if (!Number.isFinite(fallbackUid) || fallbackUid <= 0) {
+        console.warn(
+          "[voice-agent] dropped an unattributable turn — no usable stream_id",
+          { uid: item.uid, stream_id: item.stream_id, turn_id: item.turn_id },
+        );
+        return;
+      }
+    }
+
     const resolvedUid = isAgentTurn
       ? Number(item.uid)
       : Number.isFinite(streamUid) && streamUid > 0
         ? streamUid
-        : String(item.uid) === "0"
-          ? selfUid
-          : Number(item.uid);
+        : Number(item.uid);
 
     const transcript: AgoraTranscript = {
       uid: resolvedUid,

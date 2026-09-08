@@ -33,9 +33,17 @@ sentence under two different roles. Echo would then compare a person to
 themselves and attribute their words to someone else — which is precisely the
 bug that per-UID separation exists to prevent.
 
-If you go live, it is **two machines, two roles, and headsets on both.** Not
-speakers — headsets. Speakers let each laptop's microphone pick up the other
-laptop's audio, and you get the same crossed attribution by a slower route.
+If you go live, it is **two or three machines and a different role on each.**
+Roles are now enforced: `/api/token` refuses a role already live on the
+channel, so a second DevOps Lead is told to pick another rather than silently
+corrupting attribution.
+
+**Use whatever microphone you have.** The console asks for echo cancellation,
+noise suppression and gain control when it opens the track, so laptop mics and
+open speakers work. Headsets are still better for a room with several open
+mics — a sentence picked up by two laptops arrives under two UIDs — but the
+console now DROPS a turn it cannot confidently attribute instead of guessing,
+so the worst case is a missing line rather than a false one.
 
 ---
 
@@ -171,7 +179,9 @@ channel talking over each other, and the tenth demo looks broken.
 Everything in Mode A, plus real speech and real per-speaker separation. More
 convincing, materially more fragile.
 
-**Both machines:** same channel name, **different roles**, headsets on.
+**Every machine:** same channel name, **a different role on each** (enforced —
+the second joiner on a taken role gets a 409 naming the free ones). Any
+microphone will do; headsets only if you want every sentence to land.
 
 | Machine | Role | Speaks |
 |---|---|---|

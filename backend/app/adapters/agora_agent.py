@@ -376,10 +376,36 @@ async def start(
         # Reported exactly that way — Echo answering the Support Engineer and
         # ignoring DevOps and the DBA.
         #
-        # `remote_uids` is now every human uid the caller knows about. The
-        # inviting console's uid is always included, so the single-human case
-        # is unchanged.
-        remote_uids=[str(u) for u in remote_uids],
+        # ── `["*"]`, NOT A UID LIST — SO NOBODY EVER REPLACES THE AGENT ────
+        # An explicit list is fixed at creation, so every person who joins
+        # AFTER the agent has to replace it to be heard. That is the root of
+        # three separate reported symptoms:
+        #
+        #   - "Echo only listens to one person" — the newcomer's audio has no
+        #     recogniser running on it until a replacement lands;
+        #   - "the transcript catches only some of the words" — replacement is
+        #     reaped best-effort, and live inspection found FOUR agents
+        #     RUNNING on one channel, all publishing interleaved frames for
+        #     the same speech;
+        #   - a replacement agent starts with empty history, so whoever joins
+        #     third can ask what was established and be told nothing.
+        #
+        # `"*"` is a genuine wildcard — "all UIDs present in the channel", per
+        # Agora's join REST docs, and confirmed against the live API. This
+        # codebase once asserted the opposite in a comment AND pinned it with
+        # a test; three people then talked on three machines and Echo heard
+        # none of them. See `docs/session_log.md`, "CORRECTION — `\"*\"` IS a
+        # wildcard".
+        #
+        # With the wildcard the agent hears everyone from the moment it joins,
+        # so joining is idempotent and `stop_strays` has almost nothing left
+        # to do. `remote_uids` is still computed above and logged, because it
+        # is the useful diagnostic for "who did the console think was here".
+        #
+        # One consequence worth knowing: `idle_timeout` fires when everyone in
+        # `remote_rtc_uids` has left, and under `"*"` a stray agent counts as
+        # somebody — so reaping strays matters for more than tidiness.
+        remote_uids=["*"],
         enable_string_uid=False,
         idle_timeout=300,
         expires_in=3600,

@@ -523,11 +523,51 @@ discounts turns marked `start_type: "api_speak"` — Echo's own proactive lines
 browser joined to the channel is a working conversation, and `npm run demo
 feed` supplies the two-speaker incident the contradiction needs.
 
-**Two machines make it stronger, and cost more to get right.** Two real
-speakers means two real UIDs and genuine per-speaker attribution on screen.
-If you do that: **different roles, and headsets on both.** Not speakers —
-speakers let each laptop's microphone pick up the other's audio, and you get
-crossed attribution by a slower route.
+**Two or three machines make it stronger.** Real speakers mean real UIDs and
+genuine per-speaker attribution on screen.
+
+**Use whatever microphone you have.** Laptop mics and open speakers are fine —
+the console requests echo cancellation, noise suppression and gain control
+when it opens the track, so Echo's own replies and the other participants'
+audio are cancelled rather than re-transcribed.
+
+Headsets are still *better*, and it is worth knowing why rather than taking it
+on faith: with several open mics in one room, the same sentence can be picked
+up by more than one laptop and arrive under two different UIDs. Echo would
+then attribute one person's words to another. Two things keep that from
+corrupting the record — browser AEC removes most of the bleed, and a turn the
+console cannot attribute with confidence is **dropped rather than guessed**.
+So the failure mode is a missing line, not a false one. If you are demoing to
+an audience and want every sentence to land, wear headsets; if you are
+testing, don't bother.
+
+**Roles are now exclusive per bridge.** The dropdown defaults to DevOps Lead
+in every browser, so three people who just press `J` would all have arrived as
+DevOps Lead — Echo comparing a person to themselves, and all three holding
+CRITICAL approval authority. `/api/token` now refuses a role already live on
+the channel with a 409 naming the free ones, so the second joiner is told to
+pick a different role rather than silently corrupting attribution.
+
+**Leaving no longer silences the room.** `Q` used to call `/api/stop-agent`,
+which is channel-wide: the first person out stopped Echo for everyone still
+talking. A leaver now releases only its own roster row, and the Cloud Agent is
+stopped when the last participant leaves.
+
+**Joining is idempotent for the 2nd and 3rd person.** The agent is created
+with `remote_rtc_uids: ["*"]`, so a newcomer is heard without replacing it.
+An explicit uid list is fixed at creation, which is why every late joiner used
+to force a replacement — and each replacement risked a stray that outlived it.
+Live inspection once found four agents RUNNING on one channel, all publishing
+interleaved transcript frames: that was both "Echo only hears one person" and
+"the transcript catches only some of the words".
+
+**An unattributable turn is dropped, not guessed.** The toolkit stamps
+`uid: "0"` on every human turn, so attribution depends on `stream_id`. When it
+is missing the console used to fall back to its OWN uid — harmless alone,
+catastrophic with three consoles, because each would relabel the other two
+speakers as itself under its own role, with three different `messageId`s that
+never dedupe. A mis-sourced claim is worse than a missing one, so the turn is
+now discarded with a console warning.
 
 **What you cannot do is two tabs on one laptop.** One machine has one
 microphone, so both tabs hear the same voice and forward the same sentence

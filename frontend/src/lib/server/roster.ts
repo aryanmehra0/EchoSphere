@@ -182,6 +182,42 @@ export async function getEntry(
 }
 
 /**
+ * Remove one participant, and report how many humans remain.
+ *
+ * ── WHY LEAVING HAD TO BECOME EXPLICIT ──────────────────────────────────────
+ * Nothing ever removed a roster row. `allocateHumanUid` reclaims EXPIRED ones,
+ * but a token lives an hour, so for that hour a person who has left still
+ * holds their uid and — now that roles are exclusive — their role. The second
+ * person to use a laptop would be told "DevOps Lead is already on this bridge"
+ * by a ghost.
+ *
+ * The returned count is what makes shared occupancy decidable. Any one person
+ * pressing Q used to call `/api/stop-agent`, which is channel-wide: on a
+ * three-person bridge the first person to leave silenced Echo for the two
+ * still talking. The caller can now ask "am I the last one out?" instead of
+ * assuming it.
+ *
+ * `humansRemaining` counts LIVE humans only. The Observer and the agent hold
+ * their own reserved uids and are not participants in this sense; an expired
+ * row is somebody who is already gone.
+ */
+export async function releaseEntry(
+  channel: string,
+  uid: number,
+): Promise<{ released: boolean; humansRemaining: number }> {
+  const entries = channelMap(channel);
+  const released = entries.delete(uid);
+
+  const now = Date.now();
+  let humansRemaining = 0;
+  for (const entry of entries.values()) {
+    if (entry.kind === "human" && entry.expiresAt > now) humansRemaining += 1;
+  }
+
+  return { released, humansRemaining };
+}
+
+/**
  * The uid→role map and agent exclusion set the Observer needs (v6 §4.3).
  *
  * Returned together because they are read together on the audio hot path, and

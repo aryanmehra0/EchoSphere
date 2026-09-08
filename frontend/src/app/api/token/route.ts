@@ -7,6 +7,7 @@ import {
 } from "@/lib/server/agora-tokens";
 import {
   allocateHumanUid,
+  getRoster,
   isAuthorizedRole,
   OBSERVER_UID,
   putEntry,
@@ -79,6 +80,57 @@ export async function POST(request: Request) {
   const kind: ParticipantKind = body.kind === "observer" ? "observer" : "human";
 
   try {
+    /*
+      ── ONE ROLE, ONE PERSON ────────────────────────────────────────────────
+      The console's role dropdown defaults to "DevOps Lead" in EVERY browser
+      (`BridgeControls.tsx`), so three people who just press J all arrive as
+      DevOps Lead. Nothing rejected that, and the consequences are not
+      cosmetic:
+
+        - The Ledger attributes claims by role, so "DevOps reported X" and
+          "DevOps reported not-X" become one person contradicting themselves.
+          Echo then interrupts the room to point that out, which is the
+          contradiction engine working perfectly on garbage input.
+        - `isAuthorizedRole("DevOps Lead")` is true, so ALL THREE would hold
+          CRITICAL approval authority — the one thing §10.2 exists to gate.
+
+      A role already live on this channel is therefore refused, with the
+      remaining roles named so the joiner can pick one. This is the same
+      fail-closed posture as the rest of the route: no token is issued for a
+      participant who cannot be attributed distinctly.
+
+      Renewal is exempt — it is the SAME person re-issuing a token for a uid
+      they already hold, and `delta-socket.ts` keys its remembered uid by role
+      precisely so a role change gets a fresh uid instead of renewing.
+
+      Expired rows do not block: `allocateHumanUid` reclaims them, and a
+      participant whose token has expired is no longer on the bridge.
+    */
+    if (kind === "human" && !body.renew) {
+      const now = Date.now();
+      const live = (await getRoster(channel)).filter(
+        (e) => e.kind === "human" && e.expiresAt > now,
+      );
+      const taken = live.find((e) => e.role === participantRole);
+      if (taken) {
+        const free = [...VALID_ROLES].filter(
+          (r) => !live.some((e) => e.role === r),
+        );
+        return NextResponse.json(
+          {
+            error:
+              `${participantRole} is already on this bridge (uid ${taken.uid}). ` +
+              (free.length
+                ? `Pick a different role: ${free.join(", ")}.`
+                : "Every role is taken — someone must leave first."),
+            role: participantRole,
+            availableRoles: free,
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     // The Observer holds a fixed UID; humans get the next free slot. On renewal
     // the caller supplies its existing UID so the channel identity is stable
     // across the token swap — a renewal that changed UID would look like a new

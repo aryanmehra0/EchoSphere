@@ -97,6 +97,14 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   const agora = useRef<AgoraBridge | null>(null);
   /** The channel Echo was invited to, so leaving can stop the right agent. */
   const joinedChannel = useRef<string | null>(null);
+  /**
+   * The uid THIS tab joined as.
+   *
+   * Sent on leave so the server can release just this participant and keep
+   * Echo running for anyone still on the bridge. Without it, the first person
+   * to press Q stopped the Cloud Agent for everybody.
+   */
+  const joinedUid = useRef<number | null>(null);
 
   /**
    * A single shared 1Hz tick drives every elapsed timer in the console.
@@ -324,6 +332,9 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     */
     try {
       const credentials = await requestBridgeCredentials(cleanChannel, role);
+      // Remembered for `closeBridge`, so leaving releases THIS participant
+      // rather than stopping Echo for the whole room.
+      joinedUid.current = credentials.uid;
 
       void inviteAgent(cleanChannel, credentials.uid)
         .then(({ agentId, registeredWithSlowLoop, toolsEnabled }) => {
@@ -421,8 +432,12 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     // that keeps running, and billing, until Agora times it out. Rehearsing
     // ten times without this leaves ten Echoes in the channel.
     if (joinedChannel.current) {
-      void stopAgent(joinedChannel.current);
+      // WITH our uid: the route releases this participant and stops the agent
+      // only when the bridge is empty. On a three-person call the first
+      // person to leave used to silence Echo for the other two.
+      void stopAgent(joinedChannel.current, joinedUid.current ?? undefined);
       joinedChannel.current = null;
+      joinedUid.current = null;
     }
     setAgentTrack(null);
     setMicOn(true);
@@ -438,7 +453,11 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       clearTimers();
       socket.current?.close();
       void agora.current?.leave();
-      if (joinedChannel.current) void stopAgent(joinedChannel.current);
+      // Same occupancy rule as `closeBridge`: a tab closing is one
+      // participant leaving, not the end of the bridge.
+      if (joinedChannel.current) {
+        void stopAgent(joinedChannel.current, joinedUid.current ?? undefined);
+      }
     };
   }, [clearTimers]);
 
