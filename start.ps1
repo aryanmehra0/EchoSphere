@@ -44,13 +44,25 @@
 
 .PARAMETER Reset
     Clear the incident board and stop any leftover agent before checking.
+
+.PARAMETER KeepRunning
+    Do NOT stop the previous session first.
+
+    By default every run stops the Slow Loop and console this repository
+    started, then boots fresh — because a service running from before a code
+    change keeps serving the old modules while this script prints GO over it.
+
+    Only processes whose command line names THIS checkout are touched. A
+    service on :3000 or :8000 belonging to another project is reported and
+    left alone.
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipPreflight,
     [switch]$Reset,
     [switch]$Tunnel,
-    [switch]$Share
+    [switch]$Share,
+    [switch]$KeepRunning
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,6 +80,114 @@ function Write-Step($text) { Write-Host "  $text" -ForegroundColor Cyan }
 function Write-Ok($text)   { Write-Host "  OK   $text" -ForegroundColor Green }
 function Write-Bad($text)  { Write-Host "  FAIL $text" -ForegroundColor Red }
 function Write-Note($text) { Write-Host "       $text" -ForegroundColor DarkGray }
+
+# ── STOPPING THE PREVIOUS SESSION ────────────────────────────────────────────
+#
+# Every run starts clean, because "already running on :8000" was being treated
+# as success — so a service started from BEFORE a code change kept serving, and
+# the script reported GO over it. That is the shape of an entire afternoon lost
+# to editing files a running process had already imported.
+#
+# ── WHY THIS MATCHES ON THE COMMAND LINE AND NOT ON THE PORT ─────────────────
+#
+# The obvious implementation is `Get-NetTCPConnection -LocalPort 3000 | Stop-Process`,
+# which is what several places in this script used to do. It is dangerous.
+#
+# Measured on this machine: port 3001 was held by
+# `orchestrator\lawgic-frontend-lks-prod` — a completely unrelated project. A
+# port sweep would have killed somebody's other work, and on 3000 it would kill
+# whatever dev server happened to be there.
+#
+# So a process is only ours if its command line names THIS repository. That is
+# the only reliable signal: the ports are shared, the process names are generic
+# (`node.exe`, `python.exe`), and the window titles are hidden.
+#
+# NOTE the previous attempt at this filter was
+#     $_.CommandLine -like "*$($frontend.Replace('','\'))*"
+# `.Replace('', '\')` replaces the EMPTY string, which is a no-op — so the path
+# guard never actually constrained anything.
+function Stop-PreviousSession {
+    param([switch]$IncludeTunnel)
+
+    $ours = @()
+
+    # Anything whose command line mentions this checkout. Covers the uvicorn
+    # Slow Loop, `next dev`, and the cmd.exe wrapper the console is launched
+    # under, without needing to know which is which.
+    $needle = $root.TrimEnd('\')
+    foreach ($name in 'python.exe', 'node.exe', 'cmd.exe') {
+        $procs = Get-CimInstance Win32_Process -Filter "Name='$name'" -ErrorAction SilentlyContinue |
+                 Where-Object {
+                     $_.CommandLine -and
+                     $_.CommandLine.Replace('/', '\') -like "*$needle*" -and
+                     $_.ProcessId -ne $PID
+                 }
+        if ($procs) { $ours += $procs }
+    }
+
+    foreach ($proc in $ours) {
+        $what = if ($proc.CommandLine -match 'uvicorn') { "Slow Loop" }
+                elseif ($proc.CommandLine -match 'next|npm') { "console" }
+                else { "helper" }
+        Write-Note "stopping previous $what (PID $($proc.ProcessId))"
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+
+    # Quick tunnels are per-run: the URL changes every time and the old one is
+    # already dead, so a leftover process is pure noise. Only reaped when this
+    # run is about to open its own, so a `.\start.ps1` with no -Tunnel does not
+    # silently close the tunnel a previous run opened.
+    if ($IncludeTunnel) {
+        $cfs = Get-Process cloudflared -ErrorAction SilentlyContinue
+        foreach ($cf in $cfs) {
+            Write-Note "stopping previous tunnel (PID $($cf.Id))"
+            Stop-Process -Id $cf.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($ours -or ($IncludeTunnel -and $cfs)) {
+        # Sockets do not close the instant the process dies, and starting a
+        # replacement into a still-bound port is how the console silently
+        # lands on :3001.
+        Start-Sleep -Milliseconds 1500
+    }
+
+    foreach ($port in 8000, 3000) {
+        $still = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        if ($still) {
+            # Deliberately NOT killed — see the note above about port 3001.
+            # Named instead, so an operator can decide.
+            $pid2 = $still[0].OwningProcess
+            $other = (Get-CimInstance Win32_Process -Filter "ProcessId=$pid2" -ErrorAction SilentlyContinue).CommandLine
+            Write-Note "NOTE :$port is held by a process outside this repo (PID $pid2)"
+            if ($other) { Write-Note "      $($other.Substring(0, [Math]::Min(90, $other.Length)))" }
+        }
+    }
+
+    if ($ours) { Write-Ok "previous session stopped ($($ours.Count) process(es))" }
+    else { Write-Note "no previous session was running" }
+}
+
+# Stop only OUR process serving a given port, for the mid-script restarts that
+# have to happen after an env change. Same repository guard as
+# `Stop-PreviousSession`: killing by port alone is what would take down an
+# unrelated project that happens to hold :3000.
+function Stop-OurServiceOnPort($port) {
+    $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    if (-not $conn) { return $false }
+
+    $needle = $root.TrimEnd('\')
+    foreach ($c in $conn) {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
+        if ($proc -and $proc.CommandLine -and $proc.CommandLine.Replace('/', '\') -like "*$needle*") {
+            Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 1200
+            return $true
+        }
+    }
+    Write-Note "left :$port alone - the listener is not from this repo"
+    return $false
+}
 
 # ── FINDING CLOUDFLARED, ONCE ────────────────────────────────────────────────
 #
@@ -146,6 +266,22 @@ if (-not (Test-Path (Join-Path $frontend "node_modules"))) {
     Write-Host "    npm install"
     Write-Host ""
     exit 1
+}
+
+# ── stop whatever the last run left behind ──────────────────────────────────
+#
+# Before the tunnel, before any credential is written, before either service
+# boots. A process started prior to a code change has already imported the old
+# modules, and it will keep serving them while this script cheerfully prints
+# GO — which is indistinguishable from the change not working.
+#
+# `-KeepRunning` opts out for the rare case of attaching to a session that is
+# deliberately already up.
+if (-not $KeepRunning) {
+    Write-Step "stopping the previous session ..."
+    Stop-PreviousSession -IncludeTunnel:$Tunnel
+} else {
+    Write-Note "-KeepRunning: leaving any existing services alone"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -287,21 +423,24 @@ if ($Tunnel) {
     Write-Ok "tool credentials written to frontend\.env.local"
     Write-Note "browsers will reach the Slow Loop at $wsUrl"
 
-    # Both processes cached the old environment. Restart them.
-    foreach ($port in 8000, 3000) {
-        $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-        if ($conn) {
-            Write-Note "restarting the service on :$port to pick up the new tunnel"
-            Stop-Process -Id $conn[0].OwningProcess -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 1200
-        }
+    # Anything still holding the old environment has to go. Normally
+    # `Stop-PreviousSession` above already cleared it; this covers the
+    # -KeepRunning case, where a service the operator chose to keep is now
+    # holding a tunnel URL that no longer exists.
+    if ($KeepRunning) {
+        Write-Note "the tunnel URL changed - restarting services to pick it up"
+        Stop-PreviousSession
     }
 }
 
 # ── Slow Loop ───────────────────────────────────────────────────────────────
+# No "already running" branch. `Stop-PreviousSession` ran above, so a listener
+# on :8000 now belongs to something outside this repo — and starting anyway is
+# the honest move: uvicorn will fail loudly on the bound port rather than this
+# script reporting OK over somebody else's service.
 $slowLoop = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
-if ($slowLoop) {
-    Write-Ok "Slow Loop already running on :8000"
+if ($slowLoop -and $KeepRunning) {
+    Write-Ok "Slow Loop already running on :8000 (-KeepRunning)"
 } else {
     Write-Step "starting the Slow Loop on :8000 ..."
     Start-Process -FilePath $python `
@@ -327,31 +466,29 @@ if ($slowLoop) {
 }
 
 # ── console ─────────────────────────────────────────────────────────────────
+# ── WHY A SINGLE CONSOLE ON A KNOWN PORT MATTERS ────────────────────────────
+#
+# Next 16 does NOT fail when :3000 is taken by another `next dev` — it takes
+# the next free port and says so only in a window this script hides. The probe
+# below then polls :3000 forever, reports "the console did not start", and
+# exits 1 while the console is up and serving on :3001.
+#
+# Observed exactly that: PID 23112 on :3001, script exit 1, app fine.
+#
+# Worse than the wasted minute: the invite path mints tokens against an origin
+# the browser is not on, so CORS silently drops the transcript POSTs and Echo
+# goes deaf in the one way this project keeps rediscovering.
+#
+# The stale-server sweep that used to live here has moved into
+# `Stop-PreviousSession`, which runs before the tunnel rather than after it —
+# and which actually works. The filter here was
+#     $_.CommandLine -like "*$($frontend.Replace('','\'))*"
+# and `.Replace('', '\')` replaces the EMPTY string: a no-op, so the path guard
+# matched every `next dev` on the machine regardless of repository.
 $console = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
-if ($console) {
-    Write-Ok "console already running on :3000"
+if ($console -and $KeepRunning) {
+    Write-Ok "console already running on :3000 (-KeepRunning)"
 } else {
-    # ── KILL A STALE DEV SERVER BEFORE STARTING ONE ─────────────────────────
-    #
-    # Next 16 does NOT fail when :3000 is taken by another `next dev` - it
-    # takes the next free port and says so only in a window this script hides.
-    # The probe below then polls :3000 forever, reports "the console did not
-    # start", and exits 1 while the console is up and serving on :3001.
-    #
-    # Observed exactly that: PID 23112 on :3001, script exit 1, app fine.
-    #
-    # Worse than the wasted minute: the invite path mints tokens against an
-    # origin the browser is not on, so CORS silently drops the transcript
-    # POSTs and Echo goes deaf in the one way this project keeps rediscovering.
-    # A single console on a known port is not a nicety here.
-    $stale = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-             Where-Object { $_.CommandLine -like "*next*dev*" -and $_.CommandLine -like "*$($frontend.Replace('','\'))*" }
-    foreach ($proc in $stale) {
-        Write-Note "stopping a stale dev server (PID $($proc.ProcessId))"
-        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-    if ($stale) { Start-Sleep -Milliseconds 1200 }
-
     Write-Step "starting the console on :3000 ..."
     # `--port 3000` so a busy port is an ERROR we can see rather than a silent
     # move to 3001. Logged to a file because the window is hidden and a
@@ -432,10 +569,7 @@ if ($configuredTunnel) {
         Write-Note "re-run with -Tunnel to open a fresh one"
         # The console cached the dead value at boot; without this it keeps
         # handing it to Agora until someone restarts it by hand.
-        $stale = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
-        if ($stale) {
-            Stop-Process -Id $stale[0].OwningProcess -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 1200
+        if (Stop-OurServiceOnPort 3000) {
             Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "npm run dev" `
                 -WorkingDirectory $frontend -WindowStyle Hidden
             foreach ($i in 1..60) {
@@ -498,11 +632,7 @@ if ($Share) {
         elseif ($origins -notlike "*$shareUrl*") { $origins = "$origins,$shareUrl" }
         Set-EnvKey "CORS_ORIGINS" $origins
 
-        $slow = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
-        if ($slow) {
-            Stop-Process -Id $slow[0].OwningProcess -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 1200
-        }
+        Stop-OurServiceOnPort 8000 | Out-Null
         Start-Process -FilePath $python `
             -ArgumentList "-m", "uvicorn", "app.main:app", "--port", "8000" `
             -WorkingDirectory $backend -WindowStyle Hidden

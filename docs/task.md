@@ -99,7 +99,14 @@ FastAPI service, 13 tests, verified end to end on a live channel.
 - `[x]` **`contradiction.py`** — the two-stage engine *(closes G4)*
 - `[x]` **Pipeline wired**: speech → extraction → Ledger → deltas → Bridge
 - `[x]` **Enum coercion both sides** — an LLM-fed wire can no longer blank the UI
-- `[x]` **`rti.py`** — normalized, EWMA, Schmitt hysteresis, 90s cooldown *(closes G5)*
+- `[~]` **`rti.py`** — **REMOVED Sep 8.** Built as specified (normalized, EWMA,
+  Schmitt hysteresis, 90s cooldown) but it never had a producer: the index needs
+  one 200ms slice of per-UID RMS and F0 per participant, which only the native
+  Agora server SDK supplies — and that is the S2 blocker below. Nothing in the
+  repo ever posted to `/rti/observe`. Deleted with its route, its test, and
+  `utterance.tension_intervention`. `Ledger.rti` stays at `0.0` so the console's
+  wire contract is untouched. **G5 is now open again** — reintroduce only with a
+  producer written first.
 - `[x]` **`authorization.py` + `proxy.py`** — nonce + TTL + argsHash + role-bound
   gate, three-tier classification, idempotency *(closes G7)*
 - `[x]` **Rehearsal Rig Tier 2** — real pipeline over fixed fixtures, scored *(closes G8)*
@@ -135,13 +142,15 @@ FastAPI service, 13 tests, verified end to end on a live channel.
 
 - `[x]` **Two-stage** scope → retrieve → cooldown → adjudicate *(closes G4)*
 - `[ ]` Embedder — lexical overlap stands in; no embedding vendor is configured
-- `[ ]` RTI: normalized, EWMA, hysteresis *(closes G5)*
-- `[ ]` **Gate:** contradiction fires exactly once; ≤ 2 RTI interventions in 3 min
+- `[~]` RTI *(G5)* — **descoped Sep 8, code removed.** Blocked behind S2, not
+  behind effort: without per-UID PCM there is no signal to compute it from.
+- `[ ]` **Gate:** contradiction fires exactly once. *(The RTI half of this gate —
+  "≤ 2 interventions in 3 min" — is withdrawn along with the subsystem.)*
 
 ## S5 — Bridge integration + gate · Sep 2 — NOT STARTED
 
 - `[x]` **Bridge Controller built early** — `/speak` + `/interrupt`, priority
-  discipline, 12s interruption floor, coalescing window (`backend/app/bridge.py`)
+  discipline, 12s interruption floor, coalescing window (`backend/app/adapters/agora_bridge.py`)
 - `[x]` **`INFERRED` filter in the Bridge Controller** — the structural half of Rule 3
 - `[x]` **Rules 1–2 now structural too** — `utterance.py` composes Echo's exact
   words, so an unattributed or causal sentence cannot be constructed

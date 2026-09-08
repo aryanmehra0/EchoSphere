@@ -8,7 +8,7 @@
 > **If you are an agent or developer starting a new session: read this file
 > first, then `echosphere_architecture_v6.md`, then `handoff_log.md`.**
 >
-> **Last updated:** September 6, 2026
+> **Last updated:** September 8, 2026
 
 ---
 
@@ -22,12 +22,12 @@
 | **S1 (identity)** | 🟡 Code done and tested — never run against live Agora, two machines |
 | **S2 (Observer)** | 🟡 Adapter seam only. Agent-UID exclusion (G2) live; real PCM blocked on Python 3.14 |
 | **S3 (Ledger/extraction/deltas)** | ✅ Verified live — speech to graph in under 4 s, screenshotted |
-| **S4 (contradiction + RTI)** | ✅ Panel Aug 31; **cross-entity scoping fixed Sep 6** — see Session 7 |
+| **S4 (contradiction)** | ✅ Panel Aug 31; scoping fixed Sep 6. **RTI removed Sep 8** — no producer, see Session 8 |
 | **S5 (Bridge + Authorization Gate)** | ✅ Verified live: verbal yes denied, wrong role rejected, replay rejected |
 | **S6 (Rig + degradation)** | 🟡 Tiers 1-3 exist; **Tier 3 is new (Aug 31)**. Dress rehearsals below |
 | **7a Deliberation Panel** | ✅ New Aug 31 — replaced the single adjudicator |
 | **10.5 Consent gate** | ✅ New Aug 31 — off the record, verified leaves no trace |
-| **Tests** | **124 frontend** (`npm run verify` green) + **202 backend** = 326 |
+| **Tests** | **125 frontend** (`npm run verify` green) + **199 backend** = 324 |
 | **Voice path** | ✅ Verified live Aug 31 — `spoken: true`, 790 ms. Was never wired before. |
 | **Demo runbook** | `docs/DEMO.md` — three modes, the script, the questions judges ask |
 
@@ -1396,6 +1396,19 @@ The `agent-quickstart-python/` clone in this repo is the control group: same
 Agora project, same App ID, and it transcribes. So the shapes were compared as
 bytes rather than as intentions, by running the SDK:
 
+> **Sep 8:** that clone was deleted — 33,000 files on disk (100 tracked, the
+> rest a vendored venv and a web app) for the two files anyone read. Nothing
+> is vendored now; the comparison below stands, and its sources are upstream:
+>
+>     github.com/AgoraIO-Conversational-AI/agent-quickstart-python
+>       -> server/src/agent.py
+>     the installed agora-agents SDK
+>       -> agora_agent/agentkit/presets.py   (python -c "import
+>          agora_agent.agentkit.presets as p; print(p.__file__)")
+>
+> Note the second was never IN the clone — it ships inside the pip package,
+> which the README used to cite as though it were quickstart source.
+
 ```
 DeepgramSTT(model="nova-3", language="en").to_config()
 _resolve_asr_config()        # adds TOP-LEVEL language from turn detection
@@ -1475,6 +1488,152 @@ once will frame each other.** When an experiment fails, check that the thing it
 was testing was the only variable.
 
 **Tests: 202 backend + 125 frontend = 327.**
+
+---
+
+### Session 8 · Sep 8 — deleting the code that had no caller
+
+Backend cleanup, phase 1 of the rework plan. **No frontend file was touched**,
+and the HTTP/WS contract is unchanged.
+
+**What went, and why.**
+
+`rti.py` + `POST /rti/observe` + `utterance.tension_intervention` +
+`test_rti.py` — **the Room Tension Index had no producer.** The module was
+correct: normalized terms, EWMA, Schmitt trigger, 90s cooldown, all as §8
+specifies, all unit-tested. But computing it needs one 200ms slice of per-UID
+RMS and F0 per participant, and the only thing that can supply that is the
+native Agora server SDK — the S2 blocker. Nothing in the repository ever posted
+to the endpoint: not the console, not `demo.mjs`, not any Rig tier, not
+`validate.ps1`. The dashboard's `TensionMeter` rendered `state.rti`, and the
+value was always the reducer's initial `0`.
+
+`Ledger.rti` and the snapshot's `rti` key deliberately **stay at `0.0`** —
+`types.ts` still declares the field and the console still reads it, so removing
+it from the wire would have been a frontend change.
+
+`POST /ledger/claim` and `POST /ledger/unchecked` — no caller, and a liability
+rather than dead weight. Claims are meant to enter through extraction, which
+applies the hedge guard, entity resolution and the unsourced-claim drop. These
+bypassed all three, and because the tunnel exposes the whole service they were
+a writable path into the evidence record.
+
+`POST /bridge/contradiction` — a **second implementation of W3**, the headline
+workflow, with no caller and already drifted: it took `relation` from the
+request body and recorded no panel verdict, while the real path
+(`_surface_contradiction`) carries the Deliberation Panel's positions and
+dissent. Two implementations of the behaviour the product is built around is
+how they diverge unnoticed.
+
+`config.analysis_model()` and `config.groq_api_key()` — superseded singulars,
+no callers. Actively misleading: one key implied where rotation across several
+is what actually happens, one model implied where the fallback chain is what
+keeps the pipeline alive on an exhausted daily quota. Also dropped the now-dead
+`import time` from `main.py`.
+
+**What was added.** `tests/test_contract.py` — pins the served path set against
+the list of routes with external callers, each annotated with its caller. That
+list was not self-evident from the code; it had to be recovered by grepping
+every caller in the repo, which is how the four orphans surfaced. It also
+asserts the deleted routes have not come back, so a merge cannot quietly
+restore them. Written and confirmed FAILING before the deletions, so it is a
+real guard rather than a tautology.
+
+**How it was verified — and the part that matters.** A green suite proves
+nothing here (Rule 7). So: the server was booted, `/health` returned
+`ready: true`, the four deleted routes returned 404 and the kept ones did not,
+four utterances were fed through `/observer/transcript`, and the Ledger was read
+back through `query_incident_state`. The hedge stayed out of the facts
+("Datadog looks like Redis might be evicting keys" → `HYPOTHESIS` @ 0.80, not
+`OBSERVED` @ 1.00), every claim kept its speaker, and the panel adjudicated the
+headline pair OPPOSED at 0.90 unanimous across two models. Rig **Tier 3: 12/12
+clean.** WebSocket HELLO returned a SNAPSHOT with `rti: 0.0` present.
+
+**Tier 2 scored 67% contradiction detection — and so did the pre-change code.**
+That number looked like a regression, so rather than assume, a git worktree at
+`HEAD` was scored with the same venv and the same scenario: identical 67%,
+identical 33% fully-correct runs, and the *same two* failure modes (unexpected
+pair on carts-vs-latency; entity split on 40-percent-vs-timeout). Pre-existing
+model variance, matching the README's documented "~2 runs in 3". **The lesson
+is procedural: when a metric looks bad after a change, measure the same metric
+before the change on the same machine before believing it.** A worktree makes
+that cheap.
+
+**Tests: 199 backend + 125 frontend.** Backend went 213 → 199: −14 RTI tests,
+−1 tension composer test, +3 contract tests, and net line count is down ~900.
+
+### Session 9 · Sep 8 — splitting main.py, and the bug it exposed
+
+`main.py` 1,480 → 112 lines. No frontend file touched; the HTTP/WS contract is
+unchanged. Behaviour-preserving by intent, and the two places it was NOT are
+recorded below because both were real defects.
+
+**The shape.** Three layers with one rule — *routes do no work, services own no
+transport*:
+
+    app/routers/     7 modules, 24 handlers. Transport only.
+    app/middleware.py  the tunnel gate, out of main
+    app/services/    session, pipeline, speech, budget. No FastAPI import.
+    app/adapters/    agora_bridge, agora_agent. The network boundary.
+    app/deps.py      pooled HTTP client + session lookup
+    app/*.py         the domain, untouched (ledger, extraction, panel, …)
+
+`bridge.py` → `adapters/agora_bridge.py` and `voice_agent.py` →
+`adapters/agora_agent.py`, both via `git mv` so history survives as a rename.
+`IncidentSession` replaces the eight module globals, and `/incident/reset` is
+now "build a new session" rather than five `global` rebinds plus
+`engine._cooldown.clear()  # noqa`. `ContradictionEngine.reset()` is public
+because of that.
+
+**Two defects the refactor created, and how they were caught.**
+
+*1 — dashboards would have gone silent after a reset.* Per-session state means
+a new session builds a new `DeltaHub`, but every connected browser is parked on
+`queue.get()` for a queue from the OLD hub. Publishing to the new hub reaches
+nobody. Fixed with `DeltaHub.adopt`, which moves the live subscribers across so
+the parked handlers keep working with no reconnect. Caught by reasoning about
+the reset path, not by a test — worth a test if this is touched again.
+
+*2 — Tier 3 failed run 2 of 3, and it was NOT model variance.* The failing
+check was "hypothesis kept OUT of established", the most important one in the
+suite. The instinct was to call it the documented ~2-in-3 flakiness. That would
+have been wrong.
+
+`/health` reported `pipeline.inFlight` from the CURRENT session only. A
+pipeline task spawned moments before a reset keeps running against the old
+session, where its task handle lives — so `inFlight` read 0, Tier 3's `busy()`
+probe concluded the pipeline was idle, and it asserted while an extraction was
+still writing. The claim was late, not missing. Before the refactor a single
+module-global task set made this true by accident; per-session state broke it.
+
+Two fixes: `registry.total_in_flight` counts retired sessions too, and a reset
+now CANCELS the previous incident's in-flight analysis — a reset means that
+incident is over, and letting a straggler finish would republish the discarded
+run's claims onto a freshly cleared board.
+
+**How it was proven, and the method that mattered.** The baseline was scored
+first: a `git worktree` at `HEAD`, same venv, same machine, Tier 3 ×3 → 12/12
+three times, S6 gate met. Mine failed run 2. That asymmetry against a known-
+flaky suite is what justified digging instead of shrugging. After the fix:
+3/3 clean, gate met. Also verified the hedge guard in isolation — fed the
+Datadog hedge alone, got `HYPOTHESIS` @ 0.80 with `established` empty.
+
+**A trap worth naming: `test_contract.py` was silently passing on nothing.**
+This FastAPI version's `include_router` appends a deferred `_IncludedRouter`
+placeholder carrying no `.path`, expanded only when a request is matched. So
+`{r.path for r in app.routes}` — the obvious implementation — returned four
+paths (`/docs`, `/openapi.json`, …) and the contract test would have passed
+while every real route was missing. It now walks `original_router` and
+`include_context.prefix`, and finds 24. The route-inventory test exists
+precisely to catch a lost route during this refactor; it nearly became the
+thing that hid one.
+
+**Also removed:** `backend/venv/` (an empty Python 3.12 venv, 0 packages, a
+gitignored leftover from the SDK attempt — not to be confused with the real
+`.venv/`) and `start_app.txt` (a tracked one-line scratch note whose content is
+already in the README).
+
+**Tests: 199 backend + 125 frontend, both green. Tier 3: 12/12 ×3.**
 
 ---
 

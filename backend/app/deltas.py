@@ -104,6 +104,34 @@ class DeltaHub:
     def unsubscribe(self, q: asyncio.Queue[dict[str, Any]]) -> None:
         self._subscribers.discard(q)
 
+    def adopt(self, other: "DeltaHub") -> int:
+        """
+        Take over another hub's live subscribers. Returns how many moved.
+
+        ── WHY A RESET NEEDS THIS ──────────────────────────────────────────
+        `/incident/reset` replaces the whole incident session, and a fresh
+        session builds a fresh hub. But the dashboards currently connected are
+        holding queues from the OLD hub — the socket handler is parked on
+        `queue.get()` for a specific queue object, and nothing about a new
+        hub reaches it.
+
+        Without this, every open dashboard receives the clearing SNAPSHOT and
+        then goes permanently silent: claims from the new incident are
+        published to a hub with no subscribers, and the board stays empty
+        until someone presses reload. That is precisely the failure the S6
+        three-consecutive-runs gate exists to catch, and it would only appear
+        on run two.
+
+        The queues move rather than being recreated, so the parked handlers
+        keep working with no reconnect and no gap.
+        """
+        moved = len(other._subscribers)  # noqa: SLF001 — same-class transfer
+        self._subscribers |= other._subscribers
+        other._subscribers.clear()  # noqa: SLF001
+        if moved:
+            log.info("deltas: adopted %d subscriber(s) across a reset", moved)
+        return moved
+
     def since(self, last_seq: int) -> list[dict[str, Any]] | None:
         """
         Deltas after `last_seq`, or None when the gap is too large to replay

@@ -268,6 +268,18 @@ class ContradictionEngine:
         # pair key -> monotonic time of last adjudication
         self._cooldown: dict[tuple[str, str], float] = {}
 
+    def reset(self) -> None:
+        """
+        Forget every pair's cooldown — a new incident starts silent.
+
+        Public because `/incident/reset` needs it and used to get there with
+        `engine._cooldown.clear()  # noqa: SLF001`. That worked, but it made
+        the reset path depend on a private field's name and type: a stale
+        cooldown carried into a fresh incident silences a genuine conflict,
+        which is the kind of bug that looks like the feature simply not firing.
+        """
+        self._cooldown.clear()
+
     @staticmethod
     def _pair_key(a: str, b: str) -> tuple[str, str]:
         return (a, b) if a < b else (b, a)

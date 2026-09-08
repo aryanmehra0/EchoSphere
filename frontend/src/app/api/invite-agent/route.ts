@@ -354,21 +354,27 @@ export async function POST(request: Request) {
       otherUids: humans,
       systemPrompt: buildSystemPrompt(toolsEnabledNow),
       /*
-        Let the ENGINE speak the greeting, the way the quickstart does.
+        ── ONE GREETING, AND IT IS THE ENGINE'S ────────────────────────────
+        Echo used to join in total silence: the prompt forbade greeting and
+        `greeting_message` was "". From inside the room a working agent and a
+        dead one looked identical, which is the most expensive ambiguity in
+        this project — hence an engine-level greeting that proves the LLM leg
+        is alive.
 
-        Echo used to join in total silence: the prompt forbade greeting, and
-        `greeting_message` was forced to "". From inside the room a working
-        agent and a dead one looked identical, which is the single most
-        expensive ambiguity in this project.
+        But BOTH halves were switched on. `greeting` makes the Engine speak,
+        and `greet: true` makes the Slow Loop's Bridge speak
+        `utterance.joined()` through /speak — two introductions per join, from
+        two different components, which is the "saying the intro line again
+        and again" that was reported.
 
-        The Bridge still speaks its own line too when the Slow Loop wants one;
-        this is the engine-level greeting that proves the LLM leg is alive.
-      */
-      /*
+        The Engine's is kept because it is the one that proves ASR -> LLM ->
+        TTS is actually wired; a Bridge /speak only proves TTS. `greet` is
+        therefore false below, always.
+
         Only a genuinely NEW session announces itself. Adding a third person
         replaces the agent, and an agent that reintroduces itself every time
-        someone joins talks over a bridge that is already in progress — the
-        filler §14.1 forbids, arriving through the join path.
+        someone joins talks over a bridge already in progress — the filler
+        §14.1 forbids, arriving through the join path.
       */
       greeting: inheritedUids.length > 0 ? "" : DEFAULT_GREETING,
       tts: {
@@ -385,7 +391,10 @@ export async function POST(request: Request) {
       groqApiKey: fastLoop.apiKey,
       groqModel: fastLoop.model,
       ...(toolsBlock.tools ? { tools: toolsBlock.tools } : {}),
-      greet: inheritedUids.length === 0,
+      // FALSE, always — see the `greeting` note above. The Engine already
+      // announces the join; a Bridge /speak on top of it is a second
+      // introduction in the same breath.
+      greet: false,
     });
 
     if (!started.ok) {

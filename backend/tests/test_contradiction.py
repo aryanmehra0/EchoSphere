@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import unittest
+from unittest import mock
 
 from app.contradiction import (
     ADJUDICATION_CONFIDENCE_GATE,
@@ -353,7 +355,18 @@ class TestPanelIsTheDefaultJudge(unittest.TestCase):
                     role="Support Engineer")
         other = claim("c2", "Redis primary memory measured at 40 percent", "redis")
 
-        run(eng.evaluate(new, [other], call_llm=spy))
+        # A multi-model provider is pinned rather than inherited from the
+        # environment: this test is about the panel WIRING, and it began
+        # failing when a single-model local server was configured in
+        # `.env.local`. The collapse-to-one-model case is covered in
+        # test_panel.py, where it belongs.
+        with mock.patch.dict(os.environ, {
+            "GROQ_API_KEY": "gsk_test",
+            "ANALYSIS_PROVIDER": "groq",
+            "ANALYSIS_MODEL": "model-a",
+            "ANALYSIS_MODEL_FALLBACKS": "model-b,model-c",
+        }):
+            run(eng.evaluate(new, [other], call_llm=spy))
 
         # Two analysts, each pinned to its own model. One call with models=None
         # would mean the single judge is still running.

@@ -60,8 +60,8 @@ Mandatory for this submission, so here is precisely what is used and where.
 | **Managed LLM** — OpenAI `gpt-4o-mini` | `preset: openai_gpt_4o_mini` | The Fast Loop. Agora supplies and bills the model, so no OpenAI key is needed. |
 | **BYOK TTS** — ElevenLabs `eleven_flash_v2_5` | `properties.tts` | Echo's voice. The quickstart's documented BYOK path. |
 | **REST tools** | `properties.llm.tools` | Agora calls **our** endpoints mid-turn. This is what stops Echo inventing an incident. |
-| **`/agents/{id}/speak`** | `backend/app/bridge.py` | The Slow Loop puts exact, rule-validated words in Echo's mouth. |
-| **`/agents/{id}/interrupt`** | `backend/app/bridge.py` | Pre-empts Echo for a high-priority contradiction. |
+| **`/agents/{id}/speak`** | `backend/app/adapters/agora_bridge.py` | The Slow Loop puts exact, rule-validated words in Echo's mouth. |
+| **`/agents/{id}/interrupt`** | `backend/app/adapters/agora_bridge.py` | Pre-empts Echo for a high-priority contradiction. |
 | **RTM data channel** | `parameters.data_channel: "rtm"` | Transcripts and agent state reach the browser. |
 | **Turn detection / VAD** | `properties.turn_detection` | Nested `start_of_speech` / `end_of_speech` config, tuned so Echo does not barge in on breaths. |
 | **Agent status + history** | `frontend/src/app/api/agent-status` | Every claim in this README is checked against Agora's **own** record, not our logging. |
@@ -89,17 +89,28 @@ every tool call must present `AGENT_TOOL_SECRET`; the gate fails closed.
 
 ### Conformance with the official quickstart
 
-Diffed field by field against `agent-quickstart-python/server/src/agent.py`,
-and where the REST shape is not obvious it was read out of the `agora-agents`
-SDK rather than guessed:
+Diffed field by field against Agora's own quickstart, and where the REST shape
+is not obvious it was read out of the `agora-agents` SDK rather than guessed:
 
 - `remote_rtc_uids`, `enable_string_uid`, `advanced_features.enable_rtm`, all
-  four `parameters`, and the nested `turn_detection` shape **match**.
-- `preset` is composed the way `presets.py:resolve_session_presets` composes
-  it — one entry per managed category, comma-joined — and the fields that a
-  preset covers are omitted, because `strip_inferred_preset_fields` removes
-  them. Sending an `api_key` alongside a managed model silently drops the
-  agent off the managed path.
+  four `parameters`, and the nested `turn_detection` shape **match**
+  [`agent-quickstart-python/server/src/agent.py`](https://github.com/AgoraIO-Conversational-AI/agent-quickstart-python/blob/main/server/src/agent.py).
+- `preset` is composed the way `resolve_session_presets` composes it — one
+  entry per managed category, comma-joined — and the fields that a preset
+  covers are omitted, because `strip_inferred_preset_fields` removes them.
+  Both are **SDK** source, not quickstart source, in
+  `agora_agent/agentkit/presets.py` — locate the installed copy with
+  `python -c "import agora_agent.agentkit.presets as p; print(p.__file__)"`.
+  Sending an `api_key` alongside a managed model silently drops the agent off
+  the managed path.
+
+> **Why this section exists.** Agora returns **HTTP 200 for a payload it only
+> partly understands**, so a misplaced field fails silently — the worst
+> instance here had the recogniser never running, so `content` came back
+> empty for turns carrying seconds of real speech while the agent reported
+> `RUNNING`. If Echo joins and transcribes nothing, diff
+> `frontend/src/lib/server/agent-config.ts` against the two sources above
+> rather than guessing. `npm run payload` prints exactly what we send.
 - `asr.language` sits at the top level, equal to `turn_detection.language`:
   *"turn detection is the single source of truth for the interaction
   language, so a vendor-level language would be silently discarded."*

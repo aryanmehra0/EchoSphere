@@ -174,10 +174,34 @@ def personas() -> tuple[list[Persona], Persona]:
     """
     from . import config
 
-    chain = config.analysis_models()
+    # The chain of the provider that will actually serve the call, so a
+    # Gemma-only configuration gets `gemma-*` names rather than Groq's —
+    # which would 404 on every persona and abstain the whole panel into
+    # silence, reading as "no contradiction found" rather than as a failure.
+    providers = config.analysis_providers()
+    chain = providers[0][1] if providers else config.analysis_models()
+
     primary = chain[0]
     second = chain[1] if len(chain) > 1 else primary
     third = chain[2] if len(chain) > 2 else primary
+
+    # ── SAY IT WHEN THE BENCH COLLAPSES ────────────────────────────────────
+    # A local server usually hosts exactly ONE model, so the personas cannot
+    # be spread across three. The panel still works — most of its
+    # independence comes from the prompts, which differ — but it genuinely
+    # becomes one model arguing with itself, and it will agree with itself
+    # more readily than two models would.
+    #
+    # That matters because `PanelVerdict.is_actionable` requires DISSENT for
+    # an INDEPENDENT verdict to reach the room. Fewer splits means fewer
+    # interventions, which looks identical to "nothing was contradictory".
+    # Logged so that quietness is attributable rather than mysterious.
+    if len({primary, second, third}) == 1:
+        log.warning(
+            "panel: only one model available (%s) — personas share it, so "
+            "independence is reduced to prompt differences alone",
+            primary,
+        )
 
     return [
         Persona("SKEPTIC", SKEPTIC_PROMPT, primary),

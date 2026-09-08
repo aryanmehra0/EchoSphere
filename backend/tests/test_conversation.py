@@ -170,16 +170,20 @@ class Registration(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        from app.main import _agent
+        # The agent record lives on the incident session now, not in a module
+        # global. Reached through the registry so this sees the same object the
+        # route handler will.
+        from app.services.session import registry
 
-        self._saved = dict(_agent)
-        _agent["agent_id"] = None
-        _agent["channel"] = None
+        agent = registry.current().agent
+        self._saved = dict(agent)
+        agent["agent_id"] = None
+        agent["channel"] = None
 
     def tearDown(self) -> None:
-        from app.main import _agent
+        from app.services.session import registry
 
-        _agent.update(self._saved)
+        registry.current().agent.update(self._saved)
 
     def _register(self, client: TestClient, **body: object) -> dict:
         payload = {"agentId": "AGENT-1", "channel": "inc-4417", **body}
@@ -192,7 +196,7 @@ class Registration(unittest.TestCase):
 
     def test_a_new_agent_is_announced(self) -> None:
         with TestClient(app) as c:
-            with mock.patch("app.main.BridgeController") as bridge:
+            with mock.patch("app.services.speech.BridgeController") as bridge:
                 bridge.return_value.__aenter__.return_value.speak = mock.AsyncMock()
                 out = self._register(c)
         self.assertTrue(out["ok"])
@@ -201,7 +205,7 @@ class Registration(unittest.TestCase):
     def test_registering_the_same_agent_again_does_not_re_announce(self) -> None:
         """Echo introducing itself on every reload is the filler §14.1 bans."""
         with TestClient(app) as c:
-            with mock.patch("app.main.BridgeController") as bridge:
+            with mock.patch("app.services.speech.BridgeController") as bridge:
                 bridge.return_value.__aenter__.return_value.speak = mock.AsyncMock()
                 self._register(c)
                 again = self._register(c)
@@ -215,7 +219,7 @@ class Registration(unittest.TestCase):
         agent looks new and Echo would greet a room it has been sitting in.
         """
         with TestClient(app) as c:
-            with mock.patch("app.main.BridgeController") as bridge:
+            with mock.patch("app.services.speech.BridgeController") as bridge:
                 bridge.return_value.__aenter__.return_value.speak = mock.AsyncMock()
                 out = self._register(c, greet=False)
         self.assertFalse(out["greeting"]["spoken"])
@@ -232,7 +236,7 @@ class Registration(unittest.TestCase):
         line truncated to the single word "Echo".
         """
         with TestClient(app) as c:
-            with mock.patch("app.main.BridgeController") as bridge:
+            with mock.patch("app.services.speech.BridgeController") as bridge:
                 entered = bridge.return_value.__aenter__.return_value
                 entered.speak = mock.AsyncMock()
                 entered.speak_now = mock.AsyncMock()

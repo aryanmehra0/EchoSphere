@@ -218,24 +218,14 @@ def contradiction_intervention(
     return validate(" ".join(parts))
 
 
-def tension_intervention(established: list[Claim], gap: Unchecked | None) -> str:
-    """
-    W6's utterance — a re-grounding in the record, not a reprimand (§8.3).
-
-    Restating attributed facts and naming the unowned gap is the intervention.
-    It works because it is what a good human incident commander does.
-    """
-    if not established:
-        raise ValueError("a tension intervention with nothing established says nothing")
-
-    facts = "; ".join(_attribute(c) for c in established[:3])
-    text = f"Pausing for ten seconds. Confirmed so far: {facts}."
-
-    if gap is not None:
-        owner = gap.suggested_owner or "someone"
-        text += f" Open and unowned: {gap.description.rstrip('.')}. {owner}, do you want that?"
-
-    return validate(text)
+# `tension_intervention` lived here — W6's de-escalation line, spoken when the
+# Room Tension Index stayed ELEVATED through its cooldown. It was removed with
+# the RTI subsystem itself (see the note in `main.py`): the index had no
+# producer, so this composer had no caller and no way to acquire one.
+#
+# The `_NO_CLAIM` tripwire still admits the "pausing for" prefix. That is
+# deliberate — it costs nothing, and it is the correct classification for any
+# future line that reports Echo's own state rather than the incident's.
 
 
 def close_out(

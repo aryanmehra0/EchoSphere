@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import unittest
 
-from app.bridge import BridgeController
+from app.adapters.agora_bridge import BridgeController
 from app.models import Claim, Unchecked
 from app.utterance import (
     EpistemicViolation,
     close_out,
     contradiction_intervention,
-    tension_intervention,
     validate,
 )
 
@@ -100,10 +99,10 @@ class TestComposers(unittest.TestCase):
         line = contradiction_intervention(self.a, self.b, relation="OPPOSED", gap=self.gap)
         validate(line)  # raises if it slipped into diagnosis
 
-    def test_tension_restates_the_record_rather_than_scolding(self):
-        line = tension_intervention([self.a, self.b], self.gap)
-        self.assertTrue(line.startswith("Pausing for ten seconds"))
-        self.assertIn("DevOps", line)
+    # `test_tension_restates_the_record_rather_than_scolding` was removed with
+    # the RTI subsystem — the composer it exercised had no producer. The Rule 1
+    # and Rule 2 coverage it contributed is unchanged: every remaining composer
+    # is still asserted to pass `validate()`.
 
     def test_closeout_states_root_cause_is_not_established(self):
         line = close_out(

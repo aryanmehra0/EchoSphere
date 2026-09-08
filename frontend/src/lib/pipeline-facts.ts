@@ -36,9 +36,21 @@ export const ASR_LABEL = "deepgram/nova-3";
  * The quickstart's values, adopted deliberately when the SDK path was built so
  * that only one variable changed at a time.
  */
-export const VAD_INTERRUPT_MS = 160;
-export const VAD_SILENCE_MS = 480;
-export const VAD_LABEL = `vad · ${VAD_INTERRUPT_MS}ms`;
+/*
+  KEEP IN SYNC WITH `backend/app/adapters/agora_agent.py` — see the header
+  note. That file builds the agent, so it owns these numbers; this mirror is
+  display only, and `tests/pipeline-facts.test.ts` checks what it can.
+*/
+export const VAD_INTERRUPT_MS = 300;
+export const VAD_SILENCE_MS = 1500;
+
+/*
+  BOTH numbers are shown now. End-of-speech is the one that decides whether a
+  whole sentence survives, and it was invisible here while a 480ms value
+  truncated every utterance — an operator staring at this bar had no way to
+  see the setting that was breaking their transcript.
+*/
+export const VAD_LABEL = `vad · ${VAD_INTERRUPT_MS}/${VAD_SILENCE_MS}ms`;
 
 /**
  * Echo's voice — Agora-managed MiniMax, the quickstart's own vendor.

@@ -863,7 +863,18 @@ async def groq_json(
     models: list[str] | None = None,
 ) -> str:
     """
-    Groq chat completions, forced to JSON, with 429 handling.
+    One JSON completion from the analysis LLM, with rate-limit handling.
+
+    ── THE NAME IS A LIE NOW, AND IT IS KEPT ON PURPOSE ────────────────────
+    This is the single seam every analytical model call goes through:
+    extraction, contradiction adjudication, all three panel personas, and the
+    budget probe. Renaming it would touch six modules and their tests for no
+    behavioural gain, and `git log` would stop being able to follow the one
+    function whose retry policy every one of those paths depends on.
+
+    What it actually does is try each configured PROVIDER in turn — Groq, Gemma,
+    or both, per `ANALYSIS_PROVIDER`. Groq alone is the default and the
+    behaviour is unchanged when no Gemma base URL is set.
 
     ── WHY THE RETRY IS NOT OPTIONAL ───────────────────────────────────────
     Tier 2 hit this on run 5 of 5:
@@ -881,15 +892,97 @@ async def groq_json(
     back off if it comes back a second time.
     ────────────────────────────────────────────────────────────────────────
     """
-    from groq import AsyncGroq
+    providers = config.analysis_providers()
+    if not providers:
+        raise RuntimeError(
+            "No analysis provider is configured. Set GROQ_API_KEY, or set "
+            "GEMMA_BASE_URL with ANALYSIS_PROVIDER=gemma."
+        )
 
-    # `models` lets one caller pin its own model while keeping the rest of the
-    # chain as fallback. The Deliberation Panel (§7a) uses this to put each
-    # persona on a DIFFERENT model — which buys genuine independence between
-    # the personas and, because Groq's daily cap is scoped per model, costs
-    # nothing extra in quota. Two problems, one parameter.
-    models = models or config.analysis_models()
-    keys = config.groq_api_keys()
+    # `models` pins a caller's own choice — the Deliberation Panel (§7a) uses
+    # it to put each persona on a DIFFERENT model, which buys genuine
+    # independence between them.
+    #
+    # A pin is honoured only by the provider that actually OWNS those model
+    # names. Passing Groq's `openai/gpt-oss-120b` to a Gemma server would 404
+    # on every attempt and burn the fallback for no reason, so a provider
+    # whose names do not match the pin falls back to its own chain. That keeps
+    # the panel's per-persona pinning working while still letting the second
+    # provider answer when the first is spent.
+    pinned = models
+
+    def chain_for(provider: str, provider_models: list[str]) -> list[str]:
+        if not pinned:
+            return provider_models
+        # Gemma model names start `gemma`; Groq's are vendor-prefixed
+        # (`openai/…`, `qwen/…`). Cheap, and sufficient to tell them apart.
+        looks_gemma = all(m.lower().startswith("gemma") for m in pinned)
+        if (provider == "gemma") == looks_gemma:
+            return pinned
+        return provider_models
+
+    failures: list[str] = []
+    for provider, provider_models, keys in providers:
+        chain = chain_for(provider, provider_models)
+        try:
+            if provider == "groq":
+                return await _groq_chain(system, user, max_tokens, chain, keys)
+            return await _gemma_chain(system, user, max_tokens, chain, keys)
+        except Exception as exc:  # noqa: BLE001 — try the next provider
+            failures.append(f"{provider}: {exc}")
+            if len(providers) > 1:
+                log.warning(
+                    "analysis: %s exhausted, falling through to the next provider",
+                    provider,
+                )
+
+    raise RuntimeError("every analysis provider failed — " + " | ".join(failures))
+
+
+async def _gemma_chain(
+    system: str,
+    user: str,
+    max_tokens: int,
+    models: list[str],
+    keys: list[str],
+) -> str:
+    """
+    Gemma, walking its model chain and then its keys.
+
+    Simpler than the Groq path deliberately: a self-hosted model has no
+    per-minute token bucket and publishes no retry hint, so there is nothing
+    to sleep against. A rate-limited or missing model moves to the next one
+    immediately.
+    """
+    from .adapters import gemma
+
+    last: Exception | None = None
+    for model in models:
+        for api_key in keys:
+            try:
+                return await gemma.chat_json(
+                    system, user, model=model, api_key=api_key, max_tokens=max_tokens,
+                )
+            except gemma.GemmaError as exc:
+                last = exc
+                # An unreachable endpoint will not become reachable by trying
+                # another model name against the same host — fail out to the
+                # next PROVIDER instead of retrying a dead socket N times.
+                if "unreachable" in str(exc):
+                    raise
+                log.warning("gemma: %s unavailable — %s", model, str(exc)[:160])
+    raise RuntimeError(f"every Gemma model failed: {last}")
+
+
+async def _groq_chain(
+    system: str,
+    user: str,
+    max_tokens: int,
+    models: list[str],
+    keys: list[str],
+) -> str:
+    """Groq, with the measured key/model rotation and 429 backoff."""
+    from groq import AsyncGroq
 
     # Patient on purpose. The free tier is 8000 TOKENS PER MINUTE, and a busy
     # window sends the transcript plus the Compacted State on every flush — so
@@ -974,8 +1067,7 @@ async def groq_json(
             delay = min(delay * 2, 20.0)
 
     raise RuntimeError(
-        f"every analysis model is rate limited across "
-        f"{len(config.groq_api_keys())} key(s): {last}"
+        f"every Groq model is rate limited across {len(keys)} key(s): {last}"
     )
 
 

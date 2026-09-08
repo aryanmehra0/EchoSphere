@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import unittest
 from dataclasses import dataclass
+from unittest import mock
 
 from app.panel import (
     DISSENT_PENALTY,
@@ -19,6 +21,7 @@ from app.panel import (
     Position,
     _causally_clean,
     deliberate,
+    personas,
 )
 
 
@@ -234,6 +237,17 @@ class PanelReconciliation(unittest.TestCase):
         """
         Independence and quota both depend on this. If the pinning regresses,
         the panel silently becomes one model talking to itself.
+
+        ── WHY THE ENV IS PINNED HERE ──────────────────────────────────────
+        `personas()` reads the ACTIVE provider's chain, so this test used to
+        depend on whatever was in `.env.local` — and it started failing the
+        moment a single-model Gemma server was configured. The assertion was
+        right and the test was under-specified: it is about the PINNING
+        mechanism, which must keep working regardless of which provider is
+        selected on this machine.
+
+        A genuinely single-model provider collapsing to one model is a
+        separate, expected case, covered below.
         """
         seen: list[list[str]] = []
 
@@ -241,12 +255,45 @@ class PanelReconciliation(unittest.TestCase):
             seen.append(kwargs.get("models"))
             return json.dumps({"relation": "AGREES", "confidence": 0.8, "why": "x"})
 
-        asyncio.run(deliberate(
-            C("a", "DevOps Lead"), C("b", "Support Engineer"), call_llm=record,
-        ))
+        with mock.patch.dict(os.environ, {
+            "GROQ_API_KEY": "gsk_test",
+            "ANALYSIS_PROVIDER": "groq",
+            "ANALYSIS_MODEL": "model-a",
+            "ANALYSIS_MODEL_FALLBACKS": "model-b,model-c",
+        }):
+            asyncio.run(deliberate(
+                C("a", "DevOps Lead"), C("b", "Support Engineer"), call_llm=record,
+            ))
+
         self.assertEqual(len(seen), 2)
         self.assertTrue(all(m and len(m) == 1 for m in seen))
         self.assertNotEqual(seen[0], seen[1])
+
+    def test_a_single_model_provider_collapses_and_says_so(self):
+        """
+        A local server usually hosts ONE model, so the bench cannot be spread
+        across three. That is acceptable — the personas' prompts differ, which
+        is where most of the independence comes from — but it is a real
+        reduction in it, so `panel.personas()` warns rather than degrading
+        quietly.
+
+        This is the case the sibling test above deliberately does not cover.
+        """
+        with mock.patch.dict(os.environ, {
+            "GROQ_API_KEY": "",
+            "GEMMA_BASE_URL": "http://127.0.0.1:8444/v1",
+            "ANALYSIS_PROVIDER": "gemma",
+            "GEMMA_MODEL": "only-one",
+            "GEMMA_MODEL_FALLBACKS": "",
+        }):
+            with self.assertLogs("echo.panel", level="WARNING") as caught:
+                bench, referee = personas()
+
+        self.assertEqual({p.model for p in [*bench, referee]}, {"only-one"})
+        self.assertTrue(
+            any("one model" in line.lower() for line in caught.output),
+            f"expected a warning about lost independence, got {caught.output}",
+        )
 
 
 class PositionSerialisation(unittest.TestCase):

@@ -180,8 +180,30 @@ export class VoiceAgent {
    * Long enough to outlast the recogniser's own finalisation (observed at a
    * few hundred ms between END emissions), short enough that the Ledger is
    * not visibly behind the room.
+   *
+   * ── THIS MUST EXCEED THE AGENT'S end-of-speech WINDOW ───────────────────
+   * `agora_agent.py` sets `silence_duration_ms` — how long Agora waits before
+   * declaring a turn over. While that window is open the recogniser is STILL
+   * growing the text, so a settle shorter than it forwards a fragment and
+   * then marks the turn `delivered` FOREVER. Every fuller version that
+   * arrives afterwards is discarded as a duplicate.
+   *
+   * That is the reported defect, twice over:
+   *
+   *     spoken: "please note that the database is down"
+   *     got:    "Please note that that"
+   *
+   * At SETTLE_MS 900 against silence 1500 the client gave up 600ms before
+   * Agora had even finished the turn, so the trailing words could never be
+   * accepted — and raising `silence_duration_ms` to fix the earlier
+   * truncation made this race WORSE rather than better. Two settings in two
+   * languages, each individually defensible, wrong as a pair.
+   *
+   * 2200 = 1500 (silence) + 700 of headroom for the END re-emissions that
+   * follow it. Keep this comfortably above whatever `silence_duration_ms`
+   * becomes; if that changes, this changes with it.
    */
-  private static readonly SETTLE_MS = 900;
+  private static readonly SETTLE_MS = 2200;
 
   /** Diagnostics. Zero updates means the RTC data stream is silent. */
   updates = 0;
