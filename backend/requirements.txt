@@ -16,6 +16,11 @@ websockets>=12.0
 # adjudication (§7.1). Same key as the Fast Loop.
 groq>=0.11
 
+# Agora's Conversational AI agent SDK. Creates/invites the Cloud Agent (Echo)
+# via app/adapters/agora_agent.py. Missing this makes /api/invite-agent fail
+# with "Agent invite failed" while everything else in the app looks healthy.
+agora-agents>=2.3.0
+
 # ── NOT INSTALLED, and deliberately so ──────────────────────────────────────
 # agora-python-server-sdk
 #

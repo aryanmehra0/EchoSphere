@@ -193,6 +193,11 @@ class Ledger:
         return cx
 
     def add_timeline(self, event: TimelineEvent) -> TimelineEvent:
+        # Upsert by id, like every other collection in this class. Needed
+        # because the extraction LLM assigns its own ids (e.g. "t1") that
+        # restart on every batch, so two windows can each emit a "t1" -
+        # without this, both land in the list and React sees a duplicate key.
+        self.timeline = [e for e in self.timeline if e.id != event.id]
         self.timeline.append(event)
         self.timeline.sort(key=lambda e: e.at)
         store.save(event, self.channel)
