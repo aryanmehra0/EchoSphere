@@ -21,6 +21,7 @@ import {
 } from "./incident-reducer";
 import { DEMO_SCRIPT, rebaseAction } from "./mock-stream";
 import {
+  BridgeCredentialError,
   inviteAgent,
   openDeltaSocket,
   requestBridgeCredentials,
@@ -84,6 +85,31 @@ interface IncidentStore {
   agentTrack: IRemoteAudioTrack | null;
 }
 
+/**
+ * Did the browser refuse the microphone because nobody granted it?
+ *
+ * Matched on the message rather than on `instanceof DOMException`, because by
+ * the time it reaches us the SDK has usually re-wrapped it in its own
+ * `AgoraRTCError` and the original prototype is gone. Both spellings are
+ * checked: Agora's own `PERMISSION_DENIED` code and the DOM's
+ * `NotAllowedError` name, which is what a bare `getUserMedia` rejection is
+ * still called when the SDK passes it straight through.
+ */
+function isMicPermissionDenied(error: unknown): boolean {
+  const text = [
+    error instanceof Error ? error.name : "",
+    error instanceof Error ? error.message : String(error),
+    // AgoraRTCError carries the machine-readable reason here, not in `name`.
+    typeof (error as { code?: unknown })?.code === "string"
+      ? (error as { code: string }).code
+      : "",
+  ].join(" ");
+
+  return /PERMISSION_DENIED|NotAllowedError|Permission denied|permission dismissed/i.test(
+    text,
+  );
+}
+
 const Ctx = createContext<IncidentStore | null>(null);
 
 export function IncidentProvider({ children }: { children: ReactNode }) {
@@ -91,6 +117,24 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   const [micOn, setMicOn] = useState(true);
   const [source, setSource] = useState<DataSource>(null);
   const [agentTrack, setAgentTrack] = useState<IRemoteAudioTrack | null>(null);
+
+  /**
+   * The latest state, readable from inside `openBridge`.
+   *
+   * `openBridge` is a `useCallback` that deliberately does not depend on
+   * `state` - re-creating it on every delta would re-run the keyboard effect
+   * in `BridgeControls` sixty times a minute. So reading `state` directly in
+   * there closes over the value from the render that created the callback,
+   * which during a long join is already stale. This ref is the read path.
+   */
+  const stateRef = useRef(state);
+  // Written in an effect, not during render: mutating a ref while rendering is
+  // unsafe under concurrent React (the render may be thrown away) and is
+  // rejected by react-hooks/refs. An effect runs after commit, which is
+  // exactly when "the latest committed state" becomes true.
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   /** The live delta socket, when one is open. */
   const socket = useRef<DeltaSocket | null>(null);
@@ -287,15 +331,68 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
         }
       },
       onUnavailable: () => {
-        // A live microphone with no evidence path is misleading — speech would
-        // reach the channel and nothing would record it.
-        void agora.current?.leave();
-        setAgentTrack(null);
-        // The Slow Loop is not up. Say so once, then run the rehearsal so the
-        // dashboard is never a blank screen in front of a judge.
-        console.info("[bridge] Slow Loop unreachable — falling back to the scripted replay");
         socket.current = null;
-        startReplay();
+
+        /*
+          ── THE REHEARSAL IS NOW OPT-IN ────────────────────────────────────
+          This used to call `startReplay()` unconditionally, and that is a
+          bad trade outside a demo.
+
+          The replay injects a COMPLETE FABRICATED INCIDENT - claims about
+          Redis evicting keys, a checkout service, entities, a contradiction -
+          and it renders through the same reducer as real analysis, so it is
+          indistinguishable from the product working. The only tell is one
+          small "Rehearsal" chip in the status bar.
+
+          It fired whenever the delta socket could not be reached, which on a
+          shared tunnel is EVERY guest: the console tunnel does not proxy
+          /ws/deltas, so the socket always gives up and every guest watched a
+          Ledger fill itself with fiction about an outage that never happened.
+          Reported as "it starts auto filling the ledger, I don't want them".
+
+          Inventing incident data is the exact failure this product exists to
+          prevent. It must never be the automatic response to a network
+          problem - a Ledger that stays empty is honest, and the banner below
+          says why it is empty.
+
+          Set NEXT_PUBLIC_DEMO_REPLAY=1 to get the scripted rehearsal back for
+          a demo on a machine with no backend.
+        */
+        const replayAllowed = process.env.NEXT_PUBLIC_DEMO_REPLAY === "1";
+
+        if (replayAllowed) {
+          // A live microphone with no evidence path is misleading — speech
+          // would reach the channel and nothing would record it. Only the
+          // replay needs this, because only the replay takes the dashboard
+          // over; a real bridge with no Slow Loop keeps its microphone.
+          void agora.current?.leave();
+          setAgentTrack(null);
+          console.info("[bridge] Slow Loop unreachable — running the scripted rehearsal (NEXT_PUBLIC_DEMO_REPLAY=1)");
+          startReplay();
+          return;
+        }
+
+        /*
+          Say what is missing and leave the record alone. The voice bridge is
+          untouched - people can still talk, and Echo still answers - so this
+          is a degraded console, not a dead one.
+        */
+        console.warn(
+          `[bridge] Slow Loop unreachable at ${slowLoopUrl()} — the Ledger will stay empty. ` +
+            "Set NEXT_PUBLIC_DEMO_REPLAY=1 for the scripted rehearsal.",
+        );
+        dispatch({
+          type: "DELTA",
+          payload: {
+            degraded: {
+              voice: false,
+              extraction: true,
+              model: null,
+              banner:
+                "NO ANALYSIS — the Slow Loop is unreachable, so nothing spoken is being recorded",
+            },
+          },
+        });
       },
     });
 
@@ -330,8 +427,57 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       socket opened above — so neither of these calls can take it down, and the
       invite remains unawaited so a slow Agora cannot stall the join.
     */
+    /*
+      ── IDENTITY FIRST, AND IN ITS OWN TRY ──────────────────────────────────
+      This call used to sit INSIDE the try that wraps the RTC join, so every
+      way it can fail printed "NO MICROPHONE - you can watch, but the room
+      cannot hear you". That banner was wrong in the most expensive way
+      available: it named a component nothing had touched yet.
+
+      The failure it hid is the ordinary one for a SECOND participant. The role
+      dropdown defaults to "DevOps Lead" in every browser, roles are exclusive
+      per bridge (deliberately - see /api/token), so person two presses J, gets
+      a 409, and is told their microphone is not allowed. Person one is fine,
+      which is exactly the "works for one person, not for several" report: the
+      first joiner takes the default role and everybody after them collides
+      with it.
+
+      Two consequences, both fixed here. The banner now names the real fault
+      and repeats the server's list of free roles, so the fix ("pick Support
+      Engineer") is on screen instead of in a DevTools network tab. And a
+      credential failure returns early rather than falling through to the RTC
+      teardown path, because there is no session to tear down.
+    */
+    let credentials: Awaited<ReturnType<typeof requestBridgeCredentials>>;
     try {
-      const credentials = await requestBridgeCredentials(cleanChannel, role);
+      credentials = await requestBridgeCredentials(cleanChannel, role);
+    } catch (error) {
+      const conflict = error instanceof BridgeCredentialError && error.isRoleConflict;
+      const detail = error instanceof Error ? error.message : String(error);
+      const free =
+        error instanceof BridgeCredentialError && error.availableRoles.length
+          ? ` Free now: ${error.availableRoles.join(", ")}.`
+          : "";
+
+      console.warn("[bridge] no credentials were issued — not joining", error);
+      dispatch({
+        type: "DELTA",
+        payload: {
+          degraded: {
+            voice: true,
+            extraction: false,
+            model: null,
+            banner: conflict
+              ? `ROLE ALREADY TAKEN — pick a different role and press J again.${free}`
+              : `NOT ADMITTED TO THE BRIDGE — ${detail}`,
+          },
+        },
+      });
+      joining.current = false;
+      return;
+    }
+
+    try {
       // Remembered for `closeBridge`, so leaving releases THIS participant
       // rather than stopping Echo for the whole room.
       joinedUid.current = credentials.uid;
@@ -381,6 +527,32 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       await agora.current?.join(cleanChannel, credentials);
 
       /*
+        ── AN RTC JOIN IS ALSO "LIVE", NOT ONLY THE DELTA SOCKET ─────────────
+        `BRIDGE live` was dispatched from ONE place: the delta socket's
+        `onStatus`. So the transport that carries the operator's voice could be
+        fully established - joined, microphone published, Echo subscribed and
+        answering out loud - and the console still read "Connecting to bridge",
+        because the only thing allowed to end that state was a WebSocket to the
+        Slow Loop.
+
+        On a shared tunnel that socket may never open at all (the console
+        tunnel does not proxy /ws/deltas), and the result was a screen that
+        contradicted the room: microphone live in the address bar, Echo
+        "Listening", and a button spinning on "Connecting" forever.
+
+        The bridge IS live at this point by the only definition the label
+        claims - this console is on the voice bridge. `source` still says
+        whether the evidence path is live or a replay, and the degradation
+        banner still says what is missing, so nothing here overstates the
+        state; it stops understating it.
+
+        Guarded so it cannot walk backwards out of `closing`.
+      */
+      if (stateRef.current.bridge !== "closing") {
+        dispatch({ type: "BRIDGE", state: "live", at: Date.now() });
+      }
+
+      /*
         ── A SUCCESSFUL JOIN CLEARS THE BANNER ────────────────────────────────
         Nothing else ever did. `onError` raises the degradation banner and no
         path lowered it, so any transient failure — a lost subscribe race, a
@@ -412,7 +584,27 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
             voice: true,
             extraction: false,
             model: null,
-            banner: "NO MICROPHONE — you can watch, but the room cannot hear you",
+            /*
+              Everything reaching here IS a genuine media/RTC failure now that
+              credentials are handled above — but "no microphone" still covers
+              two different faults with two different fixes, and the operator
+              is the only one who can apply either.
+
+              A DENIED PERMISSION is recoverable in five seconds from the
+              browser's address bar, and it is by far the most common one on a
+              second machine: the guest sees Chrome's prompt, misses it or
+              dismisses it, and the console then said only that the room could
+              not hear them. Agora surfaces this as PERMISSION_DENIED and the
+              underlying DOMException as NotAllowedError; either spelling means
+              "the person must say yes", so both are named explicitly.
+
+              Anything else - no input device at all, a track the browser
+              refused for another reason, a channel it could not reach - keeps
+              the original wording, which is accurate for those.
+            */
+            banner: isMicPermissionDenied(error)
+              ? "MICROPHONE BLOCKED — allow microphone access for this site, then press J again"
+              : "NO MICROPHONE — you can watch, but the room cannot hear you",
           },
         },
       });
