@@ -1,22 +1,3 @@
-# EchoSphere — Postgres for the Evidence Ledger.
-#
-# ── WHY ONLY THE DATABASE IS CONTAINERISED ──────────────────────────────────
-# The backend and the console keep running on the host through `start.ps1`.
-# That is deliberate, not laziness:
-#
-#   - The Next.js dev server is doing hot reload, and containerising it trades
-#     that for a rebuild on every edit.
-#   - `start.ps1 -Share` opens cloudflared tunnels against host ports. Moving
-#     the services into a compose network would break the tunnel wiring and the
-#     NEXT_PUBLIC_* values that are baked in at build time.
-#
-# So this file does one job: give the Slow Loop a durable place to put the
-# incident record. Everything else is unchanged.
-#
-#   docker compose up -d       start Postgres
-#   docker compose down        stop it (data survives)
-#   docker compose down -v     stop it and DELETE the data
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -26,40 +7,13 @@ services:
       POSTGRES_USER: echo
       POSTGRES_PASSWORD: echo
       POSTGRES_DB: echosphere
-      # Deterministic collation, so ORDER BY does not depend on the host's
-      # locale. A demo that sorts differently on another machine is a bug
-      # nobody thinks to look for.
       POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
     ports:
-      # Published on the host because the Slow Loop runs there, not in this
-      # network. NOT 5432: a developer machine very often already has a
-      # Postgres on the default port, and the failure is a confusing
-      # "database exists but the tables are missing" against the wrong server.
-      #
-      # ── AND NOT 5433 EITHER, WHICH IS THE SAME BUG ONE PORT ALONG ─────────
-      # 5433 was the original choice and it collided with `lawgic-pg`, another
-      # project's database, already healthy on this machine. The symptom was
-      # exactly what the paragraph above warns about: `store.connect()`
-      # reached a real Postgres, was refused with
-      #
-      #     password authentication failed for user "echo"
-      #
-      # and /health reported persistence disabled — so the Ledger silently ran
-      # in memory and every restart lost the incident. Nothing pointed at the
-      # port; the credentials looked wrong instead.
-      #
-      # 5434 is checked free here. If it ever collides too, the fix is this
-      # line plus DATABASE_URL in config.py — and the real lesson is to read
-      # `docker ps` before believing an auth error.
       - "5434:5432"
     volumes:
       - echosphere-pgdata:/var/lib/postgresql/data
-      # Applied once, on first initialisation of an empty data directory.
       - ./backend/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
-      # `pg_isready` alone returns true before the init scripts have finished,
-      # so a service starting on `service_healthy` can still race the schema.
-      # Querying a table the schema creates is the honest check.
       test: ["CMD-SHELL", "pg_isready -U echo -d echosphere && psql -U echo -d echosphere -c 'select 1 from claims limit 1' >/dev/null 2>&1"]
       interval: 3s
       timeout: 5s

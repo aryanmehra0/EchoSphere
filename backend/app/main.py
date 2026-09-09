@@ -26,11 +26,12 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import config, middleware, store
-from .deps import set_http_client
-from .routers import agent, approval, bridge, deltas, ingest, ops, tools
-from .services import pipeline
-from .services.session import registry
+from app.application.services import pipeline
+from app.application.services.session import registry
+from app.infrastructure import config, store
+from app.web import middleware
+from app.web.deps import set_http_client, speech
+from app.web.routers import agent, approval, bridge, deltas, ingest, ops, tools
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(name)-14s %(message)s")
 log = logging.getLogger("echo.main")
@@ -46,7 +47,6 @@ async def lifespan(app: FastAPI):
     # this, the last sentence before a pause sits in the window unextracted —
     # which on a bridge is precisely the sentence people are waiting on.
     async def flush_ticker() -> None:
-        from .deps import speech
 
         while True:
             await asyncio.sleep(0.5)

@@ -27,7 +27,7 @@
 | **S6 (Rig + degradation)** | 🟡 Tiers 1-3 exist; **Tier 3 is new (Aug 31)**. Dress rehearsals below |
 | **7a Deliberation Panel** | ✅ New Aug 31 — replaced the single adjudicator |
 | **10.5 Consent gate** | ✅ New Aug 31 — off the record, verified leaves no trace |
-| **Tests** | **125 frontend** (`npm run verify` green) + **199 backend** = 324 |
+| **Tests** | **153 frontend** (`npm run verify` green) + **261 backend** = 414 |
 | **Voice path** | ✅ Verified live Aug 31 — `spoken: true`, 790 ms. Was never wired before. |
 | **Demo runbook** | `docs/DEMO.md` — three modes, the script, the questions judges ask |
 
@@ -1650,6 +1650,61 @@ already in the README).
 
 **Tests: 199 backend + 125 frontend, both green. Tier 3: 12/12 ×3.**
 
+### Session 10 · Sep 9 — Domain-Driven Design & Hexagonal Pipes-and-Filters Refactor
+
+**Motivation:** `pipeline.py` contained a 424-line monolithic async function
+with intertwined concerns (concurrency locking, LLM parsing, rate-limit
+re-queues, entity reconciliation, link re-indexing, primary delta publishing,
+and contradiction deliberation). The goal: transition to clean Domain-Driven
+Design (DDD) and Hexagonal Architecture (Ports and Adapters) with a modular
+Pipes-and-Filters pipeline without breaking any of the 7 Golden Master
+invariants.
+
+**What was done.**
+1. **Phase 1: Pure Domain Policies Extraction:**
+   - Extracted `EntityReconciler` and `VagueNounPolicy` into
+     `app/core/policies/reconciliation.py`. Isolates alias mapping, vague noun
+     rejection (`database`, `cache`, `network`, `server`, `queue`, `api`,
+     `service`), and `-unspecified` promotion from transport and storage.
+   - Pinned with 5 unit tests in `tests/test_reconciliation_policy.py`.
+2. **Phase 2: Port Protocol Definitions (Hexagonal Boundary):**
+   - Created `app/ports/inbound.py` defining driving use cases:
+     `IngestTranscriptUseCase`, `QueryIncidentStateUseCase`,
+     `ActionApprovalUseCase`, `PrivacyConsentUseCase`,
+     `ContradictionAdjudicationUseCase`.
+   - Created `app/ports/outbound.py` defining driven infrastructure ports:
+     `ExtractionLlmPort`, `ContradictionPanelPort`, `VoiceBridgePort`,
+     `LedgerStorePort`, `DeltaBroadcasterPort`.
+   - Aliased `EvidenceLedger = Ledger` and added `DeliberationPanel` service
+     wrapper to `panel.py`.
+   - Pinned with 8 runtime protocol conformance tests in `tests/test_ports.py`.
+3. **Phase 3: Modular Pipes-and-Filters Pipeline:**
+   - Created `app/pipeline/context.py` (`PipelineContext` holding session,
+     frames, extraction payload, delta, new claims, spoken intervention).
+   - Created `app/pipeline/steps/`:
+     - `drain.py` (`WindowDrainStep`): evaluates flush conditions, drains frames.
+     - `extract.py` (`LlmExtractionStep`): carries aliases, calls LLM, and
+       guarantees 429 fail-safe requeue (`window.requeue(frame)`).
+     - `ingest.py` (`LedgerIngestionStep`): reconciles entities, re-indexes links
+       and claims, checks supersedes targets.
+     - `publish.py` (`PrimaryDeltaPublishStep`): broadcasts Phase 1 delta
+       before contradiction check (Invariant 2).
+     - `deliberate.py` (`ContradictionDeliberationStep`): re-computes fresh
+       aliases (Invariant 5), short-circuits OPPOSED (Invariant 6), surfaces
+       conflict via `surface_contradiction`.
+   - Created `app/pipeline/runner.py` (`PipelineRunner`): coordinates steps under
+     `session.pipeline_lock` with fallback frame rescue.
+   - Refactored `app/services/pipeline.py::run_if_ready` to delegate to
+     `PipelineRunner` with full backwards-compatible re-exports.
+   - Pinned with 6 unit tests in `tests/test_pipeline_decomposition.py`.
+
+**Evidence & Verification.**
+- **Backend tests:** 261 passed, 0 failed in 23.6s (`tests/test_contract.py`
+  confirmed all 24 routes intact and unperturbed).
+- **Frontend verification:** `npm run verify` passed (typecheck green, lint 0
+  warnings, 153 tests passed across 30 suites, Next.js production build green).
+- **Total test suite:** 414 automated tests (261 backend + 153 frontend), 0 failures.
+
 ---
 
 ## 3. Design decisions (Phase 1 UI)
@@ -1880,6 +1935,33 @@ Last session's tunnel: `https://attitude-air-cartridges-warned.trycloudflare.com
 - **`.env*` in `.gitignore` swallowed `.env.local.example`.** Fixed with an
   explicit `!.env.local.example` negation. `.env.local` itself stays ignored.
 - **Large heredocs through Bash fail** in this environment; use the Write tool.
+
+---
+
+## Session 11 — Domain-Driven Design & Hexagonal Architecture Refactoring (Sep 10, 2026)
+
+### Context & Objective
+The backend codebase previously had 18 loose files sitting at `backend/app/` (`models.py`, `ledger.py`, `extraction.py`, `panel.py`, etc.) alongside legacy unstructured folders. The objective was a full refactor into Domain-Driven Design (DDD) & Clean Hexagonal Architecture with 4 distinct layers:
+1. `domain`: Pure models (`models.py`, `ledger.py`) and enterprise policies (`authorization.py`, `contradiction.py`, `degradation.py`, `privacy.py`, `proxy.py`, `reconciliation.py`, `redaction.py`, `utterance.py`). Zero dependency on web or external frameworks.
+2. `application`: Driving/driven ports (`ports/inbound.py`, `ports/outbound.py`), services (`speech.py`, `session.py`, `budget.py`, `extraction.py`, `panel.py`), and modular pipes-and-filters pipeline steps (`context.py`, `runner.py`, `steps/`).
+3. `infrastructure`: Secondary/driven adapters (`agora_agent.py`, `agora_bridge.py`, `config.py`, `deltas.py`, `gemma.py`, `store.py`).
+4. `web`: Presentation layer (`deps.py`, `middleware.py`, `routers/agent.py`, `routers/approval.py`, `routers/bridge.py`, `routers/deltas.py`, `routers/ingest.py`, `routers/ops.py`, `routers/tools.py`).
+5. `app/` root: Clean root containing strictly `__init__.py` and `main.py` (ASGI entrypoint).
+
+### Invariants Preserved
+- 100% backwards compatibility preserved via `sys.modules` aliasing in `backend/app/__init__.py`.
+- Golden master invariants preserved:
+  - Echo never asserts causation.
+  - Invariant 1: 429 / error frame requeue back to Turn Window.
+  - Invariant 2: Two-phase Delta publish sequence.
+  - Invariant 3: Link and claim entity re-indexing through reconciler.
+  - Invariant 5: Fresh alias recomputation after entity merge.
+  - Invariant 6: Contradiction short-circuit (OPPOSED breaks, INDEPENDENT held).
+
+### Results
+- 261/261 Python tests pass (`python -m unittest discover -s tests -t .`).
+- 3/3 contract tests pass (`python -m unittest tests/test_contract.py`), confirming all 24 API routes intact.
+- 153/153 frontend tests pass and Next.js production build succeeds (`npm run verify`).
 
 ---
 
