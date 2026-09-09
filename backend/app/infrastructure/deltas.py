@@ -35,10 +35,32 @@ class DeltaHub:
         self._ring: deque[dict[str, Any]] = deque(maxlen=RING_SIZE)
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._lock = asyncio.Lock()
+        self._cached_snapshot_str: str | None = None
+        self._cached_snapshot_seq: int = -1
+        self._snapshot_lock = asyncio.Lock()
 
     @property
     def seq(self) -> int:
         return self._seq
+
+    async def get_cached_snapshot_json(self, ledger: Any) -> str:
+        """
+        Return a pre-serialized JSON snapshot string for HELLO/SNAPSHOT handshakes.
+        Thread-safe and cached by monotonic sequence number, eliminating redundant
+        graph traversals and JSON serializations during client reconnect storms (Phase 5 P5).
+        """
+        async with self._snapshot_lock:
+            if self._cached_snapshot_str is not None and self._cached_snapshot_seq == self._seq:
+                return self._cached_snapshot_str
+
+            payload = {
+                "kind": "SNAPSHOT",
+                "seq": self._seq,
+                "state": ledger.snapshot(),
+            }
+            self._cached_snapshot_str = encode(payload)
+            self._cached_snapshot_seq = self._seq
+            return self._cached_snapshot_str
 
     async def publish(self, payload: dict[str, Any]) -> dict[str, Any]:
         """
@@ -52,6 +74,7 @@ class DeltaHub:
 
         async with self._lock:
             self._seq += 1
+            self._cached_snapshot_str = None  # Invalidate cached snapshot on new delta
             envelope = {
                 "seq": self._seq,
                 "at": _now_ms(),

@@ -48,6 +48,7 @@ from dataclasses import fields, is_dataclass
 from typing import Any, Iterable
 
 from . import config
+from . import event_store
 
 log = logging.getLogger("echo.store")
 
@@ -115,23 +116,29 @@ async def connect() -> bool:
     """
     global _pool, _enabled, _last_error
 
+    # Always initialize local SQLite WAL store for zero-dependency persistence
+    try:
+        event_store.init_db()
+    except Exception as exc:
+        log.warning("store: SQLite WAL initialization failed: %s", exc)
+
     if not config.persistence_enabled():
-        log.info("store: persistence disabled by LEDGER_PERSISTENCE")
+        log.info("store: Postgres persistence disabled by LEDGER_PERSISTENCE")
         _enabled = False
-        return False
+        return True
 
     dsn = config.database_url()
     if not dsn:
         _enabled = False
-        return False
+        return True
 
     try:
         import asyncpg
     except ImportError:
         _last_error = "asyncpg is not installed (pip install asyncpg)"
-        log.warning("store: %s — the Ledger will not be persisted", _last_error)
+        log.warning("store: %s — running on local SQLite WAL store", _last_error)
         _enabled = False
-        return False
+        return True
 
     try:
         # Small pool: this process is the only writer, and the work is short
@@ -142,22 +149,23 @@ async def connect() -> bool:
     except Exception as exc:  # noqa: BLE001 — absence must not stop the service
         _last_error = str(exc)[:200]
         log.warning(
-            "store: could not reach Postgres (%s) — running with an in-memory "
-            "Ledger only. `docker compose up -d` starts it.",
+            "store: could not reach Postgres (%s) — running on local SQLite WAL store. "
+            "`docker compose up -d` starts Postgres mirror.",
             _last_error,
         )
         _pool = None
         _enabled = False
-        return False
+        return True
 
     _enabled = True
     _last_error = None
-    log.info("store: Ledger persistence is ON")
+    log.info("store: Ledger dual-tier persistence (SQLite WAL + Postgres) is ON")
     return True
 
 
 async def close() -> None:
     global _pool
+    event_store.close()
     if _pool is not None:
         await _pool.close()
         _pool = None
@@ -166,7 +174,9 @@ async def close() -> None:
 def status() -> dict[str, Any]:
     """Reported by /health, so a silent fallback is never actually silent."""
     return {
-        "enabled": _enabled,
+        "enabled": True,
+        "postgres": _enabled,
+        "sqlite_wal": True,
         "error": _last_error,
     }
 
@@ -216,13 +226,14 @@ async def _upsert(record: Any, channel: str) -> None:
 
 def save(record: Any, channel: str) -> None:
     """
-    Persist one record, in the background.
-
-    Fire-and-forget on purpose: callers are on the voice hot path. The task is
-    held in `_tasks` because asyncio keeps only a weak reference to a running
-    task, and a dropped one can be cancelled mid-write by the garbage
-    collector — the same trap `main.py` documents for the analysis pipeline.
+    Persist one record. Always records to local SQLite WAL event store,
+    and mirrors to Postgres in background if available.
     """
+    try:
+        event_store.record_event(record, channel)
+    except Exception as exc:
+        log.warning("store: SQLite save failed: %s", exc)
+
     if not _enabled:
         return
     try:
@@ -245,6 +256,11 @@ def save_many(records: Iterable[Any], channel: str) -> None:
 
 async def clear(channel: str) -> None:
     """Drop one channel's record — the durable half of /incident/reset."""
+    try:
+        event_store.clear_channel(channel)
+    except Exception as exc:
+        log.warning("store: SQLite clear failed: %s", exc)
+
     if not _enabled or _pool is None:
         return
     try:
@@ -253,38 +269,35 @@ async def clear(channel: str) -> None:
                 await conn.execute(f"DELETE FROM {table} WHERE channel = $1", channel)
         log.info("store: cleared persisted ledger for %s", channel)
     except Exception as exc:  # noqa: BLE001
-        log.warning("store: could not clear %s: %s", channel, str(exc)[:200])
+        log.warning("store: could not clear Postgres %s: %s", channel, str(exc)[:200])
 
 
 async def load(channel: str) -> dict[str, list[dict[str, Any]]]:
     """
     Read one channel's record back, as plain rows keyed by table.
-
-    Returned as dicts rather than model instances so the caller decides how to
-    rehydrate; `Ledger.restore` does that, and keeping the two apart means this
-    module never imports `models`.
+    Checks Postgres first; falls back seamlessly to SQLite WAL store.
     """
-    if not _enabled or _pool is None:
-        return {}
+    if _enabled and _pool is not None:
+        try:
+            out: dict[str, list[dict[str, Any]]] = {}
+            async with _pool.acquire() as conn:
+                for table in set(_TABLES.values()):
+                    order = " ORDER BY at" if table not in ("entities", "links") else ""
+                    rows = await conn.fetch(
+                        f"SELECT * FROM {table} WHERE channel = $1{order}", channel
+                    )
+                    out[table] = [
+                        {
+                            k: (json.loads(v) if k in _JSON_COLUMNS and isinstance(v, str) else v)
+                            for k, v in dict(r).items()
+                            if k != "channel"
+                        }
+                        for r in rows
+                    ]
+            if any(out.values()):
+                return out
+        except Exception as exc:  # noqa: BLE001
+            log.warning("store: could not load from Postgres %s: %s", channel, str(exc)[:200])
 
-    out: dict[str, list[dict[str, Any]]] = {}
-    try:
-        async with _pool.acquire() as conn:
-            for table in set(_TABLES.values()):
-                order = " ORDER BY at" if table not in ("entities", "links") else ""
-                rows = await conn.fetch(
-                    f"SELECT * FROM {table} WHERE channel = $1{order}", channel
-                )
-                out[table] = [
-                    {
-                        k: (json.loads(v) if k in _JSON_COLUMNS and isinstance(v, str) else v)
-                        for k, v in dict(r).items()
-                        if k != "channel"
-                    }
-                    for r in rows
-                ]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("store: could not load %s: %s", channel, str(exc)[:200])
-        return {}
-
-    return out
+    # Fallback to local SQLite WAL store
+    return event_store.load_channel_snapshots(channel)

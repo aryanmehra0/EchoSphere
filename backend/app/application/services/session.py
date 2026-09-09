@@ -98,6 +98,23 @@ class IncidentSession:
         # speech that was already spoken.
         self.pipeline_tasks: set[asyncio.Task[Any]] = set()
 
+        # Phase 5 (P1): Rehydrate from event store if snapshots exist for this channel
+        from app.infrastructure import event_store
+        try:
+            snapshots = event_store.load_channel_snapshots(channel)
+            if snapshots:
+                self.ledger.rehydrate_from_snapshot(snapshots)
+                events = event_store.replay_events(channel)
+                if events:
+                    max_seq = max(e["seq"] for e in events)
+                    self.hub._seq = max_seq
+                log.info(
+                    "session: rehydrated channel %s (%d claims, %d entities, seq=%d)",
+                    channel, len(self.ledger.claims), len(self.ledger.entities), self.hub.seq,
+                )
+        except Exception as exc:
+            log.warning("session: failed to rehydrate channel %s from event store: %s", channel, exc)
+
     # -- the reset seam ----------------------------------------------------
 
     def spawn_pipeline(self, coro: Any, *, on_error: Any = None) -> asyncio.Task[Any]:

@@ -258,7 +258,7 @@ class Ledger:
 
     # -- projections (mirror of the frontend selectors) --------------------
 
-    def established(self) -> list[Claim]:
+    def established(self, include_stale: bool = False) -> list[Claim]:
         """
         Claims Echo may state aloud, with attribution.
 
@@ -279,7 +279,26 @@ class Ledger:
             c for c in self.claims.values()
             if c.epistemic_status in ("OBSERVED", "TOOL_RESULT")
             and c.id not in settled
+            and (include_stale or c.lifecycle != "STALE")
         ]
+
+    def evaluate_staleness(self, now: int | None = None) -> list[str]:
+        """
+        Evaluate time-to-live for telemetry claims and mark expired ones as STALE.
+        Returns list of claim IDs transitioned to STALE.
+        """
+        current_time = now if now is not None else now_ms()
+        newly_stale: list[str] = []
+        for claim in self.claims.values():
+            if claim.lifecycle == "ACTIVE" and claim.ttl_seconds:
+                elapsed_ms = current_time - claim.valid_from
+                if elapsed_ms > (claim.ttl_seconds * 1000):
+                    claim.lifecycle = "STALE"
+                    store.save(claim, self.channel)
+                    newly_stale.append(claim.id)
+        if newly_stale:
+            log.info("ledger: marked %d claim(s) as STALE due to TTL expiration", len(newly_stale))
+        return newly_stale
 
     def hypotheses(self) -> list[Claim]:
         return [c for c in self.claims.values() if c.epistemic_status == "HYPOTHESIS"]
@@ -411,7 +430,92 @@ class Ledger:
             "phase": self.phase,
         }
 
+    def rehydrate_from_snapshot(self, snapshots: dict[str, list[dict[str, Any]]]) -> None:
+        """
+        Reconstruct ledger collections from stored event snapshots (Phase 5 P1).
+        Supports both snake_case (internal store) and camelCase (wire) payloads.
+        """
+        key_map = {
+            "epistemicStatus": "epistemic_status",
+            "speakerRole": "speaker_role",
+            "validFrom": "valid_from",
+            "validUntil": "valid_until",
+            "ttlSeconds": "ttl_seconds",
+            "suggestedOwner": "suggested_owner",
+            "assigneeRole": "assignee_role",
+            "claimAId": "claim_a_id",
+            "claimBId": "claim_b_id",
+            "aboutProperty": "about_property",
+        }
+
+        def _clean_keys(d: dict[str, Any]) -> dict[str, Any]:
+            return {key_map.get(k, k): v for k, v in d.items()}
+
+        for item in snapshots.get("entities", []):
+            try:
+                norm = _clean_keys(item)
+                valid_keys = {f.name for f in dataclass_fields(Entity)}
+                e = Entity(**{k: v for k, v in norm.items() if k in valid_keys})
+                self.entities[e.id] = e
+            except Exception as exc:
+                log.warning("ledger: failed to rehydrate entity %s: %s", item.get("id"), exc)
+
+        for item in snapshots.get("links", []):
+            try:
+                norm = _clean_keys(item)
+                valid_keys = {f.name for f in dataclass_fields(Link)}
+                l = Link(**{k: v for k, v in norm.items() if k in valid_keys})
+                self.links[l.id] = l
+            except Exception as exc:
+                log.warning("ledger: failed to rehydrate link %s: %s", item.get("id"), exc)
+
+        for item in snapshots.get("claims", []):
+            try:
+                norm = _clean_keys(item)
+                valid_keys = {f.name for f in dataclass_fields(Claim)}
+                c = Claim(**{k: v for k, v in norm.items() if k in valid_keys})
+                self.claims[c.id] = c
+            except Exception as exc:
+                log.warning("ledger: failed to rehydrate claim %s: %s", item.get("id"), exc)
+
+        for item in snapshots.get("unchecked", []):
+            try:
+                norm = _clean_keys(item)
+                valid_keys = {f.name for f in dataclass_fields(Unchecked)}
+                u = Unchecked(**{k: v for k, v in norm.items() if k in valid_keys})
+                self.unchecked[u.id] = u
+            except Exception as exc:
+                log.warning("ledger: failed to rehydrate unchecked %s: %s", item.get("id"), exc)
+
+        for item in snapshots.get("tasks", []):
+            try:
+                norm = _clean_keys(item)
+                valid_keys = {f.name for f in dataclass_fields(Task)}
+                t = Task(**{k: v for k, v in norm.items() if k in valid_keys})
+                self.tasks[t.id] = t
+            except Exception as exc:
+                log.warning("ledger: failed to rehydrate task %s: %s", item.get("id"), exc)
+
+        for item in snapshots.get("contradictions", []):
+            try:
+                norm = _clean_keys(item)
+                valid_keys = {f.name for f in dataclass_fields(Contradiction)}
+                cd = Contradiction(**{k: v for k, v in norm.items() if k in valid_keys})
+                self.contradictions[cd.id] = cd
+            except Exception as exc:
+                log.warning("ledger: failed to rehydrate contradiction %s: %s", item.get("id"), exc)
+
+        for item in snapshots.get("timeline", []):
+            try:
+                norm = _clean_keys(item)
+                valid_keys = {f.name for f in dataclass_fields(TimelineEvent)}
+                te = TimelineEvent(**{k: v for k, v in norm.items() if k in valid_keys})
+                self.timeline.append(te)
+            except Exception as exc:
+                log.warning("ledger: failed to rehydrate timeline event %s: %s", item.get("id"), exc)
+
 
 # Domain-Driven Design alias
 EvidenceLedger = Ledger
+
 

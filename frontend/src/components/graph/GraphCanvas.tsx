@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -15,9 +15,11 @@ import { Crosshair, GitBranch, Maximize2 } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
 import { cn } from "@/lib/cn";
+import { computeGraphLayout, type NodePosition } from "@/lib/graph-layout";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { EntityNode, type EntityNodeType } from "./EntityNode";
+import { GraphInspector } from "./GraphInspector";
 import { GraphLegend } from "./GraphLegend";
 import type { EdgeKind, EntityStatus } from "@/lib/types";
 
@@ -52,88 +54,79 @@ const EDGE_STYLE: Record<EdgeKind, { dashed: boolean; width: number }> = {
   depends: { dashed: false, width: 1.2 },
 };
 
-/**
- * Fallback layout for entities the pipeline gave no coordinates.
- *
- * A grid rather than a circle or a force simulation: it is deterministic, so
- * a node keeps its place as the incident grows, and `fitView` below frames
- * whatever exists. Three columns keeps a typical 3–6 entity incident close to
- * square in a panel that is taller than it is wide.
- *
- * Spacing is generous because `EntityNode` cards carry a label, a status dot
- * and sometimes a metric; tighter values overlapped the cards, which looks
- * like the same bug this replaced.
- */
-const GRID_COLUMNS = 3;
-const GRID_X = 260;
-const GRID_Y = 150;
-
-function gridPosition(index: number): { x: number; y: number } {
-  return {
-    x: (index % GRID_COLUMNS) * GRID_X,
-    y: Math.floor(index / GRID_COLUMNS) * GRID_Y,
-  };
-}
-
 function Canvas() {
-  const { state } = useIncident();
+  const { state, selectedEntityId, setSelectedEntityId } = useIncident();
   const { fitView } = useReactFlow();
+  const [manualPositions, setManualPositions] = useState<Record<string, NodePosition>>({});
+
+  const contestedEntityIds = useMemo(() => {
+    const claimEntityMap = new Map(state.claims.map((c) => [c.id, c.entity]));
+    const contested = new Set<string>();
+    for (const c of state.contradictions) {
+      if (!c.resolved) {
+        const entA = claimEntityMap.get(c.claimA);
+        const entB = claimEntityMap.get(c.claimB);
+        if (entA) contested.add(entA);
+        if (entB) contested.add(entB);
+      }
+    }
+    return contested;
+  }, [state.claims, state.contradictions]);
+
+  const activeNeighborhood = useMemo(() => {
+    if (!selectedEntityId) return null;
+    const neighbors = new Set<string>([selectedEntityId]);
+    for (const l of state.links) {
+      if (l.source === selectedEntityId) neighbors.add(l.target);
+      if (l.target === selectedEntityId) neighbors.add(l.source);
+    }
+    return neighbors;
+  }, [selectedEntityId, state.links]);
+
+  const layoutPositions = useMemo(
+    () => computeGraphLayout(state.entities, state.links, manualPositions),
+    [state.entities, state.links, manualPositions],
+  );
 
   const nodes = useMemo<EntityNodeType[]>(
     () =>
-      state.entities.map((e, i) => ({
-        id: e.id,
-        type: "entity" as const,
-        /*
-          ── EVERY NODE NEEDS ITS OWN COORDINATES ─────────────────────────
-          This was `e.position ?? { x: 0, y: 0 }`, and NOTHING sets
-          `position`: the backend's `Entity.position` is optional and the
-          extraction pipeline never fills it in. So every entity fell to the
-          same fallback and they stacked exactly on top of each other at the
-          origin.
+      state.entities.map((e) => {
+        const pos = layoutPositions.get(e.id) ?? { x: 0, y: 0 };
+        const isSelected = selectedEntityId === e.id;
+        const isDimmed = activeNeighborhood ? !activeNeighborhood.has(e.id) : false;
+        const isContested = contestedEntityIds.has(e.id);
 
-          Reported as "only one node appears in the graph". The header was
-          reading `4n · 1e` at the time, which was correct — four nodes
-          existed, three were hidden underneath the fourth. The count and the
-          canvas disagreed, and the count was right.
-
-          A server-supplied position still wins, so a future layout pass on
-          the Slow Loop needs no change here. Absent one, nodes are laid out
-          on a grid derived from their INDEX, which is stable: entity order
-          is preserved across deltas (there is a test for that), so a node
-          does not jump around as the incident grows.
-        */
-        position: e.position ?? gridPosition(i),
-        data: e,
-        draggable: false,
-        selectable: true,
-      })),
-    [state.entities],
+        return {
+          id: e.id,
+          type: "entity" as const,
+          position: pos,
+          data: {
+            ...e,
+            isContested,
+            isDimmed,
+            isSelected,
+          },
+          draggable: true,
+          selectable: true,
+        };
+      }),
+    [state.entities, layoutPositions, selectedEntityId, activeNeighborhood, contestedEntityIds],
   );
 
   const edges = useMemo<Edge[]>(() => {
     const byId = new Map(state.entities.map((e) => [e.id, e]));
-    // The SAME positions the nodes were rendered with. Reading `e.position`
-    // here would be undefined for every grid-placed node, so `dx`/`dy` both
-    // came out 0 and every edge picked the same handle pair regardless of
-    // which way it actually travelled.
-    const placed = new Map(
-      state.entities.map((e, i) => [e.id, e.position ?? gridPosition(i)]),
-    );
 
     return state.links.map((l) => {
-      // `src` is gone: its only use was reading `.position`, which is now
-      // taken from `placed` above so grid-laid-out nodes route correctly.
       const tgt = byId.get(l.target);
       const status = tgt?.status ?? "UNKNOWN";
       const stroke = EDGE_STROKE[status];
       const shape = EDGE_STYLE[l.kind];
 
-      // Choose the handle pair facing the direction of travel. Without this,
-      // a link to the node directly above exits rightward and loops back over
-      // its own source card.
-      const dx = (placed.get(l.target)?.x ?? 0) - (placed.get(l.source)?.x ?? 0);
-      const dy = (placed.get(l.target)?.y ?? 0) - (placed.get(l.source)?.y ?? 0);
+      const srcPos = layoutPositions.get(l.source) ?? { x: 0, y: 0 };
+      const tgtPos = layoutPositions.get(l.target) ?? { x: 0, y: 0 };
+
+      const dx = tgtPos.x - srcPos.x;
+      const dy = tgtPos.y - srcPos.y;
       const horizontal = Math.abs(dx) >= Math.abs(dy);
 
       const sourceHandle = horizontal
@@ -142,6 +135,11 @@ function Canvas() {
       const targetHandle = horizontal
         ? dx >= 0 ? "t-l" : "t-r"
         : dy >= 0 ? "t-t" : "t-b";
+
+      const isConnectedToSelected = selectedEntityId
+        ? l.source === selectedEntityId || l.target === selectedEntityId
+        : false;
+      const isEdgeDimmed = selectedEntityId ? !isConnectedToSelected : false;
 
       return {
         id: l.id,
@@ -152,10 +150,15 @@ function Canvas() {
         label: l.label,
         type: "smoothstep",
         animated: false,
-        // The travelling-dash treatment for unconfirmed links is CSS, not the
-        // `animated` prop, so it can be disabled by prefers-reduced-motion.
-        className: l.kind === "suspected" ? "edge-suspected" : undefined,
-        style: { stroke, strokeWidth: shape.width },
+        className: cn(
+          l.kind === "suspected" && "edge-suspected",
+          isEdgeDimmed && "opacity-20 transition-opacity",
+          isConnectedToSelected && "opacity-100",
+        ),
+        style: {
+          stroke,
+          strokeWidth: isConnectedToSelected ? shape.width + 0.8 : shape.width,
+        },
         labelBgPadding: [4, 2] as [number, number],
         labelBgBorderRadius: 3,
         markerEnd: {
@@ -166,7 +169,25 @@ function Canvas() {
         },
       } satisfies Edge;
     });
-  }, [state.links, state.entities]);
+  }, [state.links, state.entities, layoutPositions, selectedEntityId]);
+
+  const onNodeDragStop = useCallback((_: MouseEvent | TouchEvent, node: Node) => {
+    setManualPositions((prev) => ({
+      ...prev,
+      [node.id]: { x: node.position.x, y: node.position.y },
+    }));
+  }, []);
+
+  const onNodeClick = useCallback(
+    (_: React.MouseEvent, node: Node) => {
+      setSelectedEntityId(selectedEntityId === node.id ? null : node.id);
+    },
+    [selectedEntityId, setSelectedEntityId],
+  );
+
+  const onPaneClick = useCallback(() => {
+    if (selectedEntityId) setSelectedEntityId(null);
+  }, [selectedEntityId, setSelectedEntityId]);
 
   /**
    * Re-frame the canvas when the graph GROWS, but not when a node merely
@@ -195,7 +216,10 @@ function Canvas() {
         nodes={nodes as unknown as Node[]}
         edges={edges}
         nodeTypes={nodeTypes}
-        nodesDraggable={false}
+        nodesDraggable={true}
+        onNodeDragStop={onNodeDragStop}
+        onNodeClick={onNodeClick}
+        onPaneClick={onPaneClick}
         nodesConnectable={false}
         edgesFocusable={false}
         panOnScroll
@@ -216,12 +240,15 @@ function Canvas() {
         />
       </ReactFlow>
 
+      {/* ── Entity Inspector Overlay ───────────────────────────────────────── */}
+      <GraphInspector />
+
       {/* ── Canvas chrome ─────────────────────────────────────────────────── */}
       <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3">
         <div className="flex items-start justify-between gap-3">
           <div className="pointer-events-auto flex items-center gap-2 rounded-sm border border-line bg-raised/90 px-2.5 py-1.5 backdrop-blur-[2px]">
             <GitBranch size={11} strokeWidth={2.2} className="text-ink-4" />
-            <span className="eyebrow">Root-cause graph</span>
+            <span className="eyebrow">System Topology & Evidence Graph</span>
             <span className="tnum ml-1 font-mono text-2xs text-ink-4">
               {state.entities.length}n · {state.links.length}e
             </span>

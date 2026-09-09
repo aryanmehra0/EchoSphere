@@ -150,6 +150,10 @@ class Claim:
     entity: str | None = None
     supersedes: str | None = None
     contradicts: list[str] = field(default_factory=list)
+    valid_from: int | None = None
+    valid_until: int | None = None
+    ttl_seconds: int | None = None
+    lifecycle: str = "ACTIVE"
 
     def __post_init__(self) -> None:
         # Claim ids, so a bare string is dropped rather than wrapped.
@@ -159,6 +163,8 @@ class Claim:
                 f"Claim {self.id} has no speaker_role. "
                 "v6 §6.2 Rule 1: a claim without a source is not sayable."
             )
+        if self.valid_from is None:
+            self.valid_from = self.at or now_ms()
 
     def to_wire(self) -> dict[str, Any]:
         return _clean({
@@ -171,6 +177,10 @@ class Claim:
             "at": self.at,
             "supersedes": self.supersedes,
             "contradicts": self.contradicts or None,
+            "validFrom": self.valid_from,
+            "validUntil": self.valid_until,
+            "ttlSeconds": self.ttl_seconds,
+            "lifecycle": self.lifecycle,
         })
 
 

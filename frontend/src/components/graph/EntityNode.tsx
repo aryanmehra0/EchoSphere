@@ -35,7 +35,11 @@ import type { EntityKind, EntityStatus, IncidentEntity } from "@/lib/types";
  * and without it every node in the canvas reconciles on each frame of a drag.
  */
 
-export type EntityNodeData = IncidentEntity & Record<string, unknown>;
+export type EntityNodeData = IncidentEntity & {
+  isContested?: boolean;
+  isDimmed?: boolean;
+  isSelected?: boolean;
+} & Record<string, unknown>;
 export type EntityNodeType = Node<EntityNodeData, "entity">;
 
 const GLYPH: Record<EntityKind, LucideIcon> = {
@@ -98,23 +102,28 @@ function EntityNodeImpl({ data }: NodeProps<EntityNodeType>) {
   const stripe = STRIPE[data.status] ?? STRIPE.UNKNOWN;
   const metricTone = METRIC[data.status] ?? METRIC.UNKNOWN;
   const critical = data.status === "CRITICAL";
+  const isContested = Boolean(data.isContested);
+  const isDimmed = Boolean(data.isDimmed);
+  const isSelected = Boolean(data.isSelected);
 
   return (
     <div
       className={cn(
-        "node-shell relative w-[184px] overflow-hidden rounded-md border bg-raised",
+        "node-shell relative w-[184px] overflow-hidden rounded-md border bg-raised cursor-pointer",
         "shadow-[inset_0_1px_0_0_oklch(1_0_0/5%),0_1px_2px_0_oklch(0_0_0/40%)]",
-        "transition-[border-color,box-shadow] duration-300 ease-[var(--ease-out)]",
+        "transition-all duration-200 ease-[var(--ease-out)]",
         shell,
         // The only glow in the system, reserved for confirmed failure.
         critical && "shadow-[0_0_0_1px_var(--color-critical)/20,0_0_28px_-10px_var(--color-critical)]",
+        isDimmed && "opacity-35 grayscale-[25%]",
+        isSelected && "border-live shadow-[0_0_0_1px_var(--color-live),0_0_24px_-4px_var(--color-live)]",
       )}
       // The node is a summary; the accessible name states everything the
       // visual encoding does, in order of importance.
       role="group"
       aria-label={`${data.label}, ${kindLabel}, status ${data.status}${
         data.metric ? `, ${data.metric}` : ""
-      }`}
+      }${isContested ? ", contested by open contradiction" : ""}`}
     >
       {/* Status stripe — the primary, non-textual health signal. */}
       <span
@@ -149,6 +158,15 @@ function EntityNodeImpl({ data }: NodeProps<EntityNodeType>) {
           <p className="mt-0.5 truncate font-mono text-[9px] tracking-tight text-ink-4">
             {data.detail ?? kindLabel}
           </p>
+
+          {isContested && (
+            <div className="mt-1 flex items-center gap-1">
+              <span className="inline-flex items-center gap-0.5 rounded-[3px] border border-warning/40 bg-warning/15 px-1 py-0.2 text-[8.5px] font-semibold tracking-tight text-warning animate-pulse">
+                <span aria-hidden>⚡</span>
+                <span>Contested</span>
+              </span>
+            </div>
+          )}
         </div>
       </div>
 

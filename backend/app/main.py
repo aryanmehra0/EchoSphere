@@ -31,7 +31,7 @@ from app.application.services.session import registry
 from app.infrastructure import config, store
 from app.web import middleware
 from app.web.deps import set_http_client, speech
-from app.web.routers import agent, approval, bridge, deltas, ingest, ops, tools
+from app.web.routers import agent, approval, audio_stream, bridge, deltas, ingest, ops, tools
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(name)-14s %(message)s")
 log = logging.getLogger("echo.main")
@@ -104,6 +104,7 @@ middleware.register(app)
 # Order is presentational only — FastAPI matches on path, not registration.
 # Grouped as: what comes in, what Agora calls, what we drive, what we govern.
 app.include_router(ingest.router)
+app.include_router(audio_stream.router)
 app.include_router(tools.router)
 app.include_router(agent.router)
 app.include_router(bridge.router)

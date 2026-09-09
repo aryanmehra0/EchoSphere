@@ -67,6 +67,14 @@ function Attribution({ claim }: { claim: Claim }) {
         {initials(claim.speakerRole)}
       </span>
       <span className="text-[9px] text-ink-4">{claim.speakerRole}</span>
+      {claim.lifecycle === "STALE" && (
+        <span
+          className="rounded-[2px] border border-warning/40 bg-warning/15 px-1 font-mono text-[8px] font-semibold text-warning"
+          title="Telemetry TTL expired without renewal"
+        >
+          STALE
+        </span>
+      )}
       <span className="tnum ml-auto font-mono text-[9px] text-ink-4">
         {clockShort(claim.at)}
       </span>
@@ -88,12 +96,23 @@ function Attribution({ claim }: { claim: Claim }) {
 }
 
 export function LedgerPanel() {
-  const { state } = useIncident();
+  const { state, selectedEntityId, setSelectedEntityId } = useIncident();
 
-  const established = selectEstablished(state);
-  const hypotheses = selectHypotheses(state);
-  const inferences = selectInferences(state);
+  const selectedEntity = selectedEntityId
+    ? state.entities.find((e) => e.id === selectedEntityId)
+    : null;
+
+  const rawEstablished = selectEstablished(state);
+  const rawHypotheses = selectHypotheses(state);
+  const rawInferences = selectInferences(state);
   const settled = selectSupersededIds(state);
+
+  const filterClaims = (list: Claim[]) =>
+    selectedEntityId ? list.filter((c) => c.entity === selectedEntityId) : list;
+
+  const established = filterClaims(rawEstablished);
+  const hypotheses = filterClaims(rawHypotheses);
+  const inferences = filterClaims(rawInferences);
 
   if (state.claims.length === 0) {
     return (
@@ -107,6 +126,25 @@ export function LedgerPanel() {
 
   return (
     <div>
+      {/* ── Entity Cross-Filter Pill Banner ─────────────────────────────── */}
+      {selectedEntity && (
+        <div className="flex items-center justify-between border-b border-line bg-sunken/80 px-3 py-1.5 text-2xs">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="font-mono uppercase tracking-wider text-[9px] text-ink-4">Filtered:</span>
+            <span className="truncate font-semibold text-ink">{selectedEntity.label}</span>
+            <span className="font-mono text-ink-4 text-[9px]">
+              ({established.length + hypotheses.length + inferences.length} claims)
+            </span>
+          </div>
+          <button
+            onClick={() => setSelectedEntityId(null)}
+            className="ml-2 font-mono text-[9px] text-ink-3 hover:text-ink underline cursor-pointer"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
       {/* ── Established ──────────────────────────────────────────────────── */}
       <SectionHead
         icon={<CircleCheck size={11} strokeWidth={2.2} />}

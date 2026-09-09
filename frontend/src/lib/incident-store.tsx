@@ -83,6 +83,9 @@ interface IncidentStore {
   source: DataSource;
   /** Remote Echo track for the visual envelope, never incident data. */
   agentTrack: IRemoteAudioTrack | null;
+  /** Selected graph entity for inspector overlay and ledger cross-filtering. */
+  selectedEntityId: string | null;
+  setSelectedEntityId: (id: string | null) => void;
 }
 
 /**
@@ -117,6 +120,7 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   const [micOn, setMicOn] = useState(true);
   const [source, setSource] = useState<DataSource>(null);
   const [agentTrack, setAgentTrack] = useState<IRemoteAudioTrack | null>(null);
+  const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
 
   /**
    * The latest state, readable from inside `openBridge`.
@@ -634,6 +638,7 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     setAgentTrack(null);
     setMicOn(true);
     setSource(null);
+    setSelectedEntityId(null);
     dispatch({ type: "BRIDGE", state: "closing" });
     timers.current.push(
       window.setTimeout(() => dispatch({ type: "RESET" }), 400),
@@ -671,8 +676,10 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       toggleMic,
       source,
       agentTrack,
+      selectedEntityId,
+      setSelectedEntityId,
     }),
-    [state, now, openBridge, closeBridge, micOn, toggleMic, source, agentTrack],
+    [state, now, openBridge, closeBridge, micOn, toggleMic, source, agentTrack, selectedEntityId],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

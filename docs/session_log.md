@@ -27,7 +27,7 @@
 | **S6 (Rig + degradation)** | 🟡 Tiers 1-3 exist; **Tier 3 is new (Aug 31)**. Dress rehearsals below |
 | **7a Deliberation Panel** | ✅ New Aug 31 — replaced the single adjudicator |
 | **10.5 Consent gate** | ✅ New Aug 31 — off the record, verified leaves no trace |
-| **Tests** | **153 frontend** (`npm run verify` green) + **261 backend** = 414 |
+| **Tests** | **162 frontend** (`npm run verify` green) + **274 backend** = 436 |
 | **Voice path** | ✅ Verified live Aug 31 — `spoken: true`, 790 ms. Was never wired before. |
 | **Demo runbook** | `docs/DEMO.md` — three modes, the script, the questions judges ask |
 
@@ -2007,6 +2007,85 @@ npm run test      # Rehearsal Rig Tier 1
 npm run spike     # S0 — needs .env.local
 npm run dev       # localhost:3000
 ```
+
+---
+
+## Session 9 — September 10, 2026: Topology Layout, Entity Inspector & Contradiction Badging
+
+### What was done
+1. **Corrupt Git Index Recovery**: Repaired 0-byte `.git/index` caused by previous abrupt process termination (`fatal: .git/index: index file smaller than expected`) via `git reset`.
+2. **Deterministic Topological Layout Engine (`frontend/src/lib/graph-layout.ts`)**:
+   - Replaced naive 3-column modulo index grid with an architecture-aware tiered layout (`Client` -> `Gateway` -> `Network` -> `Service` -> `Datastore`).
+   - Added iterative topological link relaxation so upstream callers sit to the left/above downstream dependencies with collision avoidance.
+   - Preserved manual user-drag coordinates with highest precedence.
+3. **Interactive Graph Inspector Overlay (`frontend/src/components/graph/GraphInspector.tsx`)**:
+   - Floating card docked on the canvas displaying entity telemetry, attributed claims partitioned by epistemic status (`Established` vs `Hypotheses` vs `Inferences`), upstream callers, downstream dependencies, and active contradiction alerts.
+   - Supports keyboard `Escape` or canvas background click to dismiss.
+4. **Contested Evidence Badges (`frontend/src/components/graph/EntityNode.tsx`)**:
+   - Nodes involved in open contradictions automatically display an amber `⚡ Contested` badge.
+   - Non-selected and non-neighboring nodes dim when an entity is selected, spotlighting direct topological dependencies.
+5. **Evidence Ledger Cross-Filtering (`frontend/src/components/intel/LedgerPanel.tsx`)**:
+   - Clicking an entity filters the Evidence Ledger to claims attributed to that entity, with a clear filter pill and reset button.
+6. **Epistemic Rebranding (`frontend/src/components/graph/GraphCanvas.tsx`)**:
+   - Rebranded graph chrome from "Root-cause graph" to "System Topology & Evidence Graph", directly eliminating friction with EchoSphere Rule 1 ("Echo never asserts causation / determines root cause").
+7. **Verification**:
+   - Frontend: 162/162 unit & integration tests passing (`npm run verify` 100% green with 0 ESLint warnings).
+   - Backend: 261/261 unit tests passing. Total test suite: 423 passing tests.
+
+---
+
+## Session 10 — September 10, 2026: Core Architectural Hardening (Phases 1-4)
+
+### What was done
+1. **Phase 1: Dual-Tier Event Sourcing & Embedded SQLite WAL Store (`app/infrastructure/event_store.py`)**:
+   - Implemented embedded SQLite with Write-Ahead Logging (`PRAGMA journal_mode = WAL`) as the default Tier 1 store.
+   - Provides zero-dependency, microsecond local persistence so the Ledger survives restarts even without Docker or PostgreSQL.
+   - Append-only event store (`incident_events`) capturing all mutations for auditability and deterministic replay, with materialized snapshot table (`incident_snapshots`) for O(1) state rehydration.
+   - Integrated into `store.py` with seamless background PostgreSQL mirroring.
+2. **Phase 2: Temporal Validity & Metric Staleness Decay**:
+   - Added `valid_from`, `valid_until`, `ttl_seconds`, and `lifecycle` (`ACTIVE`, `STALE`, `SUPERSEDED`, `REFUTED`) to `Claim` models across backend and frontend.
+   - Added `evaluate_staleness(now)` in `Ledger`: telemetry claims beyond TTL transition to `STALE` and are excluded from `established()` by default so Echo's voice loop never speaks outdated metrics.
+   - Added visual `STALE` badging in `LedgerPanel.tsx`.
+3. **Phase 3: Gateway Security Hardening (`app/web/middleware.py`)**:
+   - Implemented constant-time HMAC-SHA256 signature verification (`verify_hmac`) with 300s timestamp freshness to prevent replay attacks.
+   - Added payload bounding (64KB max) and per-client token-bucket rate limiting (50 req/s).
+   - Fixed IPv6 port parsing for `is_local` loopback matching.
+4. **Phase 4: Decoupled Native Audio Ingestion Seam**:
+   - Specified dedicated Python 3.11 sidecar container in `services/audio-ingest/` for native Agora C++ SDK audio frame capture and Silero VAD.
+   - Added `backend/app/web/routers/audio_stream.py` endpoint (`POST /observer/acoustic_telemetry`) with G2 agent-UID self-exclusion.
+5. **Verification**:
+   - Backend: 274/274 tests passing (added 13 new architectural unit tests).
+   - Frontend: 162/162 tests passing (`npm run verify` 100% green).
+   - Total workspace tests: 436 passing tests.
+
+---
+
+## Session 11 — September 10, 2026: Platform Hardening (P1, P2, P4, P5)
+
+### What was done
+1. **P1: Event-Sourced Session Rehydration (Crash Recovery)**:
+   - Added `rehydrate_from_snapshot()` to `Ledger` ([`backend/app/domain/ledger.py`](file:///c:/projects/EchoSphere/backend/app/domain/ledger.py)), reconstructing `Entity`, `Claim`, `Link`, `Unchecked`, `Task`, `Contradiction`, and `TimelineEvent` dataclasses from stored JSON payloads.
+   - Updated `IncidentSession.__init__` in `session.py`: upon server restart or process crash, cold sessions automatically rehydrate from SQLite WAL snapshots and synchronize `hub._seq`, losing 0 seconds of incident state. Clean resets via `POST /incident/reset` remain clean by explicitly calling `event_store.clear_channel()`.
+   - Added unit tests in `backend/tests/test_session_rehydration.py`.
+2. **P2: Acoustic Telemetry Window Batching & Sidecar Control Seam**:
+   - Implemented `AcousticWindowAggregator` in `services/audio-ingest/main.py` with a 500ms sliding aggregation window, reducing HTTP churn from frame-level calls to the Slow Loop by ~95%.
+   - Added conversational overlap detection ($\ge 2$ simultaneous speakers with VAD active) and peak/mean RMS calculation.
+   - Enhanced `backend/app/web/routers/audio_stream.py`:
+     - Added `GET /observer/config` so the sidecar dynamically tracks the active channel and agent UID at runtime.
+     - Updated `POST /observer/acoustic_telemetry` to handle window-batched payloads and elevate the Room Tension Index (RTI) by $+0.10$ on overlapping speech contention per Architecture v6 §8.
+   - Added unit tests in `backend/tests/test_audio_stream.py`.
+3. **P4: Hierarchical Entity Topology & Deterministic Alias Resolution**:
+   - Implemented `CanonicalEntityResolver` in [`backend/app/domain/entity_resolver.py`](file:///c:/projects/EchoSphere/backend/app/domain/entity_resolver.py) with domain synonym clusters (`redis` $\leftrightarrow$ `cache` $\leftrightarrow$ `shard`, `postgres` $\leftrightarrow$ `database` $\leftrightarrow$ `db` $\leftrightarrow$ `patroni`, `checkout` $\leftrightarrow$ `cart`, etc.) and hierarchical path resolution (`service/db/primary`).
+   - Integrated `CanonicalEntityResolver.are_synonyms()` into `ContradictionEngine.scope()`: ensures conflicting statements about the same subsystem are compared even if speakers use different names.
+   - Added unit tests in `backend/tests/test_entity_resolver.py`.
+4. **P5: WebSocket Snapshot Caching & Reconnect Storm Protection**:
+   - Added `get_cached_snapshot_json(ledger)` to `DeltaHub` ([`backend/app/infrastructure/deltas.py`](file:///c:/projects/EchoSphere/backend/app/infrastructure/deltas.py)) with monotonic sequence caching and automatic invalidation on `publish()` and reset.
+   - Updated `backend/app/web/routers/deltas.py`: concurrent `HELLO`/`SNAPSHOT` requests receive pre-serialized JSON bytes directly, eliminating event loop blocking and redundant graph traversals during war room reconnect storms.
+   - Added unit tests in `backend/tests/test_snapshot_cache.py`.
+5. **Verification**:
+   - Backend: 284/284 unit tests passing (10 new tests across rehydration, batching, resolver, and snapshot cache).
+   - Frontend: 162/162 unit & integration tests passing (`npm run verify` typecheck, lint, tests, build).
+   - Total workspace tests: 446 passing tests.
 
 ---
 

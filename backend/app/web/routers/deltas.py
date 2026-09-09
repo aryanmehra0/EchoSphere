@@ -44,15 +44,13 @@ async def deltas_socket(ws: WebSocket) -> None:
         last_seq = None
 
     if last_seq is None:
-        await ws.send_text(encode({
-            "kind": "SNAPSHOT", "seq": hub.seq, "state": current.ledger.snapshot(),
-        }))
+        snap_json = await hub.get_cached_snapshot_json(current.ledger)
+        await ws.send_text(snap_json)
     else:
         replay = hub.since(int(last_seq))
         if replay is None:
-            await ws.send_text(encode({
-                "kind": "SNAPSHOT", "seq": hub.seq, "state": current.ledger.snapshot(),
-            }))
+            snap_json = await hub.get_cached_snapshot_json(current.ledger)
+            await ws.send_text(snap_json)
         else:
             for envelope in replay:
                 await ws.send_text(encode({**envelope, "kind": "REPLAY"}))

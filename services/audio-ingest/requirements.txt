@@ -1,0 +1,4 @@
+requests>=2.31.0
+numpy>=1.26.0
+agora-python-server-sdk>=2.2.0; sys_platform != "win32"
+

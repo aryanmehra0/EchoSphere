@@ -30,3 +30,11 @@ agent-quickstart-python/**/node_modules/
 .env
 .env.local
 .env.*.local
+
+# Local SQLite databases and WAL journal files
+backend/data/*.db
+backend/data/*.db-wal
+backend/data/*.db-shm
+*.db
+*.db-wal
+*.db-shm

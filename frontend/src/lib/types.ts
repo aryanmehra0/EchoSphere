@@ -81,6 +81,8 @@ export type EpistemicStatus =
  * The UI still presents them as distinct panes — see the selectors in
  * `incident-reducer.ts`, which are projections over these same rows.
  */
+export type ClaimLifecycle = "ACTIVE" | "STALE" | "SUPERSEDED" | "REFUTED";
+
 export interface Claim {
   id: string;
   text: string;
@@ -95,6 +97,10 @@ export interface Claim {
   supersedes?: string | null;
   /** Claim ids this one is in tension with, populated by the adjudicator. */
   contradicts?: string[];
+  validFrom?: number;
+  validUntil?: number | null;
+  ttlSeconds?: number | null;
+  lifecycle?: ClaimLifecycle;
 }
 
 /**

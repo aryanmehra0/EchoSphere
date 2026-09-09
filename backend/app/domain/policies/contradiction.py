@@ -45,6 +45,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from app.infrastructure import config
+from ..entity_resolver import CanonicalEntityResolver
 from ..models import Claim
 
 if TYPE_CHECKING:  # imported lazily at the call site to avoid a cycle
@@ -337,6 +338,8 @@ class ContradictionEngine:
 
         def _same_subject(c: Claim) -> bool:
             if c.entity == new.entity:
+                return True
+            if CanonicalEntityResolver.are_synonyms(c.entity, new.entity, table):
                 return True
             if c.entity and c.entity in named_by_new:
                 return True
