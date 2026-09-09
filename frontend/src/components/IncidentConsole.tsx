@@ -8,10 +8,12 @@ import { CommandBar } from "@/components/shell/CommandBar";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { BridgeControls } from "@/components/voice/BridgeControls";
 import { AgentPresence } from "@/components/voice/AgentPresence";
+import { WarRoomRoster } from "@/components/voice/WarRoomRoster";
 import { TranscriptFeed } from "@/components/voice/TranscriptFeed";
 import { GraphCanvas } from "@/components/graph/GraphCanvas";
 import { ContradictionAlert } from "@/components/intel/ContradictionAlert";
 import { ApprovalModal } from "@/components/intel/ApprovalModal";
+import { PostMortemModal } from "@/components/intel/PostMortemModal";
 import { IntelColumn } from "@/components/intel/IntelColumn";
 import { Panel, PanelHeader } from "@/components/ui/Panel";
 
@@ -55,6 +57,7 @@ export function IncidentConsole() {
             <div className="flex flex-col gap-2 border-b border-line-faint p-2.5">
               <BridgeControls />
               <AgentPresence />
+              <WarRoomRoster />
             </div>
 
             <TranscriptFeed />
@@ -81,6 +84,9 @@ export function IncidentConsole() {
             waiting on a human is the one thing that should interrupt reading
             the graph. It has no dismiss control — Approve, Deny, or expire. */}
         <ApprovalModal />
+
+        {/* Automated Post-Mortem & SOC2 Audit Report Export Modal */}
+        <PostMortemModal />
 
         <StatusBar />
       </div>

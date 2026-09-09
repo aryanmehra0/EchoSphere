@@ -28,6 +28,7 @@ export interface BridgeCredentials {
 export interface AgoraBridgeEvents {
   onAgentTrack: (track: IRemoteAudioTrack | null) => void;
   onAgentState: (state: AgentState) => void;
+  onSpeakerVolumes?: (volumes: Map<number, number>) => void;
   onError: (message: string) => void;
 }
 
@@ -269,12 +270,24 @@ export class AgoraBridge {
     client.enableAudioVolumeIndicator();
     client.on("volume-indicator", (volumes) => {
       const agent = volumes.find((volume) => Number(volume.uid) === AGENT_UID);
-      if (!agent || agent.level < 2) return;
-      this.events.onAgentState("speaking");
-      if (this.silenceTimer !== null) window.clearTimeout(this.silenceTimer);
-      this.silenceTimer = window.setTimeout(() => {
-        this.events.onAgentState("listening");
-      }, 700);
+      if (agent && agent.level >= 2) {
+        this.events.onAgentState("speaking");
+        if (this.silenceTimer !== null) window.clearTimeout(this.silenceTimer);
+        this.silenceTimer = window.setTimeout(() => {
+          this.events.onAgentState("listening");
+        }, 700);
+      }
+
+      if (this.events.onSpeakerVolumes) {
+        const volumeMap = new Map<number, number>();
+        for (const v of volumes) {
+          const uid = Number(v.uid);
+          if (Number.isFinite(uid)) {
+            volumeMap.set(uid, v.level);
+          }
+        }
+        this.events.onSpeakerVolumes(volumeMap);
+      }
     });
 
     try {

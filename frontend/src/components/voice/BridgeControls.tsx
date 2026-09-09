@@ -7,11 +7,18 @@ import { useIncident } from "@/lib/incident-store";
 import { useAuth } from "@/lib/auth-context";
 import { fetchRoster } from "@/lib/delta-socket";
 import { Button, Kbd } from "@/components/ui/Button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import type { ParticipantRole } from "@/lib/types";
 
 /**
  * Bridge transport controls.
+ * Modernized with shadcn Button, Tooltip, and input styling.
  *
  * Two decisions worth naming:
  *
@@ -25,15 +32,7 @@ import type { ParticipantRole } from "@/lib/types";
  *    with mute. Dropping off a Sev-1 bridge by mis-clicking is unacceptable, so
  *    the destructive control is isolated and separately styled.
  */
-/**
- * The joinable roles, in the order the dropdown offers them.
- *
- * Kept in step with VALID_ROLES in `/api/token` — the server is authoritative
- * and rejects anything else, so a drift here shows up as a 400 rather than as
- * a silently wrong participant. Echo is absent on purpose: a human may never
- * claim the agent's identity, because `kind: "agent"` drives the self-audio
- * exclusion.
- */
+
 const ROLES: readonly ParticipantRole[] = [
   "Incident Commander",
   "DevOps Lead",
@@ -135,7 +134,7 @@ export function BridgeControls() {
 
   if (idle || connecting) {
     return (
-      <div className="flex flex-col gap-1.5">
+      <div className="flex flex-col gap-2">
         <div className="grid grid-cols-[1fr_9.5rem] gap-1.5">
           <label className="sr-only" htmlFor="bridge-channel">Incident channel</label>
           <input
@@ -143,7 +142,7 @@ export function BridgeControls() {
             value={channel}
             onChange={(event) => setChannel(event.target.value)}
             disabled={connecting}
-            className="h-8 min-w-0 rounded-sm border border-line bg-sunken px-2 font-mono text-2xs text-ink outline-none placeholder:text-ink-4 focus:border-live"
+            className="h-8 min-w-0 rounded-xs border border-line bg-sunken px-2.5 font-mono text-2xs text-ink outline-none transition-colors placeholder:text-ink-4 focus:border-focus"
             placeholder="incident channel"
           />
           <label className="sr-only" htmlFor="bridge-role">Your incident role</label>
@@ -152,12 +151,12 @@ export function BridgeControls() {
             value={role}
             onChange={(event) => setSelectedRole(event.target.value as ParticipantRole)}
             disabled={connecting}
-            className="h-8 rounded-sm border border-line bg-sunken px-2 text-2xs text-ink outline-none focus:border-live"
+            className="h-8 rounded-xs border border-line bg-sunken px-2 text-2xs text-ink outline-none transition-colors focus:border-focus cursor-pointer"
           >
             {ROLES.map((candidate) => {
               const count = roleCounts.get(candidate) || 0;
               return (
-                <option key={candidate} value={candidate}>
+                <option key={candidate} value={candidate} className="bg-base text-ink">
                   {candidate} {count > 0 ? `(${count} active)` : ""}
                 </option>
               );
@@ -165,8 +164,8 @@ export function BridgeControls() {
           </select>
         </div>
         <div className="flex items-center justify-between px-0.5 text-[10px] text-ink-3">
-          <span className="flex items-center gap-1">
-            <UserCheck size={11} className="text-live" />
+          <span className="flex items-center gap-1.5">
+            <UserCheck size={12} className="text-live" />
             Joining as: <strong className="font-semibold text-ink">{user.name}</strong>
           </span>
           <span className="font-mono text-2xs text-ink-4">
@@ -177,11 +176,11 @@ export function BridgeControls() {
           variant="primary"
           onClick={() => void openBridge({ channel, role, userId: user.id, name: user.name })}
           disabled={connecting || !channel.trim()}
-          className="h-9 w-full justify-between px-3"
+          className="h-9 w-full justify-between px-3 cursor-pointer"
           icon={
             <span className="flex items-center gap-2">
               <Radio size={14} strokeWidth={2.2} />
-              {connecting ? "Connecting to bridge" : "Join incident bridge"}
+              {connecting ? "Connecting to bridge…" : "Join incident bridge"}
             </span>
           }
         >
@@ -192,46 +191,52 @@ export function BridgeControls() {
   }
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-center justify-between px-0.5 text-[11px] text-ink-3">
-        <span className="truncate">
-          Joined as <span className="font-medium text-ink">{user.name}</span> ({currentRole ?? role})
-        </span>
-        {currentUid && (
-          <span className="font-mono text-2xs text-ink-4">UID {currentUid}</span>
-        )}
-      </div>
-      <div className="flex gap-1.5">
-        <Button
-          variant={micOn ? "secondary" : "danger"}
-          onClick={toggleMic}
-          aria-pressed={!micOn}
-          className="h-9 flex-1 justify-between px-3"
-          icon={
-            <span className="flex items-center gap-2">
-              {micOn ? (
-                <Mic size={14} strokeWidth={2.2} />
-              ) : (
-                <MicOff size={14} strokeWidth={2.2} />
-              )}
-              <span className={cn(!micOn && "font-semibold")}>
-                {micOn ? "Microphone open" : "Muted"}
+    <TooltipProvider delayDuration={150}>
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between px-0.5 text-[11px] text-ink-3">
+          <span className="truncate">
+            Joined as <span className="font-medium text-ink">{user.name}</span> ({currentRole ?? role})
+          </span>
+          {currentUid && (
+            <span className="font-mono text-2xs text-ink-4">UID {currentUid}</span>
+          )}
+        </div>
+        <div className="flex gap-1.5">
+          <Button
+            variant={micOn ? "secondary" : "danger"}
+            onClick={toggleMic}
+            aria-pressed={!micOn}
+            className="h-9 flex-1 justify-between px-3 cursor-pointer"
+            icon={
+              <span className="flex items-center gap-2">
+                {micOn ? (
+                  <Mic size={14} strokeWidth={2.2} />
+                ) : (
+                  <MicOff size={14} strokeWidth={2.2} className="text-critical" />
+                )}
+                <span className={cn(!micOn && "font-semibold text-critical")}>
+                  {micOn ? "Microphone open" : "Muted"}
+                </span>
               </span>
-            </span>
-          }
-        >
-          <Kbd>M</Kbd>
-        </Button>
+            }
+          >
+            <Kbd>M</Kbd>
+          </Button>
 
-        <Button
-          variant="danger"
-          onClick={closeBridge}
-          aria-label="Leave incident bridge"
-          title="Leave incident bridge"
-          className="h-9 w-9 px-0"
-          icon={<PhoneOff size={14} strokeWidth={2.2} />}
-        />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="danger"
+                onClick={closeBridge}
+                aria-label="Leave incident bridge"
+                className="h-9 w-9 px-0 cursor-pointer"
+                icon={<PhoneOff size={14} strokeWidth={2.2} />}
+              />
+            </TooltipTrigger>
+            <TooltipContent>Leave incident bridge (J)</TooltipContent>
+          </Tooltip>
+        </div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }

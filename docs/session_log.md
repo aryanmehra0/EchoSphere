@@ -2125,7 +2125,107 @@ The initial prototype possessed two critical structural limitations:
 
 ---
 
+## Session 13 — September 10, 2026: Automated Sev-1 Incident Post-Mortem & SOC2 Audit Generator + Live War Room Roster & Speaking Radar
+
+### Context & Objective
+Following the completion of Enterprise Identity and Multi-User RBAC, two high-impact features from the platform evaluation were requested and implemented without assumptions:
+1. **Automated Sev-1 Incident Post-Mortem & SOC2 Audit Generator**: An executive-ready, audit-grade incident post-mortem engine capable of exporting GFM Markdown, structured SOC2 Type II JSON, and printable browser views, complete with:
+   - Epistemic evidence ledger (`OBSERVED` vs `HYPOTHESIS` vs `INFERRED` vs `REFUTED`/`SUPERSEDED`).
+   - Human-attributed chronological incident timeline.
+   - Contradiction & model deliberation arbitration records.
+   - Cryptographic authorization gate audit log (nonces, actions, outcomes, and authenticated human operator attribution).
+   - Strict Rule 1 Epistemic Neutrality compliance notice (Echo never determines root cause).
+2. **Live War Room Roster & Speaking Radar**: Real-time multi-user presence panel displaying all connected engineers in the bridge, featuring:
+   - Dynamic WebRTC audio volume indicator radar rings (pulsing emerald halo when speaking).
+   - Human identity, operational role badge, and cryptographic approval entitlement indicators.
+   - Echo AI Secretary presence and listening/speaking indicators.
+
+### What Was Built
+1. **Backend Domain Policies & Endpoints**:
+   - [`backend/app/domain/policies/postmortem.py`](file:///c:/projects/EchoSphere/backend/app/domain/policies/postmortem.py): Pure functional domain generators `generate_postmortem()` and `generate_markdown_report()`. Aggregates ledger snapshot, cryptographic proxy audit logs, and privacy redaction counters into an audit record with explicit Rule 1 disclaimer.
+   - [`backend/app/web/routers/ops.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/ops.py): Added `GET /incident/postmortem` (JSON) and `GET /incident/postmortem/markdown` (`text/markdown; charset=utf-8`).
+   - [`backend/tests/test_postmortem.py`](file:///c:/projects/EchoSphere/backend/tests/test_postmortem.py): 5 unit tests validating post-mortem structure, epistemic classification, actor attribution, and endpoint serialization.
+2. **Presence & Audio Speaking Radar**:
+   - [`frontend/src/lib/agora-bridge.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/agora-bridge.ts): Added `onSpeakerVolumes` callback wired to WebRTC `client.on("volume-indicator")` event.
+   - [`frontend/src/lib/incident-store.tsx`](file:///c:/projects/EchoSphere/frontend/src/lib/incident-store.tsx): Integrated `activeSpeakers: Set<number>` (thresholded at audio level >= 5), `participants: RosterParticipant[]`, and 4-second periodic sync via `refreshParticipants`.
+   - [`frontend/src/components/voice/WarRoomRoster.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/voice/WarRoomRoster.tsx): Presence panel rendering participant cards with pulsing emerald speaking halos, role badges, `(You)` indicators, and approver shields.
+3. **Automated Post-Mortem & Audit Modal**:
+   - [`frontend/src/lib/types.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/types.ts): Defined `PostMortemResponse`, `PostMortemClaim`, `PostMortemContradiction`, and `PostMortemTask`.
+   - [`frontend/src/lib/delta-socket.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/delta-socket.ts): Added `fetchPostMortem()` preserving the strict single-module egress boundary.
+   - [`frontend/src/components/intel/PostMortemModal.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/intel/PostMortemModal.tsx): Complete modal dialog with:
+     - Executive Preview: KPI overview, impacted subsystem chips, categorized 4-column epistemic claim ledger, chronological attributed timeline, contradictions, and SOC2 cryptographic audit table.
+     - GFM Markdown tab with one-click copy and file download (`.md`).
+     - SOC2 Audit JSON tab with one-click copy and file download (`.json`).
+     - Native browser print/PDF trigger.
+     - Fallback synthesis from client `IncidentState` for offline/rehearsal resilience.
+   - [`frontend/src/components/shell/CommandBar.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/shell/CommandBar.tsx): Added "Post-Mortem" button with `FileText` icon.
+   - [`frontend/src/components/IncidentConsole.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/IncidentConsole.tsx): Mounted `<WarRoomRoster />` in the Voice panel and `<PostMortemModal />` at the root overlay level.
+
+### Verification & Invariants
+- **Backend Tests**: 294/294 passing (`.venv/Scripts/python -m unittest discover -s tests -t .`).
+- **Frontend Verify Gate**: `npm run verify` passed cleanly:
+  - `tsc --noEmit`: 0 errors.
+  - `eslint src tests --max-warnings=0`: 0 warnings, 0 errors.
+  - Test suite (`node --test`): 167/167 tests passed, 0 failed.
+  - Production build (`next build`): All 10 routes compiled and optimized without issue.
+- **Visual Inspection**: Captured real headless screenshots via Playwright:
+  - `console_main.png`: Confirmed War Room Presence component and Post-Mortem command button rendered in layout.
+  - `console_postmortem.png`: Confirmed modal opens with live telemetry, epistemic claims, and disclaimer.
+- **Trust-Zone & Epistemic Invariants**: Egress remains confined to `delta-socket.ts` and `ApprovalModal.tsx`. Rule 1 constraint (Echo never asserts causation) remains strictly enforced.
+
+### Session 10 — shadcn-ui Modernization & Component Architecture (Sep 10)
+
+**Ask:** "use shadcn-ui in FE and modernize the frontend so that it looks professional and modern, and other required packages if you want as well"
+
+#### Architectural Decisions & Non-Negotiable Invariants
+1. **Rule 3 Preserved (Color is Reserved Strictly for Status)**:
+   - Modernized UI does NOT introduce decorative gradients, purple glows, or playful candy colors.
+   - Primary actions remain high-contrast near-white on graphite.
+   - Saturated emerald, amber, and red are reserved strictly for operational telemetry status (`live`, `warning`, `critical`).
+2. **Zone 1 Blast Radius & Trust Boundaries (v6 §10.1)**:
+   - All shadcn primitives and modern wrappers are strictly presentational.
+   - Zero raw `fetch()` or network calls introduced in any UI component; egress remains strictly bounded to `delta-socket.ts` and `ApprovalModal.tsx`.
+   - No secret exposure (`server-only` verified).
+3. **Determinism (Rule 2)**:
+   - All incident state continues to flow through `incidentReducer`.
+
+#### What Was Built
+1. **Dependencies Installed**:
+   - `clsx`, `tailwind-merge`, `class-variance-authority`
+   - `@radix-ui/react-dialog`, `@radix-ui/react-dropdown-menu`, `@radix-ui/react-tabs`, `@radix-ui/react-tooltip`, `@radix-ui/react-scroll-area`, `@radix-ui/react-avatar`, `@radix-ui/react-separator`, `@radix-ui/react-slot`
+2. **shadcn UI Primitives Created in `frontend/src/components/ui/`**:
+   - `Button.tsx`: Full CVA button primitive supporting Radix `Slot`, backward-compatible variants (`default`, `primary`, `secondary`, `destructive`/`danger`, `outline`, `ghost`, `link`), keyboard keycaps (`Kbd`), and sizes (`sm`, `md`, `lg`, `icon`).
+   - `badge.tsx`: Incident status badges with semantic tokens (`critical`, `warning`, `stable`, `live`, `neutral`, `soft`).
+   - `dialog.tsx`: Accessible Radix Dialog (Overlay, Content, Header, Title, Description, Footer, Close).
+   - `dropdown-menu.tsx`: Radix DropdownMenu with sub-triggers, items, separators, and shortcuts.
+   - `tabs.tsx`: High-density Radix Tabs with smooth active state indicators.
+   - `tooltip.tsx`: Radix Tooltip Provider, Trigger, and Content with graphite styling.
+   - `scroll-area.tsx`: Radix ScrollArea with customized dark scrollbars.
+   - `avatar.tsx`: Radix Avatar with initials fallback chips.
+   - `separator.tsx`: Radix Separator.
+   - `card.tsx`: Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter.
+3. **Modernized Console Components**:
+   - `UserMenu.tsx`: Replaced custom DOM listener dropdown with Radix DropdownMenu, Avatar fallback icons for all 5 enterprise personas, and RBAC authority tags.
+   - `CommandBar.tsx`: Integrated TooltipProvider and Tooltips across all KPI metrics (Elapsed, Conflicts, Gaps, Open Tasks, RTI Tension, SD-RTN status) and the Post-Mortem trigger.
+   - `WarRoomRoster.tsx`: Modernized participant and Echo cards with Avatars, pulsing WebRTC audio radar halos, role badges, and approver tooltips.
+   - `BridgeControls.tsx`: Polished input fields, role selector, and dual action buttons with tooltips.
+   - `TranscriptFeed.tsx`: Integrated Avatars on transcript rows, semantic status badges, and upgraded `TranscriptReview` to a Radix Dialog.
+   - `IntelColumn.tsx`: Modernized multi-panel navigation with shadcn Tabs and warning badge indicators.
+   - `PostMortemModal.tsx`: Upgraded to Radix Dialog and Tabs for Executive Preview, GFM Markdown, and SOC2 JSON export.
+   - `ApprovalModal.tsx`: Modernized dual-action confirmation card with CVA Button and Badge primitives while preserving dual-channel security invariants.
+
+#### Verification & Quality Gates
+- **Typecheck**: `tsc --noEmit` passed with 0 errors.
+- **Lint**: `eslint src tests --max-warnings=0` passed with 0 warnings, 0 errors.
+- **Tier 1 Tests**: All 167 frontend tests passed (0 failures, 0 skipped).
+- **Next.js Production Build**: `next build` compiled cleanly for all 10 routes with Turbopack.
+- **Backend Tests**: All 294 Python unit tests passed cleanly.
+- **Visual Inspection**: Verified via Playwright headless Chromium screenshots (`console_main.png`, `console_postmortem.png`, `console_usermenu.png`).
+
+---
+
 > **Maintenance:** update this file at the end of any session that makes a
 > decision, hits a dead end, or discovers something the code doesn't say.
 > It is only useful if it stays honest — record the corrections too.
+
 

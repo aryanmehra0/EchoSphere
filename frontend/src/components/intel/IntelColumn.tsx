@@ -9,7 +9,9 @@ import {
   selectOpenTasks,
 } from "@/lib/incident-reducer";
 import { cn } from "@/lib/cn";
-import { PanelBody, PanelHeader } from "@/components/ui/Panel";
+import { PanelHeader } from "@/components/ui/Panel";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
 import { LedgerPanel } from "./LedgerPanel";
 import { GapsPanel } from "./GapsPanel";
 import { TasksPanel } from "./TasksPanel";
@@ -17,6 +19,7 @@ import { TimelinePanel } from "./TimelinePanel";
 
 /**
  * The right-hand intelligence column.
+ * Modernized with shadcn Tabs and Badge primitives.
  *
  * Four dense datasets compete for one column. Stacking them means four cramped
  * scroll areas and nothing readable; plain tabs mean three of the four are
@@ -63,7 +66,7 @@ export function IntelColumn() {
   };
 
   return (
-    <>
+    <div className="flex flex-col h-full min-h-0">
       <PanelHeader
         title="Incident intelligence"
         aside={
@@ -73,60 +76,48 @@ export function IntelColumn() {
         }
       />
 
-      {/* Segmented control */}
-      <div
-        role="tablist"
-        aria-label="Incident intelligence views"
-        className="flex shrink-0 gap-px border-b border-line-faint bg-sunken/50 p-1"
+      <Tabs
+        value={tab}
+        onValueChange={(v) => setTab(v as Tab)}
+        className="flex flex-col flex-1 min-h-0"
       >
-        {TABS.map(({ id, label, icon: Icon }) => {
-          const active = tab === id;
-          return (
-            <button
+        <TabsList className="w-full h-8 justify-between p-1 bg-sunken/60 border-b border-line-faint rounded-none border-x-0 border-t-0 gap-1">
+          {TABS.map(({ id, label, icon: Icon }) => (
+            <TabsTrigger
               key={id}
-              role="tab"
-              type="button"
-              id={`tab-${id}`}
-              aria-selected={active}
-              aria-controls={`panel-${id}`}
-              onClick={() => setTab(id)}
+              value={id}
               className={cn(
-                "flex flex-1 items-center justify-center gap-1 rounded-xs px-1.5 py-1.5",
-                "text-2xs font-medium transition-colors duration-150 ease-[var(--ease-out)]",
-                active
-                  ? "bg-raised text-ink shadow-[inset_0_1px_0_0_oklch(1_0_0/6%)]"
-                  : "text-ink-3 hover:bg-hover/60 hover:text-ink-2",
+                "flex-1 text-2xs gap-1 py-1 font-medium select-none cursor-pointer",
+                "data-[state=active]:bg-raised data-[state=active]:text-ink data-[state=active]:shadow-xs",
               )}
             >
-              <Icon size={11} strokeWidth={2.2} />
-              {label}
+              <Icon className="h-3 w-3 shrink-0" />
+              <span>{label}</span>
               {counts[id] > 0 ? (
-                <span
-                  className={cn(
-                    "tnum rounded-[2px] px-1 font-mono text-[9px] leading-[14px]",
-                    isWarning[id]
-                      ? "bg-warning/15 text-warning"
-                      : "bg-line text-ink-3",
-                  )}
+                <Badge
+                  variant={isWarning[id] ? "warning" : "neutral"}
+                  className="px-1 py-0 text-[8px] font-mono leading-tight ml-0.5"
                 >
                   {counts[id]}
-                </span>
+                </Badge>
               ) : null}
-            </button>
-          );
-        })}
-      </div>
+            </TabsTrigger>
+          ))}
+        </TabsList>
 
-      <PanelBody
-        role="tabpanel"
-        id={`panel-${tab}`}
-        aria-labelledby={`tab-${tab}`}
-      >
-        {tab === "ledger" ? <LedgerPanel /> : null}
-        {tab === "gaps" ? <GapsPanel /> : null}
-        {tab === "actions" ? <TasksPanel /> : null}
-        {tab === "timeline" ? <TimelinePanel /> : null}
-      </PanelBody>
-    </>
+        <TabsContent value="ledger" className="mt-0 flex-1 min-h-0 overflow-hidden">
+          <LedgerPanel />
+        </TabsContent>
+        <TabsContent value="gaps" className="mt-0 flex-1 min-h-0 overflow-hidden">
+          <GapsPanel />
+        </TabsContent>
+        <TabsContent value="actions" className="mt-0 flex-1 min-h-0 overflow-hidden">
+          <TasksPanel />
+        </TabsContent>
+        <TabsContent value="timeline" className="mt-0 flex-1 min-h-0 overflow-hidden">
+          <TimelinePanel />
+        </TabsContent>
+      </Tabs>
+    </div>
   );
 }

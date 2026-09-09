@@ -22,6 +22,7 @@ import {
 import { DEMO_SCRIPT, rebaseAction } from "./mock-stream";
 import {
   BridgeCredentialError,
+  fetchRosterParticipants,
   inviteAgent,
   openDeltaSocket,
   requestBridgeCredentials,
@@ -31,7 +32,7 @@ import {
 } from "./delta-socket";
 import { AgoraBridge } from "./agora-bridge";
 import type { IRemoteAudioTrack } from "agora-rtc-sdk-ng";
-import type { IncidentState, ParticipantRole } from "./types";
+import type { IncidentState, ParticipantRole, RosterParticipant } from "./types";
 
 /**
  * Where the incident data on screen is coming from.
@@ -91,6 +92,11 @@ interface IncidentStore {
   setSelectedEntityId: (id: string | null) => void;
   currentUid: number | null;
   currentRole: ParticipantRole | null;
+  activeSpeakers: Set<number>;
+  participants: RosterParticipant[];
+  refreshParticipants: () => Promise<void>;
+  postMortemOpen: boolean;
+  setPostMortemOpen: (open: boolean) => void;
 }
 
 /**
@@ -128,6 +134,9 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [currentUid, setCurrentUid] = useState<number | null>(null);
   const [currentRole, setCurrentRole] = useState<ParticipantRole | null>(null);
+  const [activeSpeakers, setActiveSpeakers] = useState<Set<number>>(new Set());
+  const [participants, setParticipants] = useState<RosterParticipant[]>([]);
+  const [postMortemOpen, setPostMortemOpen] = useState(false);
 
   /**
    * The latest state, readable from inside `openBridge`.
@@ -201,6 +210,13 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     const transport = new AgoraBridge({
       onAgentTrack: setAgentTrack,
       onAgentState: (agent) => dispatch({ type: "AGENT", state: agent }),
+      onSpeakerVolumes: (volumes) => {
+        const speaking = new Set<number>();
+        for (const [uid, level] of volumes.entries()) {
+          if (level >= 5) speaking.add(uid);
+        }
+        setActiveSpeakers(speaking);
+      },
       /*
         ── ON SCREEN, NOT ONLY IN THE DEVTOOLS CONSOLE ─────────────────────
         This was `console.warn` alone, which meant the transport's loudest
@@ -235,6 +251,24 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       if (agora.current === transport) agora.current = null;
     };
   }, []);
+
+  const refreshParticipants = useCallback(async () => {
+    const ch = joinedChannel.current ?? "inc-4417";
+    const next = await fetchRosterParticipants(ch);
+    if (next && next.length > 0) {
+      setParticipants(next);
+    }
+  }, []);
+
+  // Sync roster participants periodically while on the voice bridge
+  useEffect(() => {
+    if (state.bridge !== "live") return;
+    void refreshParticipants();
+    const interval = window.setInterval(() => {
+      void refreshParticipants();
+    }, 4000);
+    return () => window.clearInterval(interval);
+  }, [state.bridge, refreshParticipants]);
 
   /**
    * The scripted replay — v6 §17's fallback demo.
@@ -695,6 +729,11 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       setSelectedEntityId,
       currentUid,
       currentRole,
+      activeSpeakers,
+      participants,
+      refreshParticipants,
+      postMortemOpen,
+      setPostMortemOpen,
     }),
     [
       state,
@@ -708,6 +747,10 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       selectedEntityId,
       currentUid,
       currentRole,
+      activeSpeakers,
+      participants,
+      refreshParticipants,
+      postMortemOpen,
     ],
   );
 

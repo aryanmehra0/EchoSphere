@@ -1,15 +1,22 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Maximize2, MessageSquareText, X } from "lucide-react";
+import { Maximize2, MessageSquareText } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
 import { clock, initials } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { PanelHeader } from "@/components/ui/Panel";
-import { Badge } from "@/components/ui/Signal";
+import { Badge } from "@/components/ui/badge";
 import { Button, Kbd } from "@/components/ui/Button";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import type { Transcript } from "@/lib/types";
 
 /**
@@ -33,9 +40,7 @@ export function TranscriptRow({ t }: { t: Transcript }) {
   return (
     <li
       className={cn(
-        "enter-up group relative flex gap-2.5 px-3 py-2",
-        // Echo's turns are inset and washed so the agent's contributions are
-        // never mistaken for a human's when scanning the log later.
+        "enter-up group relative flex gap-2.5 px-3 py-2 transition-colors",
         isEcho && "bg-live/[0.04]",
       )}
     >
@@ -43,22 +48,28 @@ export function TranscriptRow({ t }: { t: Transcript }) {
       <span
         aria-hidden
         className={cn(
-          "absolute inset-y-0 left-0 w-px",
-          isEcho ? "bg-live/50" : "bg-transparent",
+          "absolute inset-y-0 left-0 w-[2px]",
+          isEcho ? "bg-live" : "bg-transparent",
         )}
       />
 
-      <span
-        aria-hidden
+      <Avatar
         className={cn(
-          "mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-xs border font-mono text-[9px] font-semibold",
+          "mt-px h-5 w-5 shrink-0 border transition-all",
           isEcho
-            ? "border-live/35 bg-live/12 text-live"
-            : "border-line bg-overlay text-ink-3",
+            ? "border-live/40 bg-live/15"
+            : "border-line bg-overlay",
         )}
       >
-        {initials(t.role)}
-      </span>
+        <AvatarFallback
+          className={cn(
+            "text-[9px] font-mono font-semibold",
+            isEcho ? "text-live bg-live/20" : "text-ink-3 bg-overlay",
+          )}
+        >
+          {initials(t.role)}
+        </AvatarFallback>
+      </Avatar>
 
       <div className="min-w-0 flex-1">
         <div className="mb-0.5 flex items-baseline gap-2">
@@ -74,7 +85,7 @@ export function TranscriptRow({ t }: { t: Transcript }) {
             {clock(t.at)}
           </span>
           {!t.isFinal ? (
-            <Badge tone="neutral" className="ml-auto py-0 text-[8px]">
+            <Badge variant="neutral" className="ml-auto py-0 px-1 text-[8px]">
               partial
             </Badge>
           ) : null}
@@ -218,7 +229,7 @@ export function TranscriptFeed() {
             }}
             className={cn(
               "absolute inset-x-0 bottom-2 mx-auto w-fit rounded-xs border border-line-strong bg-overlay px-2 py-1",
-              "text-2xs font-medium text-ink-2 shadow-lg transition-colors hover:bg-hover hover:text-ink",
+              "text-2xs font-medium text-ink-2 shadow-lg transition-colors hover:bg-hover hover:text-ink cursor-pointer",
             )}
           >
             Jump to live
@@ -226,76 +237,47 @@ export function TranscriptFeed() {
         ) : null}
       </div>
 
-      {showReview ? (
-        <TranscriptReview onClose={() => setShowReview(false)} />
-      ) : null}
+      <TranscriptReview open={showReview} onOpenChange={setShowReview} />
     </>
   );
 }
 
 /**
  * The full-transcript review surface.
- *
- * Everything Echo has heard so far, in one tall scrollable read — the fixed
- * 352px voice column cannot carry a long conversation legibly, and an operator
- * arriving mid-incident has no other way to establish what happened before
- * them. It is a copy of the reducer's feed, not a re-derivation, so a turn the
- * live pane shows is exactly what review shows.
+ * Modernized with shadcn Dialog primitive.
  */
-function TranscriptReview({ onClose }: { onClose: () => void }) {
+function TranscriptReview({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const { state } = useIncident();
-  const dialog = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   const finals = state.transcripts.filter((t) => t.isFinal).length;
 
-  // Esc closes, like every other transient surface in this console; arriving
-  // with keyboard focus in the dialog keeps the operator's hands on the board.
   useEffect(() => {
-    dialog.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  // Tail-follow in review too: new turns land while the operator reads, and
-  // they should appear rather than wait for a scroll.
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end" });
-  }, [state.transcripts.length]);
+    if (open) {
+      endRef.current?.scrollIntoView({ block: "end" });
+    }
+  }, [open, state.transcripts.length]);
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-void/70 p-6"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Full transcript"
-      onMouseDown={(e) => {
-        if (e.target === dialog.current?.parentElement) onClose();
-      }}
-    >
-      <div
-        ref={dialog}
-        tabIndex={-1}
-        className="enter-up flex max-h-[76vh] w-full max-w-[760px] flex-col overflow-hidden rounded-md border border-line-strong bg-raised outline-none"
-      >
-        <div className="flex items-center gap-2 border-b border-line-faint px-4 py-2">
-          <MessageSquareText size={13} strokeWidth={2.2} className="text-ink-3" />
-          <span className="eyebrow">Everything Echo has heard so far</span>
-          <span className="tnum ml-auto font-mono text-2xs text-ink-4">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[76vh] flex flex-col p-0 gap-0 overflow-hidden border-line-strong bg-raised shadow-2xl">
+        <DialogHeader className="flex flex-row items-center justify-between border-b border-line-faint px-4 py-2.5 space-y-0">
+          <div className="flex items-center gap-2">
+            <MessageSquareText className="h-4 w-4 text-ink-3" />
+            <DialogTitle className="text-xs font-mono font-medium tracking-wider uppercase text-ink">
+              Everything Echo has heard so far
+            </DialogTitle>
+          </div>
+          <span className="tnum font-mono text-2xs text-ink-4 pr-6">
             {finals} final / {state.transcripts.length} total
           </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onClose}
-            aria-label="Close transcript review"
-            className="h-5 px-1.5"
-            icon={<X size={12} strokeWidth={2.2} />}
-          />
-        </div>
+        </DialogHeader>
 
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
           {state.transcripts.length === 0 ? (
@@ -315,7 +297,7 @@ function TranscriptReview({ onClose }: { onClose: () => void }) {
           )}
           <div ref={endRef} />
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

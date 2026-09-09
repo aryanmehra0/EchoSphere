@@ -3,7 +3,15 @@
 import type { BridgeCredentials } from "./agora-bridge";
 import type { AgoraTranscript } from "./agora-transcript";
 import type { IncidentAction } from "./incident-reducer";
-import type { ApprovalRequest, IncidentDelta, ParticipantRole, Transcript, UserProfile } from "./types";
+import type {
+  ApprovalRequest,
+  IncidentDelta,
+  ParticipantRole,
+  PostMortemResponse,
+  RosterParticipant,
+  Transcript,
+  UserProfile,
+} from "./types";
 
 /**
  * The dashboard's half of the reconnect protocol — v6 §9.3, closing G6.
@@ -683,4 +691,34 @@ export async function persistSessionUser(userId: string): Promise<UserProfile | 
     return null;
   }
 }
+
+/**
+ * Fetch all active participants on the channel for the War Room Roster.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function fetchRosterParticipants(channel: string): Promise<RosterParticipant[]> {
+  try {
+    const res = await fetch(`/api/roster?channel=${encodeURIComponent(channel)}`);
+    if (!res.ok) return [];
+    const data = (await res.json()) as { participants?: RosterParticipant[] };
+    return data.participants ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch the automated incident post-mortem report from the Slow Loop.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function fetchPostMortem(): Promise<PostMortemResponse | null> {
+  try {
+    const res = await fetch(`${slowLoopHttpUrl()}/incident/postmortem`);
+    if (!res.ok) return null;
+    return (await res.json()) as PostMortemResponse;
+  } catch {
+    return null;
+  }
+}
+
 

@@ -426,3 +426,104 @@ export interface IncidentDelta {
   degraded?: Degradation | null;
   privacy?: PrivacyState;
 }
+
+/** Participant presence item displayed in the War Room Roster. */
+export interface RosterParticipant {
+  uid: number;
+  role: ParticipantRole;
+  kind: "human" | "agent" | "observer";
+  authorized: boolean;
+  issuedAt: number;
+  userId?: string;
+  name?: string;
+  permissions?: UserPermission[];
+  isSpeaking?: boolean;
+}
+
+export interface PostMortemClaim {
+  id?: string;
+  text: string;
+  speakerRole?: string;
+  speakerName?: string | null;
+  speakerUserId?: string | null;
+  confidence?: number;
+  entity?: string | null;
+  formattedTime?: string;
+  lifecycle?: string;
+}
+
+export interface PostMortemContradiction {
+  id: string;
+  speakers?: string[];
+  relation?: string;
+  why?: string;
+  resolved?: boolean;
+  claims?: string[];
+}
+
+export interface PostMortemTask {
+  id: string;
+  description: string;
+  assigneeRole: string;
+  status: string;
+  ref?: string | null;
+  at: number;
+}
+
+/** Structured post-mortem report and markdown export. */
+export interface PostMortemResponse {
+  postmortem: {
+    overview: {
+      incidentId: string;
+      channel: string;
+      phase: string;
+      startedAt: number;
+      startedAtFormatted: string;
+      closedAt: number;
+      closedAtFormatted: string;
+      duration: string;
+      peakRti: number;
+      status: string;
+    };
+    entities: Array<{
+      id: string;
+      label: string;
+      kind: string;
+      status: string;
+      metric?: string | null;
+      aliases?: string[];
+    }>;
+    timeline: Array<{
+      id: string;
+      kind: string;
+      text: string;
+      actor: string;
+      actorName?: string | null;
+      actorUserId?: string | null;
+      at: number;
+      formattedTime: string;
+    }>;
+    epistemicClaims: {
+      observed: PostMortemClaim[];
+      hypothesis: PostMortemClaim[];
+      inferred: PostMortemClaim[];
+      refutedOrStale: PostMortemClaim[];
+    };
+    contradictions: PostMortemContradiction[];
+    tasks: PostMortemTask[];
+    auditLog: Array<{
+      at: number;
+      formattedTime: string;
+      actorUid: number | null;
+      actorName?: string | null;
+      actorUserId?: string | null;
+      action: string;
+      outcome: string;
+      detail: string;
+    }>;
+    privacy: Record<string, unknown>;
+    epistemicNeutralityDisclaimer: string;
+  };
+  markdown: string;
+}
+

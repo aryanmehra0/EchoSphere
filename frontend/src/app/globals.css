@@ -44,6 +44,27 @@
   --color-stable:   #3ecf8e;  /* healthy, resolved, confirmed fact           */
   --color-live:     #4ac9e8;  /* Echo the agent, and live-streaming data     */
 
+  /* --- shadcn-ui Semantic Theme Mappings ---------------------------------- */
+  --color-background: var(--color-base);
+  --color-foreground: var(--color-ink);
+  --color-card: var(--color-raised);
+  --color-card-foreground: var(--color-ink);
+  --color-popover: var(--color-raised);
+  --color-popover-foreground: var(--color-ink);
+  --color-primary: var(--color-ink);
+  --color-primary-foreground: var(--color-void);
+  --color-secondary: var(--color-overlay);
+  --color-secondary-foreground: var(--color-ink);
+  --color-muted: var(--color-sunken);
+  --color-muted-foreground: var(--color-ink-3);
+  --color-accent: var(--color-hover);
+  --color-accent-foreground: var(--color-ink);
+  --color-destructive: var(--color-critical);
+  --color-destructive-foreground: var(--color-void);
+  --color-border: var(--color-line);
+  --color-input: var(--color-line-strong);
+  --color-ring: var(--color-live);
+
   /* --- Type ---------------------------------------------------------------
      IBM Plex: drawn for technical and enterprise systems, which is exactly
      what this is. The scale runs tighter than a marketing site — operators

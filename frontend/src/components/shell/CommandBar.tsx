@@ -1,8 +1,9 @@
 "use client";
 
-import { MicOff, Radio } from "lucide-react";
+import { FileText, MicOff, Radio } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
+import { Button } from "@/components/ui/Button";
 import {
   selectOpenContradictions,
   selectOpenTasks,
@@ -12,6 +13,12 @@ import { cn } from "@/lib/cn";
 import { Badge, Dot, Metric, Rule } from "@/components/ui/Signal";
 import { TensionMeter } from "@/components/ui/Meter";
 import { UserMenu } from "@/components/shell/UserMenu";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { IncidentPhase } from "@/lib/types";
 
 /**
@@ -84,7 +91,7 @@ function PhaseTrack({ phase }: { phase: IncidentPhase }) {
 }
 
 export function CommandBar() {
-  const { state, now } = useIncident();
+  const { state, now, setPostMortemOpen } = useIncident();
   const openContradictions = selectOpenContradictions(state);
   const openTasks = selectOpenTasks(state);
 
@@ -135,66 +142,122 @@ export function CommandBar() {
         <PhaseTrack phase={state.phase} />
       </div>
 
-      {/* Everything past here is right-aligned instrumentation. */}
-      <div className="ml-auto flex items-center gap-4">
-        <Metric
-          label="Elapsed"
-          value={elapsed(state.startedAt, now)}
-          title="Time since the incident bridge opened"
-        />
+      {/* Everything past here is right-aligned instrumentation with rich tooltips. */}
+      <TooltipProvider delayDuration={150}>
+        <div className="ml-auto flex items-center gap-4">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="cursor-default">
+                <Metric
+                  label="Elapsed"
+                  value={elapsed(state.startedAt, now)}
+                />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>Time since the incident bridge opened</TooltipContent>
+          </Tooltip>
 
-        <Rule />
+          <Rule />
 
-        <Metric
-          label="Conflicts"
-          value={openContradictions.length.toString().padStart(2, "0")}
-          tone={openContradictions.length > 0 ? "warning" : "neutral"}
-          title="Unresolved contradictions detected by the semantic engine"
-        />
-        {/* Requirement 5 has two halves. Conflicts is the loud one; Gaps is
-            what nobody has checked, and it belongs beside it at the top level
-            rather than buried a tab deep. */}
-        <Metric
-          label="Gaps"
-          value={state.unchecked.length.toString().padStart(2, "0")}
-          tone={state.unchecked.length > 0 ? "warning" : "neutral"}
-          title="Things nobody on the bridge has established yet"
-        />
-        <Metric
-          label="Open"
-          value={openTasks.length.toString().padStart(2, "0")}
-          tone={openTasks.length > 0 ? "live" : "neutral"}
-          title="Action items not yet closed"
-        />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="cursor-default">
+                <Metric
+                  label="Conflicts"
+                  value={openContradictions.length.toString().padStart(2, "0")}
+                  tone={openContradictions.length > 0 ? "warning" : "neutral"}
+                />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>Unresolved contradictions detected by the semantic engine</TooltipContent>
+          </Tooltip>
 
-        <Rule />
+          {/* Requirement 5 has two halves. Conflicts is the loud one; Gaps is
+              what nobody has checked, and it belongs beside it at the top level
+              rather than buried a tab deep. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="cursor-default">
+                <Metric
+                  label="Gaps"
+                  value={state.unchecked.length.toString().padStart(2, "0")}
+                  tone={state.unchecked.length > 0 ? "warning" : "neutral"}
+                />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>Things nobody on the bridge has established yet</TooltipContent>
+          </Tooltip>
 
-        <TensionMeter value={state.rti} />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="cursor-default">
+                <Metric
+                  label="Open"
+                  value={openTasks.length.toString().padStart(2, "0")}
+                  tone={openTasks.length > 0 ? "live" : "neutral"}
+                />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>Action items not yet closed</TooltipContent>
+          </Tooltip>
 
-        <Rule />
+          <Rule />
 
-        {/* ── Transport status ───────────────────────────────────────────── */}
-        <div
-          className="flex items-center gap-1.5"
-          role="status"
-          aria-live="polite"
-        >
-          <Dot tone={live ? "stable" : "neutral"} pulse={live} />
-          <span className="text-2xs font-medium tracking-[0.06em] text-ink-3 uppercase">
-            {state.bridge === "live"
-              ? "SD-RTN Connected"
-              : state.bridge === "connecting"
-                ? "Connecting"
-                : state.bridge === "closing"
-                  ? "Closing"
-                  : "Standby"}
-          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div>
+                <TensionMeter value={state.rti} />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>Real-Time Tension Index (RTI)</TooltipContent>
+          </Tooltip>
+
+          <Rule />
+
+          {/* ── Transport status ───────────────────────────────────────────── */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div
+                className="flex items-center gap-1.5 cursor-default"
+                role="status"
+                aria-live="polite"
+              >
+                <Dot tone={live ? "stable" : "neutral"} pulse={live} />
+                <span className="text-2xs font-medium tracking-[0.06em] text-ink-3 uppercase">
+                  {state.bridge === "live"
+                    ? "SD-RTN Connected"
+                    : state.bridge === "connecting"
+                      ? "Connecting"
+                      : state.bridge === "closing"
+                        ? "Closing"
+                        : "Standby"}
+                </span>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>Agora Real-Time Network & Voice Bridge Status</TooltipContent>
+          </Tooltip>
+
+          <Rule />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<FileText size={12} strokeWidth={2.2} />}
+                onClick={() => setPostMortemOpen(true)}
+              >
+                Post-Mortem
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Export Incident Post-Mortem & SOC2 Audit Report</TooltipContent>
+          </Tooltip>
+
+          <Rule />
+
+          <UserMenu />
         </div>
-
-        <Rule />
-
-        <UserMenu />
-      </div>
+      </TooltipProvider>
 
       {/*
         Degradation banner — v6 §13's "demo-visible impact" column, made real.

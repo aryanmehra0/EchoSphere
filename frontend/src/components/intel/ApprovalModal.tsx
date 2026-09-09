@@ -7,10 +7,11 @@ import { useIncident } from "@/lib/incident-store";
 import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/Button";
-import { Badge } from "@/components/ui/Signal";
+import { Badge } from "@/components/ui/badge";
 
 /**
  * The Authorization Gate's human half — v6 §10.2, closing G7.
+ * Modernized with shadcn Button and Badge primitives.
  *
  * ── WHY THIS SCREEN EXISTS ──────────────────────────────────────────────────
  * v5's gate was a spoken "yes, approved". The channel carries audio, and audio
@@ -119,35 +120,32 @@ export function ApprovalModal() {
 
   return (
     <div
-      className="absolute inset-0 z-40 flex items-center justify-center bg-void/70 p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs p-6"
       role="dialog"
       aria-modal="true"
       aria-labelledby="approval-title"
     >
       <div
         className={cn(
-          "enter-up w-full max-w-[560px] overflow-hidden rounded-md border bg-raised",
-          "shadow-[0_0_0_1px_oklch(0_0_0/40%),0_24px_60px_-16px_oklch(0_0_0/85%)]",
-          urgent ? "border-critical/50" : "border-warning/45",
+          "enter-up w-full max-w-[560px] overflow-hidden rounded-md border bg-raised shadow-2xl",
+          urgent ? "border-critical/60" : "border-warning/50",
         )}
       >
         <div
           className={cn(
-            "flex items-center gap-2 border-b px-4 py-2",
+            "flex items-center gap-2 border-b px-4 py-2.5",
             urgent
-              ? "border-critical/25 bg-critical/10"
-              : "border-warning/25 bg-warning/10",
+              ? "border-critical/30 bg-critical/10"
+              : "border-warning/30 bg-warning/10",
           )}
         >
           <ShieldAlert
-            size={13}
-            strokeWidth={2.2}
-            className={urgent ? "text-critical" : "text-warning"}
+            className={cn("h-4 w-4", urgent ? "text-critical animate-pulse" : "text-warning")}
           />
           <span
             id="approval-title"
             className={cn(
-              "text-2xs font-semibold tracking-[0.08em] uppercase",
+              "text-xs font-semibold tracking-[0.08em] uppercase",
               urgent ? "text-critical" : "text-warning",
             )}
           >
@@ -155,8 +153,8 @@ export function ApprovalModal() {
           </span>
           <span
             className={cn(
-              "tnum ml-auto font-mono text-2xs",
-              urgent ? "text-critical" : "text-warning/80",
+              "tnum ml-auto font-mono text-xs font-semibold",
+              urgent ? "text-critical animate-pulse" : "text-warning",
             )}
             title="This approval expires — it cannot be banked for later"
           >
@@ -164,21 +162,23 @@ export function ApprovalModal() {
           </span>
         </div>
 
-        <div className="px-4 py-3">
-          <p className="font-mono text-sm text-ink">{approval.action}</p>
-          <p className="mt-1 text-2xs text-ink-4">
-            Requires <span className="text-ink-2">{approval.requiredRole}</span>.
-            Echo cannot authorize this from voice.
-          </p>
+        <div className="px-4 py-3.5 space-y-3">
+          <div>
+            <p className="font-mono text-sm text-ink font-semibold">{approval.action}</p>
+            <p className="mt-1 text-2xs text-ink-4">
+              Requires <span className="text-ink-2 font-medium">{approval.requiredRole}</span>.
+              Echo cannot authorize this from voice.
+            </p>
+          </div>
 
           {/* The exact arguments the nonce is hash-bound to. */}
-          <div className="mt-3">
-            <p className="eyebrow mb-1.5">Arguments</p>
-            <dl className="surface-sunken rounded-sm px-2.5 py-2">
+          <div>
+            <p className="eyebrow mb-1">Arguments</p>
+            <dl className="surface-sunken rounded-xs border border-line-faint px-3 py-2">
               {Object.entries(approval.args).map(([k, v]) => (
-                <div key={k} className="flex gap-2 py-px">
-                  <dt className="font-mono text-[10px] text-ink-4">{k}</dt>
-                  <dd className="font-mono text-[10px] text-ink-2">{String(v)}</dd>
+                <div key={k} className="flex gap-2 py-0.5">
+                  <dt className="font-mono text-[11px] text-ink-4">{k}</dt>
+                  <dd className="font-mono text-[11px] text-ink-2 font-medium">{String(v)}</dd>
                 </div>
               ))}
             </dl>
@@ -186,12 +186,12 @@ export function ApprovalModal() {
 
           {/* Why this was proposed at all — v6 §9.4's evidence chain. */}
           {approval.evidence && approval.evidence.length > 0 ? (
-            <div className="mt-3">
-              <p className="eyebrow mb-1.5">Evidence</p>
-              <ul className="space-y-1 border-l border-line pl-2.5">
+            <div>
+              <p className="eyebrow mb-1">Evidence</p>
+              <ul className="space-y-1 border-l-2 border-line pl-3">
                 {approval.evidence.map((c) => (
-                  <li key={c.id} className="text-[10px] leading-snug text-ink-3">
-                    <span className="text-ink-4">{c.speakerRole}:</span> {c.text}
+                  <li key={c.id} className="text-[11px] leading-snug text-ink-3">
+                    <span className="text-ink-4 font-mono">{c.speakerRole}:</span> {c.text}
                   </li>
                 ))}
               </ul>
@@ -199,20 +199,20 @@ export function ApprovalModal() {
           ) : null}
 
           {!canApprove && (
-            <p className="mt-3 rounded-xs border border-warning/30 bg-warning/10 px-2 py-1.5 text-2xs text-warning">
+            <p className="rounded-xs border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-2xs text-warning">
               Approval restricted: Requires Incident Commander or DevOps Lead authority. You are signed in as {user.name} ({user.defaultRole}).
             </p>
           )}
 
           {error ? (
-            <p className="mt-3 rounded-xs border border-critical/30 bg-critical/10 px-2 py-1.5 text-2xs text-critical">
+            <p className="rounded-xs border border-critical/30 bg-critical/10 px-2.5 py-1.5 text-2xs text-critical">
               {error}
             </p>
           ) : null}
         </div>
 
         <div className="flex items-center gap-2 border-t border-line-faint bg-sunken/60 px-4 py-2.5">
-          <Badge tone="neutral" variant="outline">
+          <Badge variant="outline" className="font-mono text-[9px]">
             nonce · single use
           </Badge>
           <p className="text-[10px] text-ink-4">
@@ -220,11 +220,12 @@ export function ApprovalModal() {
           </p>
 
           <div className="ml-auto flex gap-2">
-            <Button variant="secondary" disabled={busy} onClick={() => decide("deny")}>
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => decide("deny")}>
               Deny
             </Button>
             <Button
-              variant="primary"
+              variant="default"
+              size="sm"
               disabled={busy || !canApprove}
               title={!canApprove ? "Requires Incident Commander or DevOps Lead authority" : undefined}
               onClick={() => decide("redeem")}

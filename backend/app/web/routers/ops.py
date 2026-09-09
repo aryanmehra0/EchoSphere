@@ -8,12 +8,13 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.application.services import budget
 from app.application.services.extraction import redaction_count
 from app.application.services.session import registry
 from app.domain.models import TimelineEvent, now_ms
+from app.domain.policies.postmortem import generate_markdown_report, generate_postmortem
 from app.infrastructure import config, store
 from ..deps import session
 
@@ -194,3 +195,35 @@ async def reset_incident() -> dict[str, Any]:
 
     log.info("incident reset — ledger cleared, %d dashboards resynced", reached)
     return {"ok": True, "phase": fresh.ledger.phase, "dashboards": reached}
+
+
+@router.get("/incident/postmortem")
+async def incident_postmortem() -> dict[str, Any]:
+    """
+    Automated Sev-1 Incident Post-Mortem & SOC2 Audit Generator.
+    Returns structured JSON data and formatted GFM markdown.
+    """
+    current = session()
+    snap = current.ledger.snapshot()
+    privacy_inv = current.privacy.inventory(
+        claims=len(snap.get("claims", [])),
+        entities=len(snap.get("entities", [])),
+        transcripts=len(snap.get("transcripts", [])),
+        redactions=redaction_count(),
+    )
+    audit_entries = getattr(current.proxy, "audit", [])
+    report = generate_postmortem(
+        current.ledger,
+        audit_entries=audit_entries,
+        privacy_inventory=privacy_inv,
+    )
+    markdown = generate_markdown_report(report)
+    return {"postmortem": report, "markdown": markdown}
+
+
+@router.get("/incident/postmortem/markdown", response_class=PlainTextResponse)
+async def incident_postmortem_markdown() -> PlainTextResponse:
+    """Returns downloadable / printable GFM markdown."""
+    data = await incident_postmortem()
+    return PlainTextResponse(data["markdown"], media_type="text/markdown; charset=utf-8")
+
