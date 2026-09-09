@@ -46,6 +46,9 @@ export type DataSource = "live" | "replay" | null;
 export interface BridgeJoinOptions {
   channel: string;
   role: ParticipantRole;
+  userId?: string;
+  name?: string;
+  exclusive?: boolean;
 }
 
 /**
@@ -86,6 +89,8 @@ interface IncidentStore {
   /** Selected graph entity for inspector overlay and ledger cross-filtering. */
   selectedEntityId: string | null;
   setSelectedEntityId: (id: string | null) => void;
+  currentUid: number | null;
+  currentRole: ParticipantRole | null;
 }
 
 /**
@@ -121,6 +126,8 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   const [source, setSource] = useState<DataSource>(null);
   const [agentTrack, setAgentTrack] = useState<IRemoteAudioTrack | null>(null);
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
+  const [currentUid, setCurrentUid] = useState<number | null>(null);
+  const [currentRole, setCurrentRole] = useState<ParticipantRole | null>(null);
 
   /**
    * The latest state, readable from inside `openBridge`.
@@ -261,7 +268,7 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const openBridge = useCallback(async ({ channel, role }: BridgeJoinOptions) => {
+  const openBridge = useCallback(async ({ channel, role, userId, name, exclusive }: BridgeJoinOptions) => {
     const cleanChannel = channel.trim();
     if (!cleanChannel) return;
 
@@ -454,7 +461,13 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     */
     let credentials: Awaited<ReturnType<typeof requestBridgeCredentials>>;
     try {
-      credentials = await requestBridgeCredentials(cleanChannel, role);
+      credentials = await requestBridgeCredentials(cleanChannel, role, {
+        userId,
+        name,
+        exclusive,
+      });
+      setCurrentUid(credentials.uid);
+      setCurrentRole(credentials.role);
     } catch (error) {
       const conflict = error instanceof BridgeCredentialError && error.isRoleConflict;
       const detail = error instanceof Error ? error.message : String(error);
@@ -639,6 +652,8 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     setMicOn(true);
     setSource(null);
     setSelectedEntityId(null);
+    setCurrentUid(null);
+    setCurrentRole(null);
     dispatch({ type: "BRIDGE", state: "closing" });
     timers.current.push(
       window.setTimeout(() => dispatch({ type: "RESET" }), 400),
@@ -678,8 +693,22 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       agentTrack,
       selectedEntityId,
       setSelectedEntityId,
+      currentUid,
+      currentRole,
     }),
-    [state, now, openBridge, closeBridge, micOn, toggleMic, source, agentTrack, selectedEntityId],
+    [
+      state,
+      now,
+      openBridge,
+      closeBridge,
+      micOn,
+      toggleMic,
+      source,
+      agentTrack,
+      selectedEntityId,
+      currentUid,
+      currentRole,
+    ],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

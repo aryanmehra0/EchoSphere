@@ -2,6 +2,7 @@
 
 import { Activity } from "lucide-react";
 
+import { AuthProvider } from "@/lib/auth-context";
 import { IncidentProvider } from "@/lib/incident-store";
 import { CommandBar } from "@/components/shell/CommandBar";
 import { StatusBar } from "@/components/shell/StatusBar";
@@ -38,7 +39,8 @@ import { Panel, PanelHeader } from "@/components/ui/Panel";
  */
 export function IncidentConsole() {
   return (
-    <IncidentProvider>
+    <AuthProvider>
+      <IncidentProvider>
       <div className="flex h-dvh w-full flex-col overflow-hidden bg-base">
         <CommandBar />
 
@@ -83,5 +85,6 @@ export function IncidentConsole() {
         <StatusBar />
       </div>
     </IncidentProvider>
+    </AuthProvider>
   );
 }

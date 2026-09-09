@@ -11,6 +11,7 @@ import { elapsed } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { Badge, Dot, Metric, Rule } from "@/components/ui/Signal";
 import { TensionMeter } from "@/components/ui/Meter";
+import { UserMenu } from "@/components/shell/UserMenu";
 import type { IncidentPhase } from "@/lib/types";
 
 /**
@@ -189,6 +190,10 @@ export function CommandBar() {
                   : "Standby"}
           </span>
         </div>
+
+        <Rule />
+
+        <UserMenu />
       </div>
 
       {/*

@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Mic, MicOff, PhoneOff, Radio } from "lucide-react";
+import { Mic, MicOff, PhoneOff, Radio, UserCheck } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
+import { useAuth } from "@/lib/auth-context";
 import { fetchRoster } from "@/lib/delta-socket";
 import { Button, Kbd } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
@@ -34,40 +35,34 @@ import type { ParticipantRole } from "@/lib/types";
  * exclusion.
  */
 const ROLES: readonly ParticipantRole[] = [
+  "Incident Commander",
   "DevOps Lead",
-  "Support Engineer",
+  "Site Reliability Engineer",
   "Database Admin",
+  "Support Engineer",
+  "Communications Lead",
+  "Backend Engineer",
+  "Security Engineer",
+  "Network Engineer",
+  "Observer",
 ];
 
 export function BridgeControls() {
-  const { state, openBridge, closeBridge, micOn, toggleMic } = useIncident();
+  const { state, openBridge, closeBridge, micOn, toggleMic, currentUid, currentRole } = useIncident();
+  const { user } = useAuth();
   const [channel, setChannel] = useState("inc-4417");
-  const [role, setRole] = useState<ParticipantRole>("DevOps Lead");
-  /** Roles already held on this channel, so this browser does not pick one. */
-  const [taken, setTaken] = useState<readonly ParticipantRole[]>([]);
+  const [selectedRole, setSelectedRole] = useState<ParticipantRole | null>(null);
+  const role = selectedRole ?? user.defaultRole;
+  /** Active participants map on this channel: uid -> role. */
+  const [activeRoster, setActiveRoster] = useState<Map<number, ParticipantRole>>(new Map());
 
   const idle = state.bridge === "idle";
   const connecting = state.bridge === "connecting";
 
   /*
-    ── WHY THE DROPDOWN HAS TO ASK THE ROSTER ──────────────────────────────
-    Roles are exclusive per bridge and this control defaulted to "DevOps Lead"
-    in EVERY browser, so the second and third person to open the console were
-    holding a role the first one had already taken before they touched
-    anything. Pressing J then produced a 409 from `/api/token`, and the console
-    reported it as a microphone failure.
-
-    That banner is fixed in `incident-store.tsx`, but a clear error for a
-    collision that was guaranteed is still a worse product than not colliding.
-    So the live roster is read before the join: taken roles are shown disabled
-    in the list, and a browser sitting on one falls through to a free role (see
-    `effectiveRole` below).
-
-    Cheap and same-origin, and it re-runs when the channel is edited because
-    "who is on inc-4417" says nothing about "who is on inc-9000". A failed
-    fetch returns an empty map, which leaves every role selectable — the join
-    still fails closed on the server, so the worst case is the message the
-    operator would have got anyway.
+    Multi-user roster awareness:
+    Reads who is live on the channel so the operator sees the room's composition
+    before joining. Multiple engineers can share roles (e.g. 2 DevOps Leads, 3 SREs).
   */
   useEffect(() => {
     if (!idle) return;
@@ -78,10 +73,8 @@ export function BridgeControls() {
     const timer = window.setTimeout(() => {
       void fetchRoster(target).then((roster) => {
         if (!live) return;
-        setTaken([...new Set(roster.values())]);
+        setActiveRoster(roster);
       });
-      // Debounced: this fires from a text input, and a keystroke per request
-      // would hammer the route while somebody types a channel name.
     }, 250);
 
     return () => {
@@ -90,40 +83,19 @@ export function BridgeControls() {
     };
   }, [channel, idle]);
 
-  const free = useMemo(
-    () => ROLES.filter((candidate) => !taken.includes(candidate)),
-    [taken],
-  );
-
-  /*
-    The role this browser will actually join as.
-
-    DERIVED, not synced. The obvious version was an effect that called
-    `setRole(free[0])` whenever the picked role turned out to be taken, which
-    React rejects outright — a setState in an effect body cascades a second
-    render for a value that was already knowable during the first one.
-
-    So the roster's answer is applied here instead: if the selected role is
-    taken and something else is free, this browser joins as that. The operator
-    keeps whatever they explicitly chose as long as it is available, and
-    `role` stays exactly what the dropdown shows.
-
-    Deliberately NOT a hard block on joining. If every role is taken, this
-    falls back to the selection and the server delivers the authoritative
-    refusal naming what is free — one place decides, and it is the one holding
-    the roster.
-  */
-  const effectiveRole = useMemo(
-    () => (taken.includes(role) && free.length > 0 ? free[0] : role),
-    [taken, role, free],
-  );
+  const roleCounts = useMemo(() => {
+    const counts = new Map<ParticipantRole, number>();
+    for (const r of activeRoster.values()) {
+      counts.set(r, (counts.get(r) || 0) + 1);
+    }
+    return counts;
+  }, [activeRoster]);
 
   /**
    * Keyboard transport. Operators work this console with both hands on a
    * keyboard while reading a dashboard, so the two controls that matter under
    * pressure are single keypresses. Guarded against firing while the operator
-   * is typing into a field — a rule people forget until someone drops the
-   * bridge by typing "j" into a search box.
+   * is typing into a field.
    */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -140,8 +112,16 @@ export function BridgeControls() {
       const key = e.key.toLowerCase();
       if (key === "j") {
         e.preventDefault();
-        if (idle && channel.trim()) void openBridge({ channel, role: effectiveRole });
-        else if (state.bridge === "live") closeBridge();
+        if (idle && channel.trim()) {
+          void openBridge({
+            channel,
+            role,
+            userId: user.id,
+            name: user.name,
+          });
+        } else if (state.bridge === "live") {
+          closeBridge();
+        }
       }
       if (key === "m" && state.bridge === "live") {
         e.preventDefault();
@@ -151,7 +131,7 @@ export function BridgeControls() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [idle, state.bridge, openBridge, closeBridge, toggleMic, channel, effectiveRole]);
+  }, [idle, state.bridge, openBridge, closeBridge, toggleMic, channel, role, user]);
 
   if (idle || connecting) {
     return (
@@ -169,31 +149,33 @@ export function BridgeControls() {
           <label className="sr-only" htmlFor="bridge-role">Your incident role</label>
           <select
             id="bridge-role"
-            value={effectiveRole}
-            onChange={(event) => setRole(event.target.value as ParticipantRole)}
+            value={role}
+            onChange={(event) => setSelectedRole(event.target.value as ParticipantRole)}
             disabled={connecting}
             className="h-8 rounded-sm border border-line bg-sunken px-2 text-2xs text-ink outline-none focus:border-live"
           >
-            {/*
-              A taken role stays VISIBLE and disabled rather than being removed
-              from the list. Three entries that silently become one tell the
-              operator nothing; "Support Engineer (taken)" tells them the bridge
-              already has one, which is the fact they need.
-            */}
-            {ROLES.map((candidate) => (
-              <option
-                key={candidate}
-                value={candidate}
-                disabled={taken.includes(candidate)}
-              >
-                {taken.includes(candidate) ? `${candidate} (taken)` : candidate}
-              </option>
-            ))}
+            {ROLES.map((candidate) => {
+              const count = roleCounts.get(candidate) || 0;
+              return (
+                <option key={candidate} value={candidate}>
+                  {candidate} {count > 0 ? `(${count} active)` : ""}
+                </option>
+              );
+            })}
           </select>
+        </div>
+        <div className="flex items-center justify-between px-0.5 text-[10px] text-ink-3">
+          <span className="flex items-center gap-1">
+            <UserCheck size={11} className="text-live" />
+            Joining as: <strong className="font-semibold text-ink">{user.name}</strong>
+          </span>
+          <span className="font-mono text-2xs text-ink-4">
+            {activeRoster.size} on bridge
+          </span>
         </div>
         <Button
           variant="primary"
-          onClick={() => void openBridge({ channel, role: effectiveRole })}
+          onClick={() => void openBridge({ channel, role, userId: user.id, name: user.name })}
           disabled={connecting || !channel.trim()}
           className="h-9 w-full justify-between px-3"
           icon={
@@ -210,36 +192,46 @@ export function BridgeControls() {
   }
 
   return (
-    <div className="flex gap-1.5">
-      <Button
-        variant={micOn ? "secondary" : "danger"}
-        onClick={toggleMic}
-        aria-pressed={!micOn}
-        className="h-9 flex-1 justify-between px-3"
-        icon={
-          <span className="flex items-center gap-2">
-            {micOn ? (
-              <Mic size={14} strokeWidth={2.2} />
-            ) : (
-              <MicOff size={14} strokeWidth={2.2} />
-            )}
-            <span className={cn(!micOn && "font-semibold")}>
-              {micOn ? "Microphone open" : "Muted"}
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between px-0.5 text-[11px] text-ink-3">
+        <span className="truncate">
+          Joined as <span className="font-medium text-ink">{user.name}</span> ({currentRole ?? role})
+        </span>
+        {currentUid && (
+          <span className="font-mono text-2xs text-ink-4">UID {currentUid}</span>
+        )}
+      </div>
+      <div className="flex gap-1.5">
+        <Button
+          variant={micOn ? "secondary" : "danger"}
+          onClick={toggleMic}
+          aria-pressed={!micOn}
+          className="h-9 flex-1 justify-between px-3"
+          icon={
+            <span className="flex items-center gap-2">
+              {micOn ? (
+                <Mic size={14} strokeWidth={2.2} />
+              ) : (
+                <MicOff size={14} strokeWidth={2.2} />
+              )}
+              <span className={cn(!micOn && "font-semibold")}>
+                {micOn ? "Microphone open" : "Muted"}
+              </span>
             </span>
-          </span>
-        }
-      >
-        <Kbd>M</Kbd>
-      </Button>
+          }
+        >
+          <Kbd>M</Kbd>
+        </Button>
 
-      <Button
-        variant="danger"
-        onClick={closeBridge}
-        aria-label="Leave incident bridge"
-        title="Leave incident bridge"
-        className="h-9 w-9 px-0"
-        icon={<PhoneOff size={14} strokeWidth={2.2} />}
-      />
+        <Button
+          variant="danger"
+          onClick={closeBridge}
+          aria-label="Leave incident bridge"
+          title="Leave incident bridge"
+          className="h-9 w-9 px-0"
+          icon={<PhoneOff size={14} strokeWidth={2.2} />}
+        />
+      </div>
     </div>
   );
 }

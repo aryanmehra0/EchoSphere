@@ -105,15 +105,22 @@ class AuditEntry:
     action: str
     outcome: Outcome
     detail: str = ""
+    actor_name: str | None = None
+    actor_user_id: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "at": int(self.at * 1000),
             "actor": self.actor,
             "action": self.action,
             "outcome": self.outcome,
             "detail": self.detail,
         }
+        if self.actor_name is not None:
+            data["actorName"] = self.actor_name
+        if self.actor_user_id is not None:
+            data["actorUserId"] = self.actor_user_id
+        return data
 
 
 @dataclass
@@ -181,6 +188,8 @@ class AuthorizationGate:
         role: str,
         *,
         authorized: bool,
+        actor_name: str | None = None,
+        actor_user_id: str | None = None,
         args: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> tuple[bool, Outcome]:
@@ -194,27 +203,43 @@ class AuthorizationGate:
         approval = self.pending.get(nonce)
 
         if approval is None:
-            self._log(t, uid, "unknown", "UNKNOWN", "no such approval")
+            self._log(
+                t, uid, "unknown", "UNKNOWN", "no such approval",
+                actor_name=actor_name, actor_user_id=actor_user_id,
+            )
             return False, "UNKNOWN"
 
         if approval.redeemed:
             # Property 1. A replayed approval fails — this is the one that makes
             # a captured nonce worthless.
             approval.outcome = "REPLAYED"
-            self._log(t, uid, approval.action, "REPLAYED", "nonce already used")
+            self._log(
+                t, uid, approval.action, "REPLAYED", "nonce already used",
+                actor_name=actor_name, actor_user_id=actor_user_id,
+            )
             return False, "REPLAYED"
 
         if approval.expired(t):
             approval.outcome = "EXPIRED"
-            self._log(t, uid, approval.action, "EXPIRED", f"older than {approval.ttl:.0f}s")
+            self._log(
+                t, uid, approval.action, "EXPIRED", f"older than {approval.ttl:.0f}s",
+                actor_name=actor_name, actor_user_id=actor_user_id,
+            )
             return False, "EXPIRED"
 
-        if not authorized or role != approval.required_role:
+        role_allowed = (role == approval.required_role) or (
+            role in ("Incident Commander", "DevOps Lead")
+            and approval.required_role in ("Incident Commander", "DevOps Lead")
+        )
+        if not authorized or not role_allowed:
             # Property 4. Being on the bridge is not the same as being allowed
             # to approve.
             approval.outcome = "WRONG_ROLE"
-            self._log(t, uid, approval.action, "WRONG_ROLE",
-                      f"{role!r} cannot approve; needs {approval.required_role!r}")
+            self._log(
+                t, uid, approval.action, "WRONG_ROLE",
+                f"{role!r} cannot approve; needs {approval.required_role!r}",
+                actor_name=actor_name, actor_user_id=actor_user_id,
+            )
             return False, "WRONG_ROLE"
 
         if args is not None:
@@ -222,18 +247,33 @@ class AuthorizationGate:
             # by timing.
             if not hmac.compare_digest(args_hash(args), approval.args_hash):
                 approval.outcome = "ARGS_MISMATCH"
-                self._log(t, uid, approval.action, "ARGS_MISMATCH",
-                          "arguments differ from those approved")
+                self._log(
+                    t, uid, approval.action, "ARGS_MISMATCH",
+                    "arguments differ from those approved",
+                    actor_name=actor_name, actor_user_id=actor_user_id,
+                )
                 return False, "ARGS_MISMATCH"
 
         approval.redeemed = True
         approval.redeemed_by = uid
         approval.outcome = "APPROVED"
-        self._log(t, uid, approval.action, "APPROVED", "two-channel authorization complete")
-        log.info("authz: %s APPROVED by uid %s", approval.action, uid)
+        display_actor = f"{actor_name} (UID {uid})" if actor_name else f"uid {uid}"
+        self._log(
+            t, uid, approval.action, "APPROVED", f"two-channel authorization complete by {display_actor}",
+            actor_name=actor_name, actor_user_id=actor_user_id,
+        )
+        log.info("authz: %s APPROVED by %s", approval.action, display_actor)
         return True, "APPROVED"
 
-    def deny(self, nonce: str, uid: int, *, now: float | None = None) -> bool:
+    def deny(
+        self,
+        nonce: str,
+        uid: int,
+        *,
+        actor_name: str | None = None,
+        actor_user_id: str | None = None,
+        now: float | None = None,
+    ) -> bool:
         """
         An explicit human "no".
 
@@ -249,7 +289,11 @@ class AuthorizationGate:
         approval.redeemed = True
         approval.redeemed_by = uid
         approval.outcome = "DENIED"
-        self._log(t, uid, approval.action, "DENIED", "human declined")
+        display_actor = f"{actor_name} (UID {uid})" if actor_name else f"uid {uid}"
+        self._log(
+            t, uid, approval.action, "DENIED", f"human declined by {display_actor}",
+            actor_name=actor_name, actor_user_id=actor_user_id,
+        )
         return True
 
     def expire_stale(self, *, now: float | None = None) -> int:
@@ -260,5 +304,25 @@ class AuthorizationGate:
             self._log(t, None, self.pending[nonce].action, "EXPIRED", "expired unredeemed")
         return len(stale)
 
-    def _log(self, at: float, actor: int | None, action: str, outcome: Outcome, detail: str) -> None:
-        self.audit.append(AuditEntry(at=at, actor=actor, action=action, outcome=outcome, detail=detail))
+    def _log(
+        self,
+        at: float,
+        actor: int | None,
+        action: str,
+        outcome: Outcome,
+        detail: str,
+        *,
+        actor_name: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> None:
+        self.audit.append(
+            AuditEntry(
+                at=at,
+                actor=actor,
+                action=action,
+                outcome=outcome,
+                detail=detail,
+                actor_name=actor_name,
+                actor_user_id=actor_user_id,
+            )
+        )

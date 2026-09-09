@@ -54,6 +54,7 @@ TIERS: dict[str, Tier] = {
 # Only this role may approve. An allow-list, so adding a participant type can
 # never accidentally grant authority.
 AUTHORIZED_ROLE = "DevOps Lead"
+AUTHORIZED_ROLES = {"DevOps Lead", "Incident Commander"}
 
 
 def idempotency_key(channel: str, task: str, action: str) -> str:
@@ -140,6 +141,8 @@ class ProxyActionLayer:
         role: str,
         *,
         authorized: bool,
+        actor_name: str | None = None,
+        actor_user_id: str | None = None,
         args: dict[str, Any] | None = None,
         evidence: list[str] | None = None,
         now: float | None = None,
@@ -147,7 +150,14 @@ class ProxyActionLayer:
         """A human clicked Approve in the dashboard."""
         approval = self.gate.pending.get(nonce)
         ok, outcome = self.gate.redeem(
-            nonce, uid, role, authorized=authorized, args=args, now=now,
+            nonce,
+            uid,
+            role,
+            authorized=authorized,
+            actor_name=actor_name,
+            actor_user_id=actor_user_id,
+            args=args,
+            now=now,
         )
         if not ok or approval is None:
             return ActionResult(
@@ -162,9 +172,17 @@ class ProxyActionLayer:
         self._seen[key] = result
         return result
 
-    def deny(self, nonce: str, uid: int, *, now: float | None = None) -> ActionResult:
+    def deny(
+        self,
+        nonce: str,
+        uid: int,
+        *,
+        actor_name: str | None = None,
+        actor_user_id: str | None = None,
+        now: float | None = None,
+    ) -> ActionResult:
         approval = self.gate.pending.get(nonce)
-        self.gate.deny(nonce, uid, now=now)
+        self.gate.deny(nonce, uid, actor_name=actor_name, actor_user_id=actor_user_id, now=now)
         return ActionResult(
             "DENIED", approval.action if approval else "unknown", "CRITICAL",
             "human declined; Echo acknowledges once and does not re-ask",

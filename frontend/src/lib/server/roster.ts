@@ -1,4 +1,4 @@
-import type { ParticipantRole } from "@/lib/types";
+import type { ParticipantRole, UserPermission } from "@/lib/types";
 
 /**
  * The Roster — the shared identity table both loops read (v6 §4.2, closes G3).
@@ -41,6 +41,9 @@ export interface RosterEntry {
   authorized: boolean;
   issuedAt: number;
   expiresAt: number;
+  userId?: string;
+  name?: string;
+  permissions?: UserPermission[];
 }
 
 /** Thrown when the roster write fails — callers MUST NOT issue a token. */
@@ -72,6 +75,7 @@ const HUMAN_UID_MAX = 8999;
  * approve, so adding a participant type can never accidentally grant authority.
  */
 const AUTHORIZED_ROLES: ReadonlySet<ParticipantRole> = new Set<ParticipantRole>([
+  "Incident Commander",
   "DevOps Lead",
 ]);
 

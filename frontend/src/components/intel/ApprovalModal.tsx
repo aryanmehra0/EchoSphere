@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
+import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Signal";
@@ -40,7 +41,8 @@ import { Badge } from "@/components/ui/Signal";
 const SLOW_LOOP = process.env.NEXT_PUBLIC_SLOW_LOOP_HTTP ?? "http://127.0.0.1:8000";
 
 export function ApprovalModal() {
-  const { state, dispatch } = useIncident();
+  const { state, dispatch, currentUid, currentRole } = useIncident();
+  const { user } = useAuth();
   const approval = state.approval;
 
   const [busy, setBusy] = useState(false);
@@ -73,8 +75,19 @@ export function ApprovalModal() {
   const seconds = Math.ceil(remaining / 1000);
   const urgent = seconds <= 30;
 
+  const canApprove =
+    user.permissions.includes("APPROVE_CRITICAL_ACTIONS") ||
+    currentRole === "Incident Commander" ||
+    currentRole === "DevOps Lead";
+
   async function decide(path: "redeem" | "deny") {
     if (!approval) return;
+    if (path === "redeem" && !canApprove) {
+      setError(
+        `Insufficient authority: ${user.name} (${user.defaultRole}) cannot approve CRITICAL actions. Requires Incident Commander or DevOps Lead.`,
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -83,9 +96,10 @@ export function ApprovalModal() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           nonce: approval.nonce,
-          // In S2 these come from the Roster the browser authenticated against.
-          uid: 1001,
-          role: approval.requiredRole,
+          uid: currentUid ?? 1001,
+          role: currentRole ?? user.defaultRole ?? approval.requiredRole,
+          actorName: user.name,
+          actorUserId: user.id,
           args: approval.args,
           evidence: approval.evidence?.map((c) => c.id) ?? [],
         }),
@@ -184,6 +198,12 @@ export function ApprovalModal() {
             </div>
           ) : null}
 
+          {!canApprove && (
+            <p className="mt-3 rounded-xs border border-warning/30 bg-warning/10 px-2 py-1.5 text-2xs text-warning">
+              Approval restricted: Requires Incident Commander or DevOps Lead authority. You are signed in as {user.name} ({user.defaultRole}).
+            </p>
+          )}
+
           {error ? (
             <p className="mt-3 rounded-xs border border-critical/30 bg-critical/10 px-2 py-1.5 text-2xs text-critical">
               {error}
@@ -203,7 +223,12 @@ export function ApprovalModal() {
             <Button variant="secondary" disabled={busy} onClick={() => decide("deny")}>
               Deny
             </Button>
-            <Button variant="primary" disabled={busy} onClick={() => decide("redeem")}>
+            <Button
+              variant="primary"
+              disabled={busy || !canApprove}
+              title={!canApprove ? "Requires Incident Commander or DevOps Lead authority" : undefined}
+              onClick={() => decide("redeem")}
+            >
               {busy ? "Filing…" : "Approve"}
             </Button>
           </div>

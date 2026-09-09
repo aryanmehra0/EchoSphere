@@ -20,6 +20,9 @@ export interface BridgeCredentials {
   rtmToken: string;
   uid: number;
   role: ParticipantRole;
+  userId?: string;
+  name?: string;
+  authorized?: boolean;
 }
 
 export interface AgoraBridgeEvents {
@@ -466,7 +469,11 @@ export class AgoraBridge {
     role: ParticipantRole,
   ): Promise<void> {
     try {
-      await forwardTranscriptToSlowLoop(transcript, role);
+      const isSelf = Boolean(this.credentials && transcript.uid === this.credentials.uid);
+      await forwardTranscriptToSlowLoop(transcript, role, {
+        speakerName: isSelf ? this.credentials?.name : undefined,
+        speakerUserId: isSelf ? this.credentials?.userId : undefined,
+      });
       this.forwarded += 1;
     } catch (error) {
       this.events.onError(`Transcript forwarding paused: ${message(error)}`);

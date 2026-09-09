@@ -154,6 +154,8 @@ class Claim:
     valid_until: int | None = None
     ttl_seconds: int | None = None
     lifecycle: str = "ACTIVE"
+    speaker_name: str | None = None
+    speaker_user_id: str | None = None
 
     def __post_init__(self) -> None:
         # Claim ids, so a bare string is dropped rather than wrapped.
@@ -173,6 +175,8 @@ class Claim:
             "entity": self.entity,
             "epistemicStatus": self.epistemic_status,
             "speakerRole": self.speaker_role,
+            "speakerName": self.speaker_name,
+            "speakerUserId": self.speaker_user_id,
             "confidence": self.confidence,
             "at": self.at,
             "supersedes": self.supersedes,
@@ -318,13 +322,23 @@ class TimelineEvent:
     text: str
     actor: str
     at: int = field(default_factory=now_ms)
+    actor_name: str | None = None
+    actor_user_id: str | None = None
 
     def __post_init__(self) -> None:
         # TimelinePanel renders `KIND[kind].icon`; unknown -> undefined -> throw.
         self.kind = coerce(self.kind, TIMELINE_KINDS, "signal")  # type: ignore[assignment]
 
     def to_wire(self) -> dict[str, Any]:
-        return asdict(self)
+        return _clean({
+            "id": self.id,
+            "kind": self.kind,
+            "text": self.text,
+            "actor": self.actor,
+            "at": self.at,
+            "actorName": self.actor_name,
+            "actorUserId": self.actor_user_id,
+        })
 
 
 @dataclass
@@ -337,13 +351,17 @@ class Transcript:
     text: str
     is_final: bool
     at: int = field(default_factory=now_ms)
+    speaker_name: str | None = None
+    speaker_user_id: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        return _clean({
             "messageId": self.message_id,
             "uid": self.uid,
             "role": self.role,
             "text": self.text,
             "isFinal": self.is_final,
             "at": self.at,
-        }
+            "speakerName": self.speaker_name,
+            "speakerUserId": self.speaker_user_id,
+        })

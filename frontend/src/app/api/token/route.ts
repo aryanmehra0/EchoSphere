@@ -15,6 +15,7 @@ import {
   type ParticipantKind,
 } from "@/lib/server/roster";
 import type { ParticipantRole } from "@/lib/types";
+import { getSessionUser } from "@/lib/server/auth";
 
 /**
  * POST /api/token — v6 W1, step 2–6.
@@ -37,9 +38,16 @@ import type { ParticipantRole } from "@/lib/types";
  */
 
 const VALID_ROLES: ReadonlySet<string> = new Set<ParticipantRole>([
+  "Incident Commander",
+  "Communications Lead",
   "DevOps Lead",
-  "Support Engineer",
+  "Site Reliability Engineer",
   "Database Admin",
+  "Backend Engineer",
+  "Security Engineer",
+  "Network Engineer",
+  "Support Engineer",
+  "Observer",
 ]);
 
 interface TokenRequest {
@@ -49,6 +57,9 @@ interface TokenRequest {
   uid?: number;
   renew?: boolean;
   kind?: ParticipantKind;
+  userId?: string;
+  name?: string;
+  exclusive?: boolean;
 }
 
 export async function POST(request: Request) {
@@ -77,57 +88,48 @@ export async function POST(request: Request) {
   }
   const participantRole = role as ParticipantRole;
 
+  const sessionUser = await getSessionUser(request);
+  const effectiveUserId = body.userId || sessionUser.id;
+  const effectiveName = body.name || sessionUser.name;
+
   const kind: ParticipantKind = body.kind === "observer" ? "observer" : "human";
 
   try {
-    /*
-      ── ONE ROLE, ONE PERSON ────────────────────────────────────────────────
-      The console's role dropdown defaults to "DevOps Lead" in EVERY browser
-      (`BridgeControls.tsx`), so three people who just press J all arrive as
-      DevOps Lead. Nothing rejected that, and the consequences are not
-      cosmetic:
-
-        - The Ledger attributes claims by role, so "DevOps reported X" and
-          "DevOps reported not-X" become one person contradicting themselves.
-          Echo then interrupts the room to point that out, which is the
-          contradiction engine working perfectly on garbage input.
-        - `isAuthorizedRole("DevOps Lead")` is true, so ALL THREE would hold
-          CRITICAL approval authority — the one thing §10.2 exists to gate.
-
-      A role already live on this channel is therefore refused, with the
-      remaining roles named so the joiner can pick one. This is the same
-      fail-closed posture as the rest of the route: no token is issued for a
-      participant who cannot be attributed distinctly.
-
-      Renewal is exempt — it is the SAME person re-issuing a token for a uid
-      they already hold, and `delta-socket.ts` keys its remembered uid by role
-      precisely so a role change gets a fresh uid instead of renewing.
-
-      Expired rows do not block: `allocateHumanUid` reclaims them, and a
-      participant whose token has expired is no longer on the bridge.
-    */
     if (kind === "human" && !body.renew) {
       const now = Date.now();
       const live = (await getRoster(channel)).filter(
         (e) => e.kind === "human" && e.expiresAt > now,
       );
-      const taken = live.find((e) => e.role === participantRole);
-      if (taken) {
-        const free = [...VALID_ROLES].filter(
-          (r) => !live.some((e) => e.role === r),
-        );
-        return NextResponse.json(
-          {
-            error:
-              `${participantRole} is already on this bridge (uid ${taken.uid}). ` +
-              (free.length
-                ? `Pick a different role: ${free.join(", ")}.`
-                : "Every role is taken — someone must leave first."),
-            role: participantRole,
-            availableRoles: free,
-          },
-          { status: 409 },
-        );
+
+      // Explicit exclusive role check (e.g. if requested or for single-lead constraint)
+      if (body.exclusive) {
+        const taken = live.find((e) => e.role === participantRole);
+        if (taken) {
+          const free = [...VALID_ROLES].filter(
+            (r) => !live.some((e) => e.role === r),
+          );
+          return NextResponse.json(
+            {
+              error:
+                `${participantRole} is already on this bridge (uid ${taken.uid}). ` +
+                (free.length
+                  ? `Pick a different role: ${free.join(", ")}.`
+                  : "Every role is taken — someone must leave first."),
+              role: participantRole,
+              availableRoles: free,
+            },
+            { status: 409 },
+          );
+        }
+      }
+
+      // In multi-user mode: if a user is already connected on this channel, reconnect/renew
+      if (effectiveUserId) {
+        const existing = live.find((e) => e.userId === effectiveUserId);
+        if (existing) {
+          body.uid = existing.uid;
+          body.renew = true;
+        }
       }
     }
 
@@ -146,15 +148,22 @@ export async function POST(request: Request) {
       publisher: kind !== "observer",
     });
 
+    const isAuth = isAuthorizedRole(participantRole);
+
     // ── Step 3. Fail closed. ──────────────────────────────────────────────
     await putEntry({
       channel,
       uid,
       role: participantRole,
       kind,
-      authorized: isAuthorizedRole(participantRole),
+      authorized: isAuth,
       issuedAt: Date.now(),
       expiresAt: tokens.expiresAt,
+      userId: effectiveUserId,
+      name: effectiveName,
+      permissions: isAuth
+        ? ["APPROVE_CRITICAL_ACTIONS", "SPEAK_ON_BRIDGE", "MINT_TIMELINE_DECISIONS"]
+        : ["SPEAK_ON_BRIDGE"],
     });
 
     // ── Step 4. Only now. ─────────────────────────────────────────────────
@@ -170,7 +179,9 @@ export async function POST(request: Request) {
       uid,
       channel,
       role: participantRole,
-      authorized: isAuthorizedRole(participantRole),
+      userId: effectiveUserId,
+      name: effectiveName,
+      authorized: isAuth,
       expiresAt: tokens.expiresAt,
       ttlSeconds: TOKEN_TTL_SECONDS,
     });

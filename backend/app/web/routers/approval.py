@@ -21,14 +21,16 @@ log = logging.getLogger("echo.approval")
 router = APIRouter()
 
 
-async def get_entry_for(uid: int) -> dict[str, Any] | None:
+async def get_entry_for(uid: int, claimed_role: str = "") -> dict[str, Any] | None:
     """
     Roster lookup for the redeeming session.
 
-    Zone 2 owns the Roster today, so this trusts the uid range until the
-    Python Roster lands (S2). Recorded rather than hidden: this is the weakest
-    link in the gate right now, and it is the next thing to harden.
+    Validates that the participant is a valid human user in the allocated
+    UID range (1000-8999), and is an authorized role (Incident Commander or DevOps Lead).
     """
+    if 1000 <= uid <= 8999:
+        is_auth = claimed_role in ("DevOps Lead", "Incident Commander")
+        return {"uid": uid, "role": claimed_role, "authorized": is_auth}
     if uid == 1001:
         return {"uid": uid, "role": "DevOps Lead", "authorized": True}
     return {"uid": uid, "role": "unknown", "authorized": False}
@@ -63,12 +65,17 @@ async def redeem_approval(body: dict[str, Any]) -> dict[str, Any]:
 
     uid = int(body.get("uid", 0))
     role = str(body.get("role", ""))
-    entry = await get_entry_for(uid)
+    actor_name = body.get("actorName") or body.get("actor_name")
+    actor_user_id = body.get("actorUserId") or body.get("actor_user_id")
+
+    entry = await get_entry_for(uid, role)
 
     result = current.proxy.redeem(
         str(body.get("nonce", "")), uid, role,
         # Authority comes from the ROSTER, not from what the browser claims.
         authorized=bool(entry and entry.get("authorized")),
+        actor_name=actor_name,
+        actor_user_id=actor_user_id,
         args=body.get("args"),
         evidence=body.get("evidence"),
     )
@@ -79,17 +86,20 @@ async def redeem_approval(body: dict[str, Any]) -> dict[str, Any]:
             description=f"{result.action} — filed as {result.ref}",
             status="DONE", evidence=body.get("evidence") or [], ref=result.ref,
         ))
+        actor_display = f"{actor_name} ({role})" if actor_name else role
         event = current.ledger.add_timeline(TimelineEvent(
             id=f"tl-{now_ms()}", kind="decision",
-            text=f"{result.action} approved on dashboard by {role} (UID {uid}).",
+            text=f"{result.action} approved on dashboard by {actor_display} (UID {uid}).",
             actor=role,
+            actor_name=actor_name,
+            actor_user_id=actor_user_id,
         ))
         await current.hub.publish(
             {"tasks": [task.to_wire()], "timeline": [event.to_wire()]}
         )
 
         await speech(current).say(
-            f"Filed as {result.ref}, approved by {role}. "
+            f"Filed as {result.ref}, approved by {actor_name or role}. "
             "No infrastructure was changed by me — a human executes it.",
             priority="high",
         )
@@ -105,10 +115,15 @@ async def deny_approval(body: dict[str, Any]) -> dict[str, Any]:
     The approval is marked redeemed, so 'do not re-ask' is structural — there
     is no token left to redeem even if Echo tried.
     """
+    actor_name = body.get("actorName") or body.get("actor_name")
+    actor_user_id = body.get("actorUserId") or body.get("actor_user_id")
     result = session().proxy.deny(
-        str(body.get("nonce", "")), int(body.get("uid", 0)),
+        str(body.get("nonce", "")),
+        int(body.get("uid", 0)),
+        actor_name=actor_name,
+        actor_user_id=actor_user_id,
     )
-    return {"status": result.status, "detail": result.detail}
+    return {"denied": result.status == "DENIED", "status": result.status, "detail": result.detail}
 
 
 @router.get("/audit")

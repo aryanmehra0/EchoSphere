@@ -3,7 +3,7 @@
 import type { BridgeCredentials } from "./agora-bridge";
 import type { AgoraTranscript } from "./agora-transcript";
 import type { IncidentAction } from "./incident-reducer";
-import type { ApprovalRequest, IncidentDelta, ParticipantRole, Transcript } from "./types";
+import type { ApprovalRequest, IncidentDelta, ParticipantRole, Transcript, UserProfile } from "./types";
 
 /**
  * The dashboard's half of the reconnect protocol — v6 §9.3, closing G6.
@@ -460,9 +460,16 @@ export class BridgeCredentialError extends Error {
   }
 }
 
+export interface RequestBridgeOptions {
+  userId?: string;
+  name?: string;
+  exclusive?: boolean;
+}
+
 export async function requestBridgeCredentials(
   channel: string,
   role: ParticipantRole,
+  options?: RequestBridgeOptions,
 ): Promise<BridgeCredentials> {
   /*
     ── STICKY UID PER TAB, AND WHY TRANSCRIPTS DIE WITHOUT IT ────────────────
@@ -489,17 +496,11 @@ export async function requestBridgeCredentials(
   */
   let remembered: number | null = null;
   /*
-    Keyed by ROLE as well as channel.
-
-    With only the channel in the key, switching role in the same tab renewed
-    the uid already issued for the previous role. `putEntry` then overwrote
-    that roster row, so the same person could hold two roles across a reload —
-    or, worse, keep speaking as the role they had abandoned, since the Ledger
-    attributes claims by the roster's role for that uid.
-
-    A different role is a different participant. It gets its own uid.
+    Keyed by user ID (or role fallback) as well as channel.
   */
-  const storageKey = `echo:uid:${channel}:${role}`;
+  const storageKey = options?.userId
+    ? `echo:uid:${channel}:${options.userId}`
+    : `echo:uid:${channel}:${role}`;
   try {
     const raw = sessionStorage.getItem(storageKey);
     const parsed = raw === null ? Number.NaN : Number(raw);
@@ -509,14 +510,22 @@ export async function requestBridgeCredentials(
     // the first join of a session is correct either way.
   }
 
+  const payload: Record<string, unknown> = {
+    channel,
+    role,
+  };
+  if (options?.userId) payload.userId = options.userId;
+  if (options?.name) payload.name = options.name;
+  if (options?.exclusive !== undefined) payload.exclusive = options.exclusive;
+  if (remembered !== null) {
+    payload.uid = remembered;
+    payload.renew = true;
+  }
+
   const response = await fetch("/api/token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(
-      remembered === null
-        ? { channel, role }
-        : { channel, role, uid: remembered, renew: true },
-    ),
+    body: JSON.stringify(payload),
   });
   const body = (await response.json()) as Partial<BridgeCredentials> & {
     error?: string;
@@ -568,6 +577,9 @@ export async function requestBridgeCredentials(
     rtmToken: body.rtmToken,
     uid: body.uid,
     role,
+    userId: body.userId,
+    name: body.name,
+    authorized: body.authorized,
   };
 }
 
@@ -623,11 +635,52 @@ export async function fetchRoster(
 export async function forwardTranscriptToSlowLoop(
   transcript: AgoraTranscript,
   role: ParticipantRole,
+  identity?: { speakerName?: string; speakerUserId?: string },
 ): Promise<void> {
   const response = await fetch(`${slowLoopHttpUrl()}/observer/transcript`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...transcript, role }),
+    body: JSON.stringify({
+      ...transcript,
+      role,
+      speakerName: identity?.speakerName,
+      speakerUserId: identity?.speakerUserId,
+    }),
   });
   if (!response.ok) throw new Error(`Slow Loop returned HTTP ${response.status}`);
 }
+
+/**
+ * Fetches the active enterprise session user from /api/auth/me.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function fetchSessionUser(): Promise<UserProfile | null> {
+  try {
+    const res = await fetch("/api/auth/me");
+    if (!res.ok) return null;
+    const data = (await res.json()) as { user?: UserProfile };
+    return data.user ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persists persona switch to /api/auth/me.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function persistSessionUser(userId: string): Promise<UserProfile | null> {
+  try {
+    const res = await fetch("/api/auth/me", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { user?: UserProfile };
+    return data.user ?? null;
+  } catch {
+    return null;
+  }
+}
+

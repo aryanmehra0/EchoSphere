@@ -171,6 +171,8 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
         text=redacted.text,
         is_final=bool(body.get("isFinal", True)),
         at=int(body.get("at") or now_ms()),
+        speaker_name=body.get("speakerName") or body.get("speaker_name"),
+        speaker_user_id=body.get("speakerUserId") or body.get("speaker_user_id"),
     )
 
     # Extraction batches on turn boundaries (§4.4). Only final frames enter the

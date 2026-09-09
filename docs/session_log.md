@@ -2089,6 +2089,43 @@ npm run dev       # localhost:3000
 
 ---
 
+## Session 12 — September 10, 2026: Enterprise Identity (AuthN), Multi-User Non-Conflicting Roster & RBAC Authorization Gate (AuthZ)
+
+### Context & Objective
+The initial prototype possessed two critical structural limitations:
+1. **1-User-Per-Role Bottleneck**: A hardcoded 3-role dropdown (`Incident Commander`, `DevOps Lead`, `Support Lead`) coupled with an unconditional `409 Conflict` in the token route rejected any subsequent joiner selecting an already occupied role. A war room could not host two SREs, multiple backend engineers, or multiple incident commanders.
+2. **Missing Identity, Authentication, and Granular Authorization**: The console had no user identity or authentication. The cryptographic Action Authorization Modal defaulted to hardcoded `uid: 1001` with zero human attribution (`actor_name`, `actor_user_id`), and claims/transcripts were filed under generic role labels rather than attributed to the real human engineer who spoke them.
+
+### What Was Done
+1. **Non-Conflicting Multi-User Roster & Extended Role Catalog**:
+   - Expanded the operational role catalog to 10 distinct roles (`Incident Commander`, `Communications Lead`, `DevOps Lead`, `Site Reliability Engineer`, `Database Admin`, `Backend Engineer`, `Security Engineer`, `Network Engineer`, `Support Engineer`, `Observer`).
+   - Refactored `frontend/src/lib/server/roster.ts` and `frontend/src/app/api/token/route.ts`: eliminated the unconditional 409 role collision lock, allowing multiple engineers to join simultaneously under the same operational role. Preserved optional `exclusive: true` flag for explicit single-seat reservation.
+   - Built reconnection UID caching so browser refreshes re-use the participant's existing UID rather than leaking phantom participants.
+2. **Enterprise Identity Provider (AuthN) & Persona Switcher**:
+   - Defined `DEV_PERSONAS` in `frontend/src/lib/auth-personas.ts` (Alice Chen [IC], Bob Smith [DevOps Lead], Carol Danvers [SRE], David Park [DBA], Elena Rostova [Observer]).
+   - Built session authentication middleware in `frontend/src/lib/server/auth.ts` reading `x-echo-user-id` and HTTP cookie `echo_user_id` with fallback to `DEFAULT_USER`.
+   - Created `/api/auth/me` route for session inspection and active persona switching.
+   - Built `AuthProvider` and `useAuth()` hook (`frontend/src/lib/auth-context.tsx`).
+   - Adhered strictly to v6 §10.1 blast-radius rules: client egress is strictly confined to `delta-socket.ts` (`fetchSessionUser` & `persistSessionUser`). Zero unauthorized `fetch` calls in client components.
+   - Mounted `UserMenu` persona switcher in the header console command bar (`CommandBar.tsx`).
+3. **Cryptographic Authorization Gate Hardening (AuthZ) & Audit Attribution**:
+   - Updated `ApprovalModal.tsx`: binds the active operator's dynamic RTC `uid`, `actorName`, and `actorUserId`. Dynamically validates permissions (`approve:critical`) and role authority (`Incident Commander` or `DevOps Lead`). Unauthorized users see an alert with a disabled approval trigger.
+   - Updated backend policies in `app/domain/policies/authorization.py` and `proxy.py`: `AuditEntry` records `actor_name` and `actor_user_id`. Both `Incident Commander` and `DevOps Lead` are recognized operational authorizers.
+   - Updated `app/web/routers/approval.py`: stamped `actor_name` and `actor_user_id` on redeemed approvals, emitted `TimelineEvent`, and synthesized voice announcements (e.g. `Runbook execution approved by Alice Chen (Incident Commander). Nonce INC-0001 redeemed.`).
+4. **End-to-End Speaker Attribution**:
+   - Added `speaker_name` and `speaker_user_id` to `Claim` and `Transcript` across TypeScript definitions (`frontend/src/lib/types.ts`) and Python dataclasses (`backend/app/domain/models.py`, `ledger.py`, `ingest.py`).
+   - Every claim in the Ledger is now linked to the verified human identity who uttered it.
+
+### Verification & Invariants
+- **Backend Tests**: 289/289 passing (`.venv/Scripts/python -m unittest discover -s tests -t .`), including new unit tests in `backend/tests/test_multiuser_authorization.py`.
+- **Frontend Tests**: 167/167 passing (`node --test`), including new unit tests in `frontend/tests/roster-multiuser.test.ts`.
+- **Trust Zone Boundary**: §10.2 blast radius test passed. Zero server secrets in client code, and Zone 1 egress remains strictly confined to `delta-socket.ts` and `ApprovalModal.tsx`.
+- **Build Verification**: `npm run verify` passes typecheck, ESLint (0 warnings), unit tests, and Next.js production build.
+- **Epistemic Invariant**: Echo never asserts causation, and restraint remains preserved.
+
+---
+
 > **Maintenance:** update this file at the end of any session that makes a
 > decision, hits a dead end, or discovers something the code doesn't say.
 > It is only useful if it stays honest — record the corrections too.
+

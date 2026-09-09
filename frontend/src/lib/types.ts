@@ -36,13 +36,35 @@ export type EntityKind =
 
 /**
  * Roles are assigned at token generation by the Roster Service (v6 §4.2) and
- * are the ONLY identity the analytics loop ever sees.
+ * are the functional identity the analytics loop sees.
  */
 export type ParticipantRole =
+  | "Incident Commander"
+  | "Communications Lead"
   | "DevOps Lead"
-  | "Support Engineer"
+  | "Site Reliability Engineer"
   | "Database Admin"
+  | "Backend Engineer"
+  | "Security Engineer"
+  | "Network Engineer"
+  | "Support Engineer"
+  | "Observer"
   | "Echo";
+
+export type UserPermission =
+  | "APPROVE_CRITICAL_ACTIONS"
+  | "MINT_TIMELINE_DECISIONS"
+  | "MANAGE_INCIDENT_STATE"
+  | "SPEAK_ON_BRIDGE";
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  email: string;
+  defaultRole: ParticipantRole;
+  permissions: UserPermission[];
+  avatarUrl?: string;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Epistemic layer — v6 §6                                                     */
@@ -101,6 +123,8 @@ export interface Claim {
   validUntil?: number | null;
   ttlSeconds?: number | null;
   lifecycle?: ClaimLifecycle;
+  speakerName?: string;
+  speakerUserId?: string;
 }
 
 /**
@@ -140,6 +164,7 @@ export type IncidentEntity = {
   metric?: string;
   /** Layout hint. Absent for entities the LLM discovers mid-incident. */
   position?: { x: number; y: number };
+  aliases?: string[];
 };
 
 export interface IncidentLink {
@@ -256,6 +281,8 @@ export interface TimelineEvent {
   kind: TimelineKind;
   text: string;
   actor: ParticipantRole;
+  actorName?: string;
+  actorUserId?: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -277,6 +304,8 @@ export interface Transcript {
   text: string;
   isFinal: boolean;
   at: number;
+  speakerName?: string;
+  speakerUserId?: string;
 }
 
 /**

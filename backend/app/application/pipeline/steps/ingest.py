@@ -103,6 +103,8 @@ class LedgerIngestionStep:
                 speaker_role=r["speakerRole"],
                 confidence=float(r.get("confidence", 0.8)),
                 supersedes=_supersedes(r),
+                speaker_name=r.get("speakerName"),
+                speaker_user_id=r.get("speakerUserId"),
             ),
             _claim_upsert,
         )

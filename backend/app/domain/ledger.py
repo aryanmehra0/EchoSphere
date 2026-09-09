@@ -438,6 +438,10 @@ class Ledger:
         key_map = {
             "epistemicStatus": "epistemic_status",
             "speakerRole": "speaker_role",
+            "speakerName": "speaker_name",
+            "speakerUserId": "speaker_user_id",
+            "actorName": "actor_name",
+            "actorUserId": "actor_user_id",
             "validFrom": "valid_from",
             "validUntil": "valid_until",
             "ttlSeconds": "ttl_seconds",
