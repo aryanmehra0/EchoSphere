@@ -541,12 +541,28 @@ So the failure mode is a missing line, not a false one. If you are demoing to
 an audience and want every sentence to land, wear headsets; if you are
 testing, don't bother.
 
-**Roles are now exclusive per bridge.** The dropdown defaults to DevOps Lead
-in every browser, so three people who just press `J` would all have arrived as
-DevOps Lead — Echo comparing a person to themselves, and all three holding
-CRITICAL approval authority. `/api/token` now refuses a role already live on
-the channel with a 409 naming the free ones, so the second joiner is told to
-pick a different role rather than silently corrupting attribution.
+**Roles are exclusive per bridge, and the dropdown now knows it.** Three
+people who just press `J` would all have arrived as DevOps Lead — Echo
+comparing a person to themselves, and all three holding CRITICAL approval
+authority. `/api/token` refuses a role already live on the channel with a 409
+naming the free ones.
+
+That refusal was correct and was reported to the operator as **"NO MICROPHONE
+— you can watch, but the room cannot hear you"**, which is why this looked
+like a permissions problem that only affected the second person onward. No
+microphone was involved: `requestBridgeCredentials` sat inside the same
+`try`/`catch` as the RTC join, so a role collision inherited the microphone's
+banner and sent people hunting through browser and OS input settings while the
+actual fix — "pick Support Engineer" — sat unread in the response body.
+
+Three things changed. Credentials are now obtained in their own `try`, so a
+409 says `ROLE ALREADY TAKEN — pick a different role and press J again` **and
+lists the free ones**; the console reads the roster before joining, shows
+taken roles as `(taken)` and disabled, and falls through to a free one, so the
+common collision no longer happens at all; and a genuine denied-microphone
+failure is now told apart from every other RTC failure and says
+`MICROPHONE BLOCKED — allow microphone access for this site, then press J
+again`, which is the one that IS fixed in the browser.
 
 **Leaving no longer silences the room.** `Q` used to call `/api/stop-agent`,
 which is channel-wide: the first person out stopped Echo for everyone still

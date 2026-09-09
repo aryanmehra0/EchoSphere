@@ -61,6 +61,42 @@ export interface DeltaSocket {
 
 const MAX_ATTEMPTS = 4;
 const BASE_BACKOFF_MS = 600;
+/** Ceiling for the backoff between attempts. See `scheduleRetry`. */
+const MAX_BACKOFF_MS = 1500;
+
+/**
+ * How long a WebSocket may sit in CONNECTING before we give up on it.
+ *
+ * ── WHY A TIMEOUT IS REQUIRED AND NOT DEFENSIVE ────────────────────────────
+ * A WebSocket that cannot complete its handshake does not necessarily fail.
+ * Point one at a host that accepts TCP but never upgrades - a tunnel that
+ * proxies HTTP but not `/ws/deltas`, a load balancer, a captive portal - and
+ * `onopen`, `onclose` and `onerror` ALL stay silent. The browser holds the
+ * connection open and waits.
+ *
+ * Every retry in this module hangs off `onclose`, so nothing fired: no retry,
+ * no `onUnavailable`, no scripted-replay fallback. The console sat on
+ * "Connecting to bridge" indefinitely while the RTC side was completely
+ * healthy - microphone live, Echo listening and answering out loud. Reported
+ * from a guest on a shared tunnel, and it is the most confusing failure this
+ * console can produce, because everything audible works and the screen
+ * contradicts it.
+ *
+ * The budget is for the LADDER, not one attempt.
+ * At a flat 8s per attempt the full ladder measured 49 SECONDS before the
+ * replay started - four hung handshakes plus backoff - which is far too long
+ * to leave a button claiming to connect. But the first attempt cannot be made
+ * aggressive without breaking a genuinely slow link: a real handshake over a
+ * quick tunnel measures ~1-2s, and a cold one can take longer.
+ *
+ * So the timeout tightens as confidence drops. The first attempt is patient
+ * enough for a slow-but-real connection; once one attempt has already hung,
+ * the remainder are almost certainly hung too and there is no reason to spend
+ * another eight seconds each proving it. Total ladder: ~14s.
+ */
+const CONNECT_TIMEOUT_MS = 6000;
+/** Later attempts: one hang already tells us the endpoint is not speaking. */
+const CONNECT_RETRY_TIMEOUT_MS = 2000;
 
 /** The server sends transcripts inside the delta payload; they take a different
  *  reducer path because dedup by `messageId` lives in the TRANSCRIPT case. */
@@ -78,6 +114,8 @@ export function openDeltaSocket({
   let lastSeq: number | null = null;
   let attempts = 0;
   let closedByCaller = false;
+  /** Fires if the handshake never resolves. Cleared by open, close or retry. */
+  let connectTimer: number | null = null;
   let retryTimer: number | null = null;
 
   const status = (s: SocketStatus) => onStatus?.(s);
@@ -115,7 +153,37 @@ export function openDeltaSocket({
       return;
     }
 
+    /*
+      A handshake that never resolves is a failure, and the browser will not
+      tell us. Abandon the socket ourselves so the retry ladder - and
+      ultimately `onUnavailable` and the scripted replay - still runs.
+
+      `close()` on a CONNECTING socket fires `onclose`, which is what schedules
+      the retry, so this timer deliberately does not call `scheduleRetry`
+      itself. The pending socket is detached first so its late `onclose`
+      cannot retry a second time.
+    */
+    const pending = ws;
+    const budget = attempts === 0 ? CONNECT_TIMEOUT_MS : CONNECT_RETRY_TIMEOUT_MS;
+    connectTimer = window.setTimeout(() => {
+      connectTimer = null;
+      if (closedByCaller) return;
+      if (pending.readyState !== WebSocket.CONNECTING) return;
+      console.warn(
+        `[deltas] no handshake from ${url} in ${budget}ms — treating as unreachable`,
+      );
+      // Silence the dead socket, then advance the ladder exactly once.
+      pending.onopen = null;
+      pending.onclose = null;
+      pending.onerror = null;
+      pending.onmessage = null;
+      try { pending.close(); } catch { /* already dying */ }
+      if (ws === pending) ws = null;
+      scheduleRetry();
+    }, budget);
+
     ws.onopen = () => {
+      clearConnectTimer();
       attempts = 0;
       status("live");
       // Announce what we already have. `null` asks for a full snapshot.
@@ -174,6 +242,7 @@ export function openDeltaSocket({
     };
 
     ws.onclose = () => {
+      clearConnectTimer();
       if (closedByCaller) return;
       scheduleRetry();
     };
@@ -184,7 +253,15 @@ export function openDeltaSocket({
     };
   }
 
+  function clearConnectTimer() {
+    if (connectTimer !== null) {
+      window.clearTimeout(connectTimer);
+      connectTimer = null;
+    }
+  }
+
   function scheduleRetry() {
+    clearConnectTimer();
     attempts += 1;
 
     if (attempts > MAX_ATTEMPTS) {
@@ -194,7 +271,17 @@ export function openDeltaSocket({
     }
 
     status("reconnecting");
-    const delay = BASE_BACKOFF_MS * 2 ** (attempts - 1);
+    /*
+      Capped. Uncapped exponential backoff (600/1200/2400/4800ms) put the
+      last retry 4.8s after the one before it, and with four attempts that
+      backoff alone was most of the wait before the replay took over.
+
+      A cap keeps the early retries cheap - which is what backoff is FOR,
+      giving a briefly-flapping socket room to recover - without letting the
+      tail dominate. The dashboard is blank until this ladder finishes, so
+      every second here is a second of nothing on screen.
+    */
+    const delay = Math.min(BASE_BACKOFF_MS * 2 ** (attempts - 1), MAX_BACKOFF_MS);
     retryTimer = window.setTimeout(connect, delay);
   }
 
@@ -204,6 +291,9 @@ export function openDeltaSocket({
     close() {
       closedByCaller = true;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
+      // Otherwise a socket still mid-handshake keeps its timer, which fires
+      // after the caller has gone and schedules a retry for a closed socket.
+      clearConnectTimer();
       ws?.close();
       ws = null;
       status("idle");
@@ -335,6 +425,41 @@ export async function stopAgent(channel: string, uid?: number): Promise<void> {
   }
 }
 
+/**
+ * A participant could not be ISSUED an identity — distinct from a participant
+ * whose microphone or RTC join failed.
+ *
+ * Keeping the two apart is the whole point. Both used to arrive at the same
+ * catch and print the same "NO MICROPHONE" banner, and they call for opposite
+ * responses from the person reading it: a 409 means pick another role and press
+ * J again (nothing is wrong with your hardware), while a genuine mic failure
+ * means check the browser's permission prompt.
+ */
+export class BridgeCredentialError extends Error {
+  /*
+    Plain fields and explicit assignment, NOT constructor parameter
+    properties. The test suite runs these modules under bare `node --test`,
+    whose type-stripping loader rejects `constructor(readonly x: T)` outright
+    with ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX — so the shorthand would make this
+    module, and anything importing it, untestable outside the bundler.
+  */
+  readonly status: number;
+  /** Roles still free on this channel, when the server named them (409). */
+  readonly availableRoles: ParticipantRole[];
+
+  constructor(message: string, status: number, availableRoles: ParticipantRole[]) {
+    super(message);
+    this.name = "BridgeCredentialError";
+    this.status = status;
+    this.availableRoles = availableRoles;
+  }
+
+  /** A role already live on this bridge — the second joiner's default case. */
+  get isRoleConflict(): boolean {
+    return this.status === 409;
+  }
+}
+
 export async function requestBridgeCredentials(
   channel: string,
   role: ParticipantRole,
@@ -393,10 +518,40 @@ export async function requestBridgeCredentials(
         : { channel, role, uid: remembered, renew: true },
     ),
   });
-  const body = (await response.json()) as Partial<BridgeCredentials> & { error?: string };
-  if (!response.ok) throw new Error(body.error ?? `Token request failed (${response.status})`);
+  const body = (await response.json()) as Partial<BridgeCredentials> & {
+    error?: string;
+    availableRoles?: ParticipantRole[];
+  };
+  if (!response.ok) {
+    /*
+      ── THIS IS NOT A MICROPHONE FAILURE, AND IT USED TO LOOK LIKE ONE ──────
+      `/api/token` refuses a role already live on the channel with a 409, which
+      is the FIRST thing the second and third person to press J hit, because
+      the role dropdown defaults to "DevOps Lead" in every browser.
+
+      That refusal is correct. What was wrong is where it landed: the caller
+      wraps this request in the same try/catch as the RTC join, so a 409 —
+      along with a 503 for missing env and a 502 for a roster write — raised
+      "NO MICROPHONE - you can watch, but the room cannot hear you".
+
+      So the whole room was told their microphone was denied when no mic had
+      been touched: nobody had reached `createMicrophoneAudioTrack` yet. People
+      then went hunting through browser permissions and OS input settings for a
+      fault that was a role collision on the server, and the one piece of
+      information that would have ended it in a second - "pick a different
+      role, these are free" - was already in the response body and thrown away.
+
+      A distinct error type carries it out intact so the caller can say what
+      actually happened. See `openBridge` in `incident-store.tsx`.
+    */
+    throw new BridgeCredentialError(
+      body.error ?? `Token request failed (${response.status})`,
+      response.status,
+      body.availableRoles ?? [],
+    );
+  }
   if (!body.appId || !body.rtcToken || !body.rtmToken || !body.uid) {
-    throw new Error("Token response was incomplete");
+    throw new BridgeCredentialError("Token response was incomplete", response.status, []);
   }
   // Remember it for the next reload, so the agent's one subscribed uid keeps
   // pointing at this tab.

@@ -212,23 +212,195 @@ function Resolve-Cloudflared {
     return $null
 }
 
+# The hostname pattern, and the one host it must NEVER match.
+#
+# ── api.trycloudflare.com IS NOT A TUNNEL ───────────────────────────────────
+#
+# `https://[a-z0-9-]+\.trycloudflare\.com` looks like it matches only a quick
+# tunnel hostname. It also matches Cloudflare's own API endpoint, which
+# cloudflared prints when the request for a tunnel FAILS:
+#
+#     failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel":
+#     context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+#
+# So the scan found a URL in the failure message, and every caller treated a
+# match as success. Measured on this machine: a timed-out tunnel produced
+# `https://api.trycloudflare.com`, which was reported as "tunnel live" and
+# written into .env.local as AGENT_TOOL_BASE_URL and NEXT_PUBLIC_SLOW_LOOP_WS.
+#
+# Nothing downstream can recover from that. Agora POSTs its tool calls to a
+# host that is not us, guests open a WebSocket to it and hang, and the console
+# reports the Slow Loop as unreachable - so the visible symptom is "the tunnel
+# is not working" everywhere EXCEPT the line that announced it working.
+#
+# A wrong URL announced as correct is strictly worse than no tunnel: without
+# one the script exits 1 and says so.
+$script:TunnelHostPattern = "https://[a-z0-9][a-z0-9-]*\.trycloudflare\.com"
+$script:TunnelApiHost     = "api.trycloudflare.com"
+
+# cloudflared's own words for "this did not work". Checked so a failure is
+# reported as a failure in the second it happens, rather than after the full
+# 45-second wait with nothing to explain it.
+$script:TunnelFailPattern = "failed to request quick Tunnel|context deadline exceeded|ERR .*Cannot determine default origin"
+
+# ── THE ONES WORTH TRYING AGAIN, AND WHY THIS IS NOT JUST OPTIMISM ─────────
+#
+# Measured on this connection, five consecutive POSTs to the quick-tunnel API
+# (the request cloudflared makes to get a hostname):
+#
+#     17.4s   5.4s   5.8s   5.5s   6.2s      all HTTP 200
+#
+# cloudflared gives that request roughly 15 seconds, so the normal ~6s case
+# succeeds and an occasional slow one blows the deadline and reports
+#
+#     failed to request quick Tunnel: ... context deadline exceeded
+#
+# Nothing is misconfigured when that happens - port 7844 is open both over
+# IPv4 and IPv6, DNS resolves, and the very next attempt usually works. It is
+# a slow link straddling somebody else's timeout.
+#
+# One attempt therefore makes a coin-flip out of `-Tunnel`, and the cost of
+# losing is the whole run: the script exits 1 before either service starts.
+# A timeout is retried instead.
+#
+# NOT everything is retried. A missing origin or a bad flag fails identically
+# every time, so retrying it just multiplies the wait before the same message.
+$script:TunnelRetryPattern = "context deadline exceeded|Client\.Timeout|i/o timeout|connection reset|EOF"
+
+# Pull a real tunnel hostname out of whatever cloudflared has written so far.
+# Returns $null when the only match is the API endpoint.
+function Find-TunnelUrl($paths) {
+    foreach ($path in $paths) {
+        if (-not $path -or -not (Test-Path $path)) { continue }
+        # ALL matches, not the first: the API host and the real hostname can
+        # both be present, and -First would take whichever came earlier.
+        $found = Select-String -Path $path -Pattern $script:TunnelHostPattern `
+                 -AllMatches -ErrorAction SilentlyContinue
+        foreach ($line in $found) {
+            foreach ($match in $line.Matches) {
+                if ($match.Value -notlike "*$script:TunnelApiHost*") { return $match.Value }
+            }
+        }
+    }
+    return $null
+}
+
+# Did cloudflared say outright that it failed?
+function Test-TunnelFailed($paths) {
+    foreach ($path in $paths) {
+        if (-not $path -or -not (Test-Path $path)) { continue }
+        $hit = Select-String -Path $path -Pattern $script:TunnelFailPattern `
+               -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hit) { return $hit.Line.Trim() }
+    }
+    return $null
+}
+
 # Open a quick tunnel and return its public URL, or $null.
 #
-# Each tunnel gets its OWN log file, and the URL is read from that file only -
-# a shared or reused log means reading the PREVIOUS run's hostname and
-# announcing a dead URL as live.
-function Start-QuickTunnel($exe, $target, $tag) {
-    $log = Join-Path $env:TEMP ("echosphere-$tag-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
-    Start-Process -FilePath $exe `
-        -ArgumentList "tunnel", "--url", $target, "--logfile", $log `
-        -WindowStyle Hidden
+# ── WHERE THE URL ACTUALLY APPEARS ─────────────────────────────────────────
+#
+# This used to pass `--logfile` and grep only that file. Verified against
+# cloudflared 2026.8.3 on this machine, all three destinations at once:
+#
+#     stdout    0 bytes          <- nothing, ever
+#     stderr    the banner       <- the hostname is here
+#     --logfile the banner       <- and here
+#
+# stdout being EMPTY is the part that matters, because the Slow Loop tunnel
+# below watches stdout and a comment there claims the banner is printed to it.
+# Whichever single stream a caller picked, it could be the wrong one - and the
+# streams have moved between cloudflared versions, which is why this now
+# writes to all three and searches all three rather than betting on one.
+#
+# Each run gets its OWN files. A reused log means reading the PREVIOUS run's
+# hostname and announcing a dead URL as live - the same class of failure as
+# the API-host match above, by a slower route.
+# ONE attempt. Returns a hostname string on success, or $null - and sets
+# $script:LastTunnelError to cloudflared's own words so the caller can decide
+# whether trying again is worth anything.
+function Start-QuickTunnelOnce($exe, $target, $tag) {
+    $script:LastTunnelError = $null
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $log = Join-Path $env:TEMP "echosphere-$tag-$stamp.log"
+    $out = "$log.out"
+    $err = "$log.err"
+
+    # `-PassThru` so a failed attempt can be cleaned up by PID. Killing every
+    # cloudflared instead would take down the Slow Loop tunnel that `-Share`
+    # has ALREADY opened and still depends on.
+    $proc = Start-Process -FilePath $exe `
+        -ArgumentList "tunnel", "--url", $target, "--no-autoupdate", "--logfile", $log `
+        -RedirectStandardOutput $out `
+        -RedirectStandardError $err `
+        -WindowStyle Hidden `
+        -PassThru
+    $script:LastTunnelPid = $proc.Id
+
+    $paths = @($log, $out, $err)
     foreach ($i in 1..45) {
         Start-Sleep -Milliseconds 1000
-        if (Test-Path $log) {
-            $m = Select-String -Path $log -Pattern "https://[a-z0-9-]+\.trycloudflare\.com" `
-                 -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($m) { return $m.Matches[0].Value }
+
+        $url = Find-TunnelUrl $paths
+        if ($url) { return $url }
+
+        # Fail fast and say why. Waiting the remaining 40 seconds to print
+        # "did not come up" hides a reason cloudflared already gave us.
+        $failure = Test-TunnelFailed $paths
+        if ($failure) {
+            $script:LastTunnelError = $failure
+            return $null
         }
+    }
+    $script:LastTunnelError = "no tunnel hostname after 45s (log: $err)"
+    return $null
+}
+
+# Open a quick tunnel, retrying the failures that are worth retrying.
+#
+# The retry budget is small on purpose. Three attempts covers the measured
+# timeout rate (roughly one slow POST in five) without turning a genuinely
+# broken environment into a two-minute wait before the same error - and each
+# attempt already carries its own 45-second ceiling.
+function Start-QuickTunnel($exe, $target, $tag) {
+    $attempts = 3
+    foreach ($attempt in 1..$attempts) {
+        $url = Start-QuickTunnelOnce $exe $target $tag
+        if ($url) {
+            if ($attempt -gt 1) { Write-Note "tunnel came up on attempt $attempt" }
+            return $url
+        }
+
+        $why = $script:LastTunnelError
+        if ($why) { Write-Note "cloudflared: $why" }
+
+        # Whether we stop here or try again, the process that just failed must
+        # not be left running: a cloudflared that never produced a hostname is
+        # useless, and one still holding a half-open connection makes the NEXT
+        # run's diagnosis harder.
+        $failedPid = $script:LastTunnelPid
+
+        if ($attempt -eq $attempts) {
+            if ($failedPid) { Stop-Process -Id $failedPid -Force -ErrorAction SilentlyContinue }
+            break
+        }
+
+        # Only transient faults get another go.
+        if ($why -notmatch $script:TunnelRetryPattern) {
+            Write-Note "not a timeout - retrying would fail the same way"
+            if ($failedPid) { Stop-Process -Id $failedPid -Force -ErrorAction SilentlyContinue }
+            break
+        }
+
+        # Stop THIS attempt's process only, by PID. A blanket
+        # `Get-Process cloudflared | Stop-Process` would also kill the Slow
+        # Loop tunnel opened earlier in the run, so `-Share` would retry its
+        # console tunnel and silently take the backend's tunnel down with it.
+        if ($script:LastTunnelPid) {
+            Stop-Process -Id $script:LastTunnelPid -Force -ErrorAction SilentlyContinue
+        }
+        Write-Note "that was a timeout, not a misconfiguration - retrying ($($attempt + 1)/$attempts)"
+        Start-Sleep -Seconds 3
     }
     return $null
 }
@@ -363,58 +535,38 @@ if ($Tunnel) {
     Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 500
 
-    # A fresh log per run, so a stale URL cannot be read even if an old file
-    # survives. Cheaper and more certain than deleting and hoping.
-    $tlog = Join-Path $env:TEMP ("echosphere-cloudflared-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
-
-    # Tidy up previous runs, best-effort. A log we cannot delete is harmless
-    # now that the filename is unique, so this must never be fatal.
-    Get-ChildItem -Path $env:TEMP -Filter "echosphere-cloudflared*.log" -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -ne $tlog } |
+    # Tidy up previous runs, best-effort. `Start-QuickTunnel` timestamps its
+    # own files, so a log we cannot delete is harmless and this must never be
+    # fatal.
+    #
+    # The filter is `echosphere-*` and not `echosphere-cloudflared*.log`,
+    # which missed two things: the `-console` logs that `-Share` writes, and
+    # the `.out`/`.err` files alongside every log - so the directory grew a
+    # pair of orphans per run forever.
+    Get-ChildItem -Path $env:TEMP -Filter "echosphere-*" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^echosphere-(cloudflared|console)-" } |
         ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
 
-    # ── CAPTURE stdout, NOT --logfile ──────────────────────────────────────
+    # ── ONE IMPLEMENTATION, NOT TWO ────────────────────────────────────────
     #
-    # This used to pass `--logfile $tlog` and then grep that file for the
-    # URL. cloudflared does not put it there: the quick-tunnel hostname is
-    # printed to STDOUT inside a banner, while --logfile receives the
-    # structured JSON log. So the log ended at
+    # This block had its own copy of "start cloudflared and scan for the URL",
+    # and `-Share` had another in `Start-QuickTunnel`. They disagreed about
+    # the one thing that matters - which stream to read - so a fix applied to
+    # the copy in front of you left the other one broken. The console tunnel
+    # was still passing `--logfile` alone months after this block stopped.
     #
-    #     "Requesting new quick Tunnel on trycloudflare.com..."
+    # Both now call the same helper, which writes all three destinations and
+    # searches all three. The measurements behind that live above it.
     #
-    # and the URL never appeared in the file being watched. The loop below
-    # then timed out and reported "the tunnel did not come up" — four times in
-    # a row — while cloudflared was working perfectly. Measured directly: the
-    # tunnel was live in SEVEN SECONDS.
-    #
-    # A failure that blames a healthy dependency is worse than a crash: it
-    # sends you to Cloudflare's status page instead of to this line.
-    #
-    # `-RedirectStandardOutput` gives us the banner, and stderr goes alongside
-    # it so a genuine failure is still visible in the same file.
-    Start-Process -FilePath $cf.Source `
-        -ArgumentList "tunnel", "--url", "http://localhost:8000", "--no-autoupdate" `
-        -RedirectStandardOutput $tlog `
-        -RedirectStandardError "$tlog.err" `
-        -WindowStyle Hidden
-
-    # BOTH streams are searched. cloudflared has moved this banner between
-    # stdout and stderr across versions, and watching only one is exactly the
-    # bug above wearing a different hat.
-    foreach ($i in 1..45) {
-        Start-Sleep -Milliseconds 1000
-        foreach ($candidate in @($tlog, "$tlog.err")) {
-            if (-not (Test-Path $candidate)) { continue }
-            $m = Select-String -Path $candidate -Pattern "https://[a-z0-9-]+\.trycloudflare\.com" `
-                 -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($m) { $tunnelUrl = $m.Matches[0].Value; break }
-        }
-        if ($tunnelUrl) { break }
-    }
+    # An earlier comment here asserted the hostname is "printed to STDOUT".
+    # It is not, on cloudflared 2026.8.3: stdout is EMPTY and the banner goes
+    # to stderr and --logfile. The claim was wrong in a way that happened to
+    # work, because this block searched stderr too.
+    $tunnelUrl = Start-QuickTunnel $cf.Source "http://localhost:8000" "cloudflared"
 
     if (-not $tunnelUrl) {
         Write-Bad "the tunnel did not come up"
-        Write-Note "log: $tlog"
+        Write-Note "run without -Tunnel to start anyway; Echo will talk but cannot read the Ledger."
         exit 1
     }
     Write-Ok "tunnel live  $tunnelUrl"
@@ -576,6 +728,26 @@ $tunnelLive = $false
 if ($configuredTunnel) {
     try {
         $probe = Invoke-RestMethod "$configuredTunnel/health" -TimeoutSec 20
+
+        # ── "IT ANSWERED" IS NOT "IT IS OURS" ──────────────────────────────
+        # A response only proves SOMETHING is at that hostname. When a bad URL
+        # got written here - `https://api.trycloudflare.com`, Cloudflare's own
+        # API endpoint, which the URL scan used to match out of cloudflared's
+        # failure message - this probe reached a live host that is not us. It
+        # returned a plain string, so `$probe.ready` was empty, and that took
+        # the "routes but not ready" branch: a URL pointing at Cloudflare was
+        # reported as OUR tunnel having a slow start, and the clearing code in
+        # the catch below never ran. So the dead URL survived in .env.local and
+        # poisoned every later run, which is why this presented as "the tunnel
+        # is not working" long after the tunnel itself.
+        #
+        # The Slow Loop's /health returns a JSON OBJECT. Anything that is not
+        # one is somebody else's endpoint, and it is treated as a dead tunnel
+        # so it gets CLEARED rather than kept.
+        if ($probe -is [string] -or $null -eq $probe.PSObject.Properties['ready']) {
+            throw "not the Slow Loop: /health did not return a ready flag"
+        }
+
         if ($probe.ready) {
             $tunnelLive = $true
             Write-Ok "Agora can reach the Ledger through the tunnel"
@@ -653,20 +825,56 @@ if ($Share) {
 
         # Let the guest's browser reach the Slow Loop, then restart it so the
         # new origin is actually loaded.
-        $origins = Get-EnvKey "CORS_ORIGINS"
-        if ([string]::IsNullOrWhiteSpace($origins)) { $origins = $shareUrl }
-        elseif ($origins -notlike "*$shareUrl*") { $origins = "$origins,$shareUrl" }
+        #
+        # ── ONLY THIS RUN'S ORIGIN, NOT EVERY RUN'S ────────────────────────
+        # This used to append the new share URL to whatever was already there
+        # and never remove anything. A quick tunnel gets a new random hostname
+        # every run, so the list grew by one dead origin per `-Share` - found
+        # at TWENTY-EIGHT entries on this machine, twenty-seven of which point
+        # at tunnels that no longer exist.
+        #
+        # Nothing is gained by keeping them: an origin is only useful while its
+        # tunnel is up, and a stale one cannot be distinguished from a live one
+        # without probing all of them. Keeping the list to the origins that can
+        # actually be serving right now also keeps the allow-list honest - this
+        # is the header that decides whose browser may POST to the Ledger.
+        $origins = $shareUrl
         Set-EnvKey "CORS_ORIGINS" $origins
 
         Stop-OurServiceOnPort 8000 | Out-Null
         Start-Process -FilePath $python `
             -ArgumentList "-m", "uvicorn", "app.main:app", "--port", "8000" `
             -WorkingDirectory $backend -WindowStyle Hidden
+
+        # ── AND CHECK THAT IT CAME BACK ────────────────────────────────────
+        # The wait loop `break`s on success and simply falls through on
+        # failure, so "guests may now reach the Ledger" was printed
+        # unconditionally - including when the restart never bound.
+        #
+        # That is not hypothetical. A uvicorn started outside this repo (from
+        # a global Python, so `Stop-OurServiceOnPort` correctly refuses to
+        # kill it) holds :8000; the venv copy launched here then exits
+        # immediately on the port conflict, and the script reported success
+        # over a backend that was not running. The guest gets a console that
+        # loads and a Ledger that never answers.
+        $backendUp = $false
         foreach ($i in 1..40) {
             Start-Sleep -Milliseconds 800
-            try { Invoke-RestMethod "http://127.0.0.1:8000/health" -TimeoutSec 4 | Out-Null; break } catch { }
+            try {
+                Invoke-RestMethod "http://127.0.0.1:8000/health" -TimeoutSec 4 | Out-Null
+                $backendUp = $true
+                break
+            } catch { }
         }
-        Write-Ok "guests may now reach the Ledger"
+
+        if ($backendUp) {
+            Write-Ok "guests may now reach the Ledger"
+        } else {
+            Write-Bad "the Slow Loop did not come back after adding the guest origin"
+            Write-Note "something outside this repo is probably holding :8000 - check with:"
+            Write-Note "  Get-NetTCPConnection -LocalPort 8000 -State Listen"
+            Write-Note "guests can load the console, but the Ledger will not answer them"
+        }
     }
 }
 

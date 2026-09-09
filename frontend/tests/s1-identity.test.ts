@@ -15,6 +15,10 @@ import {
   __resetRoster,
 } from "../src/lib/server/roster.ts";
 import {
+  BridgeCredentialError,
+  requestBridgeCredentials,
+} from "../src/lib/delta-socket.ts";
+import {
   AGENT_TOOLS,
   CRITICAL_TOOLS,
   FAST_LOOP_MODEL,
@@ -777,5 +781,148 @@ describe("three people on one bridge", () => {
 
     const out = await releaseEntry("inc-3p-exp", 1001);
     assert.equal(out.humansRemaining, 0, "an expired row was counted as a live participant");
+  });
+});
+
+/* ========================================================================== */
+describe("a second joiner is refused a ROLE, not a microphone", () => {
+  /* ======================================================================== */
+  /*
+    ── THE BUG THIS PINS DOWN ────────────────────────────────────────────────
+    The console worked for one person and failed for everyone after them with
+    "NO MICROPHONE — you can watch, but the room cannot hear you". No
+    microphone was involved. The role dropdown defaults to "DevOps Lead" in
+    every browser and roles are exclusive per bridge, so person two was
+    refused a TOKEN with a 409 — and `requestBridgeCredentials` sat inside the
+    same try/catch as the RTC join, so the credential failure inherited the
+    microphone's banner.
+
+    The cost of that mislabelling is that it points at the wrong machine
+    entirely: people re-checked browser permissions and OS input devices for a
+    fault that lived in the roster, while the fix ("pick Support Engineer") was
+    already sitting in a response body nobody read.
+
+    So the contract is: a non-2xx from /api/token throws a distinguishable
+    error carrying the status and the free roles. Anything that cannot tell a
+    409 from a dead mic will fail here.
+  */
+
+  const realFetch = globalThis.fetch;
+
+  /** Stand in for /api/token returning `status` with `body`. */
+  function stubToken(status: number, body: unknown): void {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof globalThis.fetch;
+  }
+
+  /*
+    `requestBridgeCredentials` remembers its uid in sessionStorage and asks
+    for that one back with `renew: true`. This Node build PROVIDES a working
+    sessionStorage (it is not a browser-only global any more), so a uid
+    remembered by one test would leak into the next and change the request
+    body under it.
+
+    Cleared before each test so every case starts as a first join. The storage
+    behaviour itself belongs to the sticky-uid contract, not to this suite.
+  */
+  beforeEach(() => {
+    try {
+      globalThis.sessionStorage?.clear();
+    } catch {
+      // No storage in this runtime is the other valid state: the function
+      // treats it as "nothing remembered", which is what these tests want.
+    }
+  });
+
+  test("a 409 role conflict is a credential error, and names the free roles", async () => {
+    stubToken(409, {
+      error: "DevOps Lead is already on this bridge (uid 1001).",
+      role: "DevOps Lead",
+      availableRoles: ["Support Engineer", "Database Admin"],
+    });
+
+    try {
+      await requestBridgeCredentials("inc-4417", "DevOps Lead");
+      assert.fail("a 409 must not resolve as usable credentials");
+    } catch (error) {
+      assert.ok(
+        error instanceof BridgeCredentialError,
+        "a role conflict must be distinguishable from an RTC/mic failure",
+      );
+      assert.equal(error.status, 409);
+      assert.ok(error.isRoleConflict, "409 is the role-conflict status");
+      // This is what puts the fix on screen instead of in a DevTools tab.
+      assert.deepEqual(error.availableRoles, ["Support Engineer", "Database Admin"]);
+      // And the server's own sentence survives, uid included.
+      assert.match(error.message, /already on this bridge/);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("other refusals are credential errors too, but NOT role conflicts", async () => {
+    // A missing .env.local (503) and a failed roster write (502) both used to
+    // print "NO MICROPHONE" as well. They are not conflicts, so they must not
+    // tell the operator to pick another role — there is nothing to pick.
+    for (const status of [502, 503]) {
+      stubToken(status, { error: "Roster write failed" });
+      try {
+        await requestBridgeCredentials("inc-4417", "DevOps Lead");
+        assert.fail(`a ${status} must not resolve as usable credentials`);
+      } catch (error) {
+        assert.ok(error instanceof BridgeCredentialError);
+        assert.equal(error.status, status);
+        assert.equal(
+          error.isRoleConflict,
+          false,
+          `${status} is not a role conflict and must not be offered as one`,
+        );
+        assert.deepEqual(error.availableRoles, [], "no roles were named");
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    }
+  });
+
+  test("a 200 that is missing a token is refused rather than half-joined", async () => {
+    // Joining with an incomplete credential set puts an unattributable
+    // participant on the channel, which is the one thing /api/token's
+    // write-before-token ordering exists to prevent.
+    stubToken(200, { appId: "abc", uid: 1001 });
+    try {
+      await requestBridgeCredentials("inc-4417", "Support Engineer");
+      assert.fail("an incomplete token response must not be used");
+    } catch (error) {
+      assert.ok(error instanceof BridgeCredentialError);
+      assert.match(error.message, /incomplete/i);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("a good response returns the credentials with the caller's role", async () => {
+    stubToken(200, {
+      appId: "abc",
+      rtcToken: "rtc",
+      rtmToken: "rtm",
+      uid: 1002,
+      role: "Support Engineer",
+    });
+    try {
+      const credentials = await requestBridgeCredentials("inc-4417", "Support Engineer");
+      assert.equal(credentials.uid, 1002);
+      assert.equal(
+        credentials.role,
+        "Support Engineer",
+        "the second participant must join as their OWN role",
+      );
+      assert.equal(credentials.rtcToken, "rtc");
+      assert.equal(credentials.rtmToken, "rtm");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });
