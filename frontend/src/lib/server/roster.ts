@@ -41,6 +41,29 @@ export interface RosterEntry {
   authorized: boolean;
   issuedAt: number;
   expiresAt: number;
+  /**
+   * When this participant last proved it is still on the bridge.
+   *
+   * ── WHY `issuedAt` COULD NOT ANSWER THIS ────────────────────────────────
+   * Nothing refreshes a human's row: `touchExpiry` is called only for the
+   * agent. So `issuedAt` says when somebody joined and NOTHING about whether
+   * they are still here, and a row lives for the full token TTL (one hour)
+   * unless an orderly leave releases it.
+   *
+   * A refresh, a closed tab or a crashed browser therefore left a GHOST
+   * holding a role for an hour. Reported live: one person on the bridge,
+   * every role showing as taken, and the second joiner unable to select any
+   * role at all.
+   *
+   * The console heartbeats this while it is joined, so "last seen" separates
+   * a live participant from an abandoned row - which is what lets
+   * `/api/token` reclaim one without ever evicting somebody who is actually
+   * talking.
+   *
+   * Optional: rows written before this existed have none, and the readers
+   * fall back to `issuedAt` so an old row is takeable rather than stuck.
+   */
+  lastSeen?: number;
 }
 
 /** Thrown when the roster write fails — callers MUST NOT issue a token. */
@@ -240,6 +263,25 @@ export async function getObserverView(channel: string): Promise<{
   }
 
   return { roles, exclude };
+}
+
+/**
+ * Mark a participant as still present. Returns false when the row is gone.
+ *
+ * Separate from `touchExpiry` on purpose: that extends a row's LIFETIME after
+ * a token renewal, which is a credential concern. This records PRESENCE, and
+ * is what `/api/token` reads to tell a live holder from an abandoned one
+ * without touching how long the token is valid for.
+ */
+export async function touchSeen(
+  channel: string,
+  uid: number,
+  at: number = Date.now(),
+): Promise<boolean> {
+  const entry = channelMap(channel).get(uid);
+  if (!entry) return false;
+  channelMap(channel).set(uid, { ...entry, lastSeen: at });
+  return true;
 }
 
 /** Extend an entry's lifetime after a token renewal (v6 W7). */

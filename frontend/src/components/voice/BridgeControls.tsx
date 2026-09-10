@@ -46,6 +46,19 @@ export function BridgeControls() {
   /** Roles already held on this channel, so this browser does not pick one. */
   const [taken, setTaken] = useState<readonly ParticipantRole[]>([]);
 
+  /*
+    ── HAS THE OPERATOR ACTUALLY CHOSEN, OR ARE WE STILL GUESSING FOR THEM? ─
+    `effectiveRole` silently substitutes a free role, which is right as a
+    DEFAULT and wrong as a permanent override. The `<select>` renders
+    `effectiveRole` but `onChange` writes `role`, so an operator whose pick
+    was being substituted saw the box snap back to the substitute and could
+    not tell whether their click had registered.
+
+    Tracking the explicit choice separately keeps the substitution for the
+    untouched control and gets out of the way the moment somebody picks.
+  */
+  const [chosen, setChosen] = useState(false);
+
   const idle = state.bridge === "idle";
   const connecting = state.bridge === "connecting";
 
@@ -118,6 +131,41 @@ export function BridgeControls() {
     [taken, role, free],
   );
 
+  /*
+    ── EVERY ROLE TAKEN MUST NOT MEAN "NO ROLE SELECTABLE" ─────────────────
+    Reported live: a second person could not select anything - the dropdown
+    was stuck on "DevOps Lead" with every option greyed out.
+
+    The roster said all three roles were held (1001 Support Engineer, 1002
+    DevOps Lead, 1003 Database Admin) while only ONE person was actually on
+    the bridge. Roster rows live for the full token TTL - one hour - and are
+    only released by an orderly leave, so a refresh, a closed laptop or a
+    restarted dev server leaves a GHOST holding a role.
+
+    With `free` empty, `effectiveRole` fell back to `role` (still the default
+    "DevOps Lead"), and every `<option>` carried `disabled` - so the control
+    could not be changed at all. A dead end with no way out from the UI.
+
+    So `disabled` is only applied while a genuine alternative exists. When
+    everything is taken the list becomes fully selectable again and the
+    server delivers the authoritative answer: either the row was a ghost and
+    the join succeeds, or a real 409 names who holds it. Refusing to let
+    someone even TRY is worse than either outcome.
+  */
+  const everythingTaken = free.length === 0;
+
+  /*
+    THE role this browser joins as - one value, used by the dropdown, the
+    Join button and the J key alike.
+
+    Both the button and the keyboard handler used to pass `effectiveRole`
+    directly, which DISCARDED an explicit choice: pick "Database Admin" while
+    the substitution was active and you still joined as whatever `free[0]`
+    happened to be. Deriving it once removes the possibility of the control
+    and the action disagreeing.
+  */
+  const joinRole = chosen ? role : effectiveRole;
+
   /**
    * Keyboard transport. Operators work this console with both hands on a
    * keyboard while reading a dashboard, so the two controls that matter under
@@ -140,7 +188,7 @@ export function BridgeControls() {
       const key = e.key.toLowerCase();
       if (key === "j") {
         e.preventDefault();
-        if (idle && channel.trim()) void openBridge({ channel, role: effectiveRole });
+        if (idle && channel.trim()) void openBridge({ channel, role: joinRole });
         else if (state.bridge === "live") closeBridge();
       }
       if (key === "m" && state.bridge === "live") {
@@ -151,7 +199,7 @@ export function BridgeControls() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [idle, state.bridge, openBridge, closeBridge, toggleMic, channel, effectiveRole]);
+  }, [idle, state.bridge, openBridge, closeBridge, toggleMic, channel, joinRole]);
 
   if (idle || connecting) {
     return (
@@ -169,8 +217,18 @@ export function BridgeControls() {
           <label className="sr-only" htmlFor="bridge-role">Your incident role</label>
           <select
             id="bridge-role"
-            value={effectiveRole}
-            onChange={(event) => setRole(event.target.value as ParticipantRole)}
+            /*
+              `role` once the operator has picked, `effectiveRole` before
+              that. Rendering `effectiveRole` unconditionally while writing
+              `role` on change made the control fight the person using it:
+              their selection was replaced by the substitute on the very next
+              render, so picking appeared to do nothing.
+            */
+            value={joinRole}
+            onChange={(event) => {
+              setRole(event.target.value as ParticipantRole);
+              setChosen(true);
+            }}
             disabled={connecting}
             className="h-8 rounded-sm border border-line bg-sunken px-2 text-2xs text-ink outline-none focus:border-live"
           >
@@ -184,7 +242,13 @@ export function BridgeControls() {
               <option
                 key={candidate}
                 value={candidate}
-                disabled={taken.includes(candidate)}
+                /*
+                  Never disabled when EVERY role is taken - that combination
+                  froze the control with no way out (see `everythingTaken`).
+                  A stale roster row is far more likely than three live
+                  participants, and the server decides either way.
+                */
+                disabled={!everythingTaken && taken.includes(candidate)}
               >
                 {taken.includes(candidate) ? `${candidate} (taken)` : candidate}
               </option>
@@ -193,7 +257,7 @@ export function BridgeControls() {
         </div>
         <Button
           variant="primary"
-          onClick={() => void openBridge({ channel, role: effectiveRole })}
+          onClick={() => void openBridge({ channel, role: joinRole })}
           disabled={connecting || !channel.trim()}
           className="h-9 w-full justify-between px-3"
           icon={
@@ -205,6 +269,25 @@ export function BridgeControls() {
         >
           {!connecting ? <Kbd>J</Kbd> : null}
         </Button>
+
+        {/*
+          Said out loud, because the state is genuinely ambiguous and the
+          operator is the only one who can resolve it. "Every role is taken"
+          on a bridge you can see is empty is almost always a stale roster
+          row: they live for the full token TTL (one hour) and only an
+          orderly leave releases one, so a refresh or a closed laptop leaves
+          a ghost holding a role.
+
+          Rendering nothing here is what made this a dead end - the dropdown
+          simply would not change and gave no reason. Joining is still
+          allowed; the server decides.
+        */}
+        {everythingTaken && taken.length > 0 ? (
+          <p className="text-2xs leading-snug text-ink-4">
+            Every role shows as taken. If nobody else is on the bridge these are
+            stale entries from an earlier session — pick one and join anyway.
+          </p>
+        ) : null}
       </div>
     );
   }

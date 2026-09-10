@@ -275,7 +275,9 @@ Fill in the required credentials in `frontend/.env.local` (see [Credentials](#10
 This script opens the Cloudflare tunnel, writes tool secrets, boots both the backend and frontend services, clears state, and runs pre-flight checks. Wait for **`GO`** with 8 green checks (~40 seconds).
 
 ### Join and Talk to Echo
-1. Open **`http://localhost:3000`** in your browser.
+1. Open **`http://127.0.0.1:3100`** in your browser — `start.ps1` prints the exact URL, and it is worth reading rather than assuming.
+
+   > **Why not `:3000`?** It is the default port of every Node dev server, so it is the most contended port on a typical machine — and losing the race to another app is silent. Windows lets the squatter hold IPv4 `127.0.0.1:3000` while Next binds the still-free IPv6 `[::]:3000`: both then answer on "port 3000" and which one you reach depends on how `localhost` resolves. A `-Share` tunnel can publish the *other* app to whoever you send the link to. The console therefore starts at **3100** and walks 3200/3300/3400/3500 if that is taken. Override with `$env:ECHO_CONSOLE_PORT`.
 2. Select your role (e.g., `DevOps Lead`), press **`J`** (or click *Join Bridge*), and allow microphone access.
 3. Echo will greet you: *"Echo is on the bridge. I am listening and keeping the record."*
 4. Ask Echo a question:
@@ -292,6 +294,10 @@ This script opens the Cloudflare tunnel, writes tool secrets, boots both the bac
 | Command | Working Directory | Purpose |
 |---|---|---|
 | `.\start.ps1 -Tunnel -Reset` | Repo Root | Boots backend, frontend, tunnel, and resets incident state |
+| `.\start.ps1 -Share` | Repo Root | ... and opens a public link others can join from |
+| `.\stop.ps1` | Repo Root | Stops the Cloud Agent, tunnels and both services. Keeps the incident data |
+| `.\stop.ps1 -Clean` | Repo Root | ... and wipes the incident data so the next start is fresh |
+| `.\stop.ps1 -Clean -All` | Repo Root | ... plus the Postgres volume and build caches (next start is slow) |
 | `.\validate.ps1` | Repo Root | Runs 28 live end-to-end checks against the live system |
 | `npm run demo` | `frontend/` | Runs 8 pre-flight health checks |
 | `npm run demo feed` | `frontend/` | Feeds Demo Script v2 into the analytics pipeline |

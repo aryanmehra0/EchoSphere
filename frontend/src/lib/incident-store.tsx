@@ -21,7 +21,9 @@ import {
 } from "./incident-reducer";
 import { DEMO_SCRIPT, rebaseAction } from "./mock-stream";
 import {
+  beaconLeave,
   BridgeCredentialError,
+  heartbeatRoster,
   inviteAgent,
   openDeltaSocket,
   requestBridgeCredentials,
@@ -657,6 +659,78 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       }
     };
   }, [clearTimers]);
+
+  /*
+    ── RELEASE THE ROLE WHEN THE PAGE GOES AWAY, NOT JUST WHEN REACT UNMOUNTS ─
+    The cleanup above only runs on an orderly React unmount. It does NOT run
+    on a hard refresh, a closed tab, a closed laptop or a crash - and those
+    are exactly the cases that were leaving GHOSTS in the roster.
+
+    Reported live: one person joined as DevOps Lead and the second could not
+    select any role at all, because the roster listed all three as held while
+    only one human was present. Roster rows are only released by an orderly
+    leave and otherwise live for the full token TTL, so each abandoned session
+    locked a role for an hour.
+
+    `pagehide` is the reliable signal here - `beforeunload` is unreliable on
+    mobile and `unload` never fires when a page enters the back/forward cache.
+    `sendBeacon` is the only thing that survives teardown: a `fetch` issued
+    during unload is cancelled with the document, which is why the cleanup
+    above could never have covered this.
+
+    Best effort by design. It cannot be awaited and it can be lost, so the
+    server-side takeover in `/api/token` remains the real guarantee - this
+    just makes the common case clean rather than relying on the fallback.
+  */
+  useEffect(() => {
+    const release = () => {
+      const channel = joinedChannel.current;
+      const uid = joinedUid.current;
+      if (!channel || uid === null) return;
+      // The beacon itself lives in `delta-socket.ts`: Zone 1 egress is
+      // confined to that module by `phase1-evaluation.test.ts`, and calling
+      // the browser's beacon API directly from here is exactly the
+      // unreviewed egress path that test exists to catch. It caught this one.
+      beaconLeave(channel, uid);
+    };
+
+    window.addEventListener("pagehide", release);
+    return () => window.removeEventListener("pagehide", release);
+  }, []);
+
+  /*
+    ── PROVE THIS PARTICIPANT IS STILL HERE ────────────────────────────────
+    A roster row records who JOINED, and nothing refreshed it — `touchExpiry`
+    is only ever called for the agent. So a row could not distinguish someone
+    mid-sentence from someone whose laptop closed twenty minutes ago, and
+    since only an orderly leave releases one, an abandoned row held its role
+    for the full hour.
+
+    That is what locked the bridge: one person joined as DevOps Lead, the
+    roster still listed all three roles from earlier sessions, and the second
+    joiner could not select anything.
+
+    `/api/token` reclaims a role unseen for 90s. This is what makes "seen"
+    mean something, and it is why that takeover cannot evict a live
+    participant: 30s is comfortably inside the window, so a real person is
+    always fresh and a ghost is always stale.
+
+    Only runs while actually joined, and it never touches incident state.
+  */
+  useEffect(() => {
+    if (state.bridge !== "live") return;
+
+    const beat = () => {
+      const channel = joinedChannel.current;
+      const uid = joinedUid.current;
+      if (!channel || uid === null) return;
+      void heartbeatRoster(channel, uid);
+    };
+
+    beat();
+    const timer = window.setInterval(beat, 30_000);
+    return () => window.clearInterval(timer);
+  }, [state.bridge]);
 
   const toggleMic = useCallback(() => {
     const next = !micOn;
