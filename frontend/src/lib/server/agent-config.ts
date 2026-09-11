@@ -101,7 +101,13 @@ export const NO_TOOLS_ADDENDUM = `
 
 [THE RECORD IS NOT READABLE RIGHT NOW]
 Your query_incident_state tool is unavailable in this session. This does NOT
-relax Rule 3 — it means you cannot satisfy it, so you must say so.
+relax Rule 3 (never answer from memory) — it means you cannot satisfy it, so
+you must say so.
+
+That includes questions about WHO said something. What you overhear carries
+no speaker labels, so "who reported that?" is not answerable from memory
+either. Say you cannot read the record rather than saying a claim has no
+source — those are very different statements, and only one of them is true.
 
 When asked anything factual about this incident:
   "I can't read the incident record from here, so I won't guess at it.
@@ -155,6 +161,54 @@ guessing.
 
 Answer whenever someone speaks to you. You do not need to be addressed by
 name.`;
+
+/**
+ * How to answer a question about the record — appended to the CONVERSATIONAL
+ * prompt whenever the Ledger tool is actually reachable.
+ *
+ * ── WHY THIS HAD TO BE ADDED ────────────────────────────────────────────────
+ * Reported live. The Support Engineer said "Database is down." The transcript
+ * showed it under Support Engineer, and the Ledger stored it with
+ * `speakerRole: "Support Engineer"` — both correct. DevOps then asked "who
+ * reported that the database is down?" and Echo answered that it was **not
+ * associated with any person or role**.
+ *
+ * Nothing was wrong with the data. `query_incident_state` returns every claim
+ * with its `speakerRole`, verified against the live endpoint. The problem was
+ * that Echo never called it: `buildSystemPrompt` passed `toolsEnabled`
+ * straight past the conversational branch, so the DEFAULT prompt — the one
+ * everybody runs — never mentioned that a record existed or that a tool could
+ * read it. Echo answered "who said that?" from Agora's own `max_history`,
+ * which holds recognised TEXT and no speaker labels at all. It had no way to
+ * know, and no instruction telling it where to look.
+ *
+ * That is the worst shape this failure can take: attribution is the product,
+ * and "nobody said it" is indistinguishable to a listener from "the record
+ * has no source for it" — which would be a Rule 1 violation rather than a
+ * missing tool call.
+ *
+ * WHO-questions are called out explicitly because they are the ones this
+ * prompt was silently failing, and because the answer to them is a field in
+ * the tool's response rather than something the model could infer.
+ */
+export const CONVERSATIONAL_TOOLS_ADDENDUM = `
+
+[THE RECORD, AND HOW TO READ IT]
+Everything said on this bridge is filed in an Evidence Ledger, and each claim
+carries the ROLE of whoever said it.
+
+Call query_incident_state before answering any factual question about this
+incident — what is known, what is still open, and above all WHO said
+something. Attribution lives in the "speakerRole" field of each claim; it is
+never something to infer from memory.
+
+You overhear the room, but what you overhear carries no speaker labels. So if
+you are asked who reported something and you have not called the tool, you do
+not know the answer — call it. Never say a claim has no source without
+checking: the record almost certainly has one.
+
+If the tool returns nothing for what was asked, say plainly that the record
+does not have it, rather than guessing.`;
 
 /**
  * The secrets clause — appended to EVERY prompt, in every mode.
@@ -237,8 +291,28 @@ export function buildSystemPrompt(
     conditional on mode would leave the default path exposed, which is the
     path everybody actually runs.
   */
+  /*
+    ── `toolsEnabled` REACHES THIS BRANCH TOO, AND IT DID NOT ──────────────
+    This used to ignore the argument entirely and return the bare
+    conversational prompt. Since conversational IS the default mode, the
+    default agent was handed a `query_incident_state` tool and never told it
+    existed.
+
+    Reported live: the Support Engineer said "Database is down", the Ledger
+    filed it with `speakerRole: "Support Engineer"`, and Echo answered "who
+    reported that?" by saying it was not associated with any person or role.
+    It was answering from Agora's `max_history` — recognised text with no
+    speaker labels — because nothing had pointed it at the record.
+
+    Both halves are now conditional on the same flag, so "can Echo read the
+    Ledger" and "does Echo know it can" cannot disagree.
+  */
   if (mode === "conversational") {
-    return CONVERSATIONAL_SYSTEM_PROMPT + SECRETS_CLAUSE;
+    return (
+      CONVERSATIONAL_SYSTEM_PROMPT +
+      (toolsEnabled ? CONVERSATIONAL_TOOLS_ADDENDUM : NO_TOOLS_ADDENDUM) +
+      SECRETS_CLAUSE
+    );
   }
   const base = toolsEnabled
     ? FAST_LOOP_SYSTEM_PROMPT

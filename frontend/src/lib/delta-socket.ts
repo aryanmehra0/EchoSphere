@@ -592,6 +592,78 @@ export async function requestBridgeCredentials(
 }
 
 /**
+ * Release this participant's roster row during page teardown.
+ *
+ * ── WHY A BEACON, AND WHY IT LIVES HERE ─────────────────────────────────────
+ * React's unmount cleanup only runs on an orderly teardown. It does NOT run on
+ * a hard refresh, a closed tab, a closed laptop or a crash — and those are the
+ * cases that were leaving GHOSTS in the roster. A row is released only by an
+ * orderly leave and otherwise lives for the full token TTL (one hour), so each
+ * abandoned session locked a role for an hour. Reported live: one person on the
+ * bridge, all three roles showing as taken, second joiner unable to select any.
+ *
+ * `sendBeacon` is the only transport that survives unload — a `fetch` issued
+ * then is cancelled along with the document, which is precisely why the
+ * existing cleanup could never have covered this.
+ *
+ * It lives in THIS module because Zone 1 egress is confined here by
+ * `phase1-evaluation.test.ts`, and the right response to needing another call
+ * is to add it here rather than widen that allow-list. The caller registers the
+ * `pagehide` listener; only the egress itself is centralised.
+ *
+ * Best effort by design: it cannot be awaited and it can be dropped, so the
+ * server-side takeover in `/api/token` remains the actual guarantee.
+ */
+export function beaconLeave(channel: string, uid: number): void {
+  try {
+    navigator.sendBeacon(
+      "/api/stop-agent",
+      // A Blob so the request carries a JSON content type. A bare string is
+      // sent as text/plain and the route would reject the body.
+      new Blob([JSON.stringify({ channel, uid })], { type: "application/json" }),
+    );
+  } catch {
+    // Nothing can be done during unload, and the takeover covers it.
+  }
+}
+
+/**
+ * Tell the Roster this participant is still on the bridge.
+ *
+ * ── WHAT THIS PREVENTS ──────────────────────────────────────────────────────
+ * A roster row is only released by an orderly leave and otherwise lives for
+ * the full token TTL (one hour), so a refresh, a closed tab or a crash left a
+ * GHOST holding a role. Reported live: one person on the bridge, all three
+ * roles showing as taken, and the second joiner unable to select any role.
+ *
+ * `/api/token` now reclaims a role whose holder has not been seen for 90s.
+ * This heartbeat is what marks a holder as still present, so that takeover can
+ * never evict somebody who is actually talking — `issuedAt` is fixed at join
+ * time and cannot tell the two apart.
+ *
+ * Returns false when the row is gone (released, or reclaimed by someone else).
+ * Never throws: a missed beat is harmless, the next one is 30s away, and a
+ * heartbeat must never be able to break a live bridge.
+ */
+export async function heartbeatRoster(
+  channel: string,
+  uid: number,
+): Promise<boolean> {
+  try {
+    const response = await fetch("/api/roster", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, uid }),
+    });
+    if (!response.ok) return false;
+    const body = (await response.json()) as { present?: boolean };
+    return Boolean(body.present);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Who is on this bridge, and as what role — uid → role from the Roster.
  *
  * ── WHY IT LIVES IN THIS MODULE ────────────────────────────────────────────

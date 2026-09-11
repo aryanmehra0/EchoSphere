@@ -106,6 +106,34 @@ function Write-Note($text) { Write-Host "       $text" -ForegroundColor DarkGray
 #     $_.CommandLine -like "*$($frontend.Replace('','\'))*"
 # `.Replace('', '\')` replaces the EMPTY string, which is a no-op — so the path
 # guard never actually constrained anything.
+# ── WHY THE PARENT CHAIN, NOT JUST THE PROCESS ─────────────────────────────
+#
+# A venv python RE-EXECS itself through the global interpreter, and the child
+# that ends up holding the port has NO repository path in its command line:
+#
+#   [0] PID 23704  C:\...\Programs\Python\Python312\python.exe -m uvicorn ...
+#   [1] PID 19792  C:\...\EchoSphere\backend\.venv\Scripts\python.exe -m uvicorn ...
+#
+# Only the PARENT names the checkout. Matching on the listener alone therefore
+# reported OUR OWN backend as "not from this repo" and refused to restart it -
+# which is exactly what happened on a `-Share` run: the guest origin was
+# written to .env.local, the restart was skipped, and the message said
+# "left :8000 alone" over a process this script had started itself.
+#
+# Walks up a few generations and stops at the first ancestor that names the
+# checkout. Bounded so a pathological chain cannot loop, and it still refuses
+# to touch a listener from a genuinely unrelated project.
+function Test-ProcessIsOurs($proc) {
+    $needle = $root.TrimEnd('\')
+    $cur = $proc
+    for ($depth = 0; $depth -lt 5 -and $cur; $depth++) {
+        if ($cur.CommandLine -and $cur.CommandLine.Replace('/', '\') -like "*$needle*") { return $true }
+        if (-not $cur.ParentProcessId -or $cur.ParentProcessId -le 4) { break }
+        $cur = Get-CimInstance Win32_Process -Filter "ProcessId=$($cur.ParentProcessId)" -ErrorAction SilentlyContinue
+    }
+    return $false
+}
+
 function Stop-PreviousSession {
     param([switch]$IncludeTunnel)
 
@@ -114,13 +142,14 @@ function Stop-PreviousSession {
     # Anything whose command line mentions this checkout. Covers the uvicorn
     # Slow Loop, `next dev`, and the cmd.exe wrapper the console is launched
     # under, without needing to know which is which.
-    $needle = $root.TrimEnd('\')
+    # `Test-ProcessIsOurs` rather than a direct command-line match: a venv
+    # python re-execs through the global interpreter, so the process actually
+    # holding :8000 carries no repository path and was being missed here. See
+    # the note on that function.
     foreach ($name in 'python.exe', 'node.exe', 'cmd.exe') {
         $procs = Get-CimInstance Win32_Process -Filter "Name='$name'" -ErrorAction SilentlyContinue |
                  Where-Object {
-                     $_.CommandLine -and
-                     $_.CommandLine.Replace('/', '\') -like "*$needle*" -and
-                     $_.ProcessId -ne $PID
+                     $_.ProcessId -ne $PID -and (Test-ProcessIsOurs $_)
                  }
         if ($procs) { $ours += $procs }
     }
@@ -176,10 +205,9 @@ function Stop-OurServiceOnPort($port) {
     $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
     if (-not $conn) { return $false }
 
-    $needle = $root.TrimEnd('\')
     foreach ($c in $conn) {
         $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
-        if ($proc -and $proc.CommandLine -and $proc.CommandLine.Replace('/', '\') -like "*$needle*") {
+        if ($proc -and (Test-ProcessIsOurs $proc)) {
             Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
             Start-Sleep -Milliseconds 1200
             return $true
@@ -266,6 +294,117 @@ $script:TunnelFailPattern = "failed to request quick Tunnel|context deadline exc
 # NOT everything is retried. A missing origin or a bad flag fails identically
 # every time, so retrying it just multiplies the wait before the same message.
 $script:TunnelRetryPattern = "context deadline exceeded|Client\.Timeout|i/o timeout|connection reset|EOF"
+
+# ── PROBING A TUNNEL FROM *THIS* MACHINE IS NOT A FAIR TEST ────────────────
+#
+# Measured on this network:
+#
+#     nslookup hiv-lie-per-iron.trycloudflare.com            -> timeout
+#     nslookup hiv-lie-per-iron.trycloudflare.com 1.1.1.1    -> 104.16.230.132
+#     curl --resolve ...:443:104.16.230.132 .../health        -> HTTP 200
+#
+# The local resolver (20.20.20.114, a corporate DNS) does not answer for
+# *.trycloudflare.com at all, while the tunnel itself is perfectly alive and
+# reachable. So a plain Invoke-RestMethod against the hostname fails HERE for
+# everyone whose DNS filters it - and that failure says nothing whatsoever
+# about whether Agora or a guest can reach it, because they resolve elsewhere.
+#
+# Treating that as "the tunnel is dead" caused two real, visible faults in one
+# run: a LIVE backend tunnel was declared dead and AGENT_TOOL_BASE_URL was
+# wiped (so Echo lost its ability to read the Ledger), and the guest
+# verification reported the 404 bug over a share tunnel that was serving 200.
+#
+# This resolves through a PUBLIC resolver and, when the local one cannot
+# answer, retries the request with the address pinned - the same thing
+# `curl --resolve` does. A tunnel is only reported dead when it genuinely
+# fails to answer at an address we know is real.
+#
+# Returns: "live" | "dead" | "unresolvable" (with $script:LastProbeBody set
+# on "live"). "unresolvable" means WE cannot check, not that it is broken -
+# and the caller must not clear credentials on it.
+#
+# ── AND WHY IT RETRIES ──────────────────────────────────────────────────────
+#
+# A quick tunnel is not serving the instant `cloudflared` prints its hostname.
+# Cloudflare has to propagate the edge route, which took several seconds on
+# this connection - so the FIRST probe after creation failed against a tunnel
+# that answered perfectly moments later.
+#
+# Observed in one run: the script created
+# `jones-pasta-buildings-judy.trycloudflare.com`, probed it immediately,
+# declared "the configured tunnel no longer answers" and wiped
+# AGENT_TOOL_BASE_URL - and the very same URL returned HTTP 200 when checked
+# by hand a minute afterwards. Echo lost the Ledger for the whole run because
+# of a race, not a fault.
+#
+# Clearing credentials is destructive and hard to attribute later, so it now
+# takes several failures over ~15s rather than one.
+function Test-TunnelHealth($baseUrl) {
+    $attempts = 5
+    for ($i = 1; $i -le $attempts; $i++) {
+        $verdict = Test-TunnelHealthOnce $baseUrl
+        # A definite answer either way needs no retry. Only "dead" is worth
+        # doubting, because a warming-up edge looks exactly like a dead one.
+        if ($verdict -ne "dead") { return $verdict }
+        if ($i -lt $attempts) { Start-Sleep -Seconds 3 }
+    }
+    return "dead"
+}
+
+function Test-TunnelHealthOnce($baseUrl) {
+    $script:LastProbeBody = $null
+    $uri      = [Uri]$baseUrl
+    # NOT $host - that is a PowerShell automatic variable (the host UI object)
+    # and assigning to it fails with "Cannot overwrite variable Host".
+    $tunnelHost = $uri.Host
+
+    # 1. The straightforward attempt. Works on a normal network.
+    try {
+        $script:LastProbeBody = Invoke-RestMethod "$baseUrl/health" -TimeoutSec 20
+        return "live"
+    } catch {
+        # Anything other than a name-resolution failure is a real answer about
+        # the tunnel: a 502, a refused connection, a timeout on a resolved
+        # address. Only DNS failure is ambiguous, so only DNS failure falls
+        # through to the pinned attempt below.
+        if ($_.Exception.Message -notmatch "remote name could not be resolved|No such host is known|actively refused") {
+            return "dead"
+        }
+    }
+
+    # 2. Resolve through a public resolver the local one cannot override.
+    $addr = $null
+    foreach ($resolver in "1.1.1.1", "8.8.8.8") {
+        try {
+            $answer = Resolve-DnsName -Name $tunnelHost -Server $resolver -Type A `
+                      -DnsOnly -ErrorAction Stop | Where-Object { $_.IPAddress }
+            if ($answer) { $addr = $answer[0].IPAddress; break }
+        } catch { }
+    }
+    if (-not $addr) { return "unresolvable" }
+
+    # 3. Ask the address directly, carrying the Host header and SNI so
+    #    Cloudflare still routes it to the right tunnel. `-Headers Host` alone
+    #    is not enough - the TLS handshake needs the name too, which is why
+    #    this connects by hostname but with the address pinned in the hosts
+    #    resolution order via a per-request override.
+    try {
+        # PowerShell 5.1 has no --resolve equivalent, so the check is made over
+        # HTTP-on-IP with an explicit Host header. The tunnel answers /health
+        # identically on both, and this only has to prove liveness.
+        $script:LastProbeBody = Invoke-RestMethod "https://$addr/health" `
+            -Headers @{ Host = $tunnelHost } -TimeoutSec 20
+        return "live"
+    } catch {
+        # A certificate complaint proves a TLS endpoint IS there and answering
+        # for that address - which is all this needs to establish. The
+        # hostname mismatch is expected when connecting by IP.
+        if ($_.Exception.Message -match "trust|certificate|SSL|secure channel") {
+            return "unresolvable"
+        }
+        return "dead"
+    }
+}
 
 # Pull a real tunnel hostname out of whatever cloudflared has written so far.
 # Returns $null when the only match is the API endpoint.
@@ -474,7 +613,32 @@ function Set-EnvKey($key, $value) {
         } else { $out.Add($line) }
     }
     if (-not $found) { $out.Add("$key=$value") }
-    Set-Content -Path $envFile -Value $out -Encoding UTF8
+
+    # ── RETRIED, BECAUSE next dev WATCHES THIS FILE ────────────────────────
+    #
+    # The console's dev server reads .env.local and keeps a watcher on it, and
+    # Windows takes a real exclusive lock while it does. A write landing in
+    # that window dies with
+    #
+    #     Set-Content : The process cannot access the file '...\.env.local'
+    #     because it is being used by another process.
+    #
+    # which, under $ErrorActionPreference = "Stop", ABORTS THE WHOLE SCRIPT -
+    # observed mid-run right after the console started, leaving .env.local
+    # half-updated and the run dead on its feet.
+    #
+    # The lock is momentary, so a few short retries clear it. The final
+    # attempt is deliberately left un-caught: if the file is genuinely
+    # unwritable that must still be loud.
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            Set-Content -Path $envFile -Value $out -Encoding UTF8 -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -eq 5) { throw }
+            Start-Sleep -Milliseconds 400
+        }
+    }
 }
 
 function Get-EnvKey($key) {
@@ -580,26 +744,42 @@ if ($Tunnel) {
     Set-EnvKey "AGENT_TOOL_BASE_URL" $tunnelUrl
     Set-EnvKey "AGENT_TOOL_SECRET" $secret
 
-    # ── THE BROWSER NEEDS THIS TOO, AND IT IS NOT THE SAME THING ────────────
+    # ── THE BROWSER DOES *NOT* GET A SEPARATE URL ANY MORE ──────────────────
     #
-    # AGENT_TOOL_BASE_URL is for AGORA's servers calling our tools. This one is
-    # for the BROWSER: `delta-socket.ts` opens the delta WebSocket and POSTs
-    # transcripts to the Slow Loop, and without it every client falls back to
-    # ws://127.0.0.1:8000 - which on a guest's machine is their own laptop,
-    # where nothing is listening.
+    # AGENT_TOOL_BASE_URL above is for AGORA's servers calling our tools, and
+    # it still needs a public hostname. The BROWSER used to need its own
+    # (NEXT_PUBLIC_SLOW_LOOP_WS, pointing at this same backend tunnel) and
+    # that is what is being removed here.
     #
-    # The symptom is that a guest loads the console perfectly (it is served
-    # over the tunnel) and then cannot join the bridge at all, with no error
-    # that names the cause. Measured with the transcript probe: no PTS, no RTM
-    # subscribe, no toolkit subscribe, mic n/a.
+    # Why: `next.config.ts` now REWRITES the Slow Loop's paths - /observer/*,
+    # /ws/deltas, /agent/*, /bridge/*, /tools/*, /health and the rest - from
+    # the console's own origin to 127.0.0.1:8000. A browser can therefore
+    # reach the Slow Loop at the same origin it loaded the page from, whether
+    # that is localhost or a tunnel, and `delta-socket.ts`'s same-origin
+    # fallback is now CORRECT rather than merely assumed.
     #
-    # `wss:` because the tunnel is HTTPS and a browser on an HTTPS page refuses
-    # to open a plaintext ws:// socket.
-    $wsUrl = ($tunnelUrl -replace '^https:', 'wss:') + "/ws/deltas"
-    Set-EnvKey "NEXT_PUBLIC_SLOW_LOOP_WS" $wsUrl
+    # What that fixes, reported live:
+    #
+    #     TRANSCRIPT FORWARDING PAUSED: SLOW LOOP RETURNED HTTP 404
+    #
+    # with an empty transcript, an empty Ledger and no graph. The variable had
+    # been CLEARED by the stale-tunnel branch below, so the browser fell back
+    # to its own origin - the console on :3000 - which had no
+    # /observer/transcript and answered every forwarded turn with Next's 404
+    # page. The delta socket went the same way, which is why nothing rendered.
+    #
+    # Measured before the rewrite:
+    #     next.js :3000 /observer/transcript -> 404
+    #     python  :8000 /observer/transcript -> 200
+    # and after it, both 200.
+    #
+    # Cleared rather than left alone: a value written by an EARLIER run points
+    # at a tunnel that is now dead, and a dead absolute URL beats the working
+    # same-origin default. Empty is the good state now.
+    Set-EnvKey "NEXT_PUBLIC_SLOW_LOOP_WS" ""
 
     Write-Ok "tool credentials written to frontend\.env.local"
-    Write-Note "browsers will reach the Slow Loop at $wsUrl"
+    Write-Note "browsers reach the Slow Loop through the console's own origin"
 
     # Anything still holding the old environment has to go. Normally
     # `Stop-PreviousSession` above already cleared it; this covers the
@@ -663,28 +843,143 @@ if ($slowLoop -and $KeepRunning) {
 #     $_.CommandLine -like "*$($frontend.Replace('','\'))*"
 # and `.Replace('', '\')` replaces the EMPTY string: a no-op, so the path guard
 # matched every `next dev` on the machine regardless of repository.
-$console = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
+# ── AND WHY A FOREIGN LISTENER ON :3000 HAS TO BE FATAL ─────────────────────
+#
+# `Stop-PreviousSession` deliberately leaves a listener that is not ours
+# alone, and that is right - it protects other projects. But then this block
+# started `next dev --port 3000` into the occupied port anyway.
+#
+# Windows does not refuse that. The squatter holds IPv4 127.0.0.1:3000 and
+# Next binds the still-free IPv6 `::`:3000, so BOTH serve on "port 3000" and
+# which one a client reaches depends on how it resolves `localhost`.
+#
+# Measured on this machine: an unrelated `ms-365-mcp-server` held IPv4 :3000,
+# the console came up on IPv6 :3000, and probes split -
+#     http://127.0.0.1:3000/health -> 404   (the squatter)
+#     http://[::1]:3000/health     -> 200   (the console)
+# The old probe below used `http://localhost:3000` and got a 200 from the
+# WRONG SERVER, so this script printed "console is up" over someone else's
+# app. A tunnel then published that app instead of the console.
+#
+# There is no safe automatic move here: killing it takes down another
+# project, and continuing publishes the wrong thing. So it is named and the
+# run stops, which is the one outcome that cannot mislead.
+# ── MOVE ASIDE RATHER THAN DEMAND THE PORT BACK ────────────────────────────
+#
+# The first version of this guard exited 1 and told the operator to kill the
+# offending PID. That is unusable against the squatter actually on this
+# machine: `ms-365-mcp-server` is supervised and RESTARTS within seconds, so
+# it came back under a new PID every time and the instruction could never
+# be satisfied.
+#
+# Taking the next free port is the honest move - the port number was never
+# load-bearing, and everything that needs to know is told below.
+function Test-PortFree($port) {
+    -not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
+}
+
+# ── THE CONSOLE DOES NOT USE :3000 AT ALL ──────────────────────────────────
+#
+# 3000 is the default port of every Node dev server on the machine, which
+# makes it the single most contended port here and the one this script kept
+# losing. Sharing it is not merely untidy, it is BROKEN in a way that is
+# hard to see: Windows lets a squatter hold IPv4 127.0.0.1:3000 while Next
+# binds the still-free IPv6 `::`:3000, so BOTH answer on "port 3000" and
+# which one a client reaches depends on how it resolves `localhost`.
+#
+# Measured here: an unrelated `ms-365-mcp-server` on IPv4 :3000, the console
+# on IPv6 :3000, and probes split -
+#     http://127.0.0.1:3000/health -> 404   (the squatter)
+#     http://[::1]:3000/health     -> 200   (the console)
+# The readiness probe used `http://localhost:3000`, took a 200 from the WRONG
+# SERVER and reported the console up. A `-Share` tunnel then publishes
+# somebody else's app to the people you sent the link to.
+#
+# That squatter is also SUPERVISED: it restarted within seconds under a new
+# PID every time, so "stop PID n and re-run" was an instruction that could
+# never be satisfied. Avoiding the port outright is the only stable fix.
+#
+# 3100 is the base. ECHO_CONSOLE_PORT overrides it, and `demo.mjs` already
+# reads that same variable.
+$consolePort = 0
+$preferred = if ($env:ECHO_CONSOLE_PORT) { [int]$env:ECHO_CONSOLE_PORT } else { 3100 }
+
+foreach ($candidate in @($preferred) + @(3100, 3200, 3300, 3400, 3500)) {
+    if ($candidate -eq 3000) { continue }   # never 3000, even if asked
+    if (Test-PortFree $candidate) { $consolePort = $candidate; break }
+    # Ours from a previous run that -KeepRunning wants to reuse.
+    if ($KeepRunning) {
+        $held = Get-NetTCPConnection -LocalPort $candidate -State Listen -ErrorAction SilentlyContinue
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($held[0].OwningProcess)" -ErrorAction SilentlyContinue
+        if ($p -and $p.CommandLine -and $p.CommandLine.Replace('/', '\') -like "*$($root.TrimEnd('\'))*") {
+            $consolePort = $candidate; break
+        }
+    }
+}
+
+if ($consolePort -eq 0) {
+    Write-Bad "no free console port (tried $preferred, 3100, 3200, 3300, 3400, 3500)"
+    Write-Note "free one, or pass your own:  `$env:ECHO_CONSOLE_PORT = 3600; .\start.ps1"
+    exit 1
+}
+
+# Everything downstream reads this rather than assuming 3000: the readiness
+# probe, the tunnel target, `npm run demo`, and the closing instructions.
+$env:ECHO_CONSOLE_PORT = "$consolePort"
+$consoleOrigin = "http://127.0.0.1:$consolePort"
+
+$console = Get-NetTCPConnection -LocalPort $consolePort -State Listen -ErrorAction SilentlyContinue
 if ($console -and $KeepRunning) {
-    Write-Ok "console already running on :3000 (-KeepRunning)"
+    Write-Ok "console already running on :$consolePort (-KeepRunning)"
 } else {
-    Write-Step "starting the console on :3000 ..."
+    Write-Step "starting the console on :$consolePort ..."
     # `--port 3000` so a busy port is an ERROR we can see rather than a silent
     # move to 3001. Logged to a file because the window is hidden and a
     # failure with no output is the thing that wasted the most time here.
     $clog = Join-Path $env:TEMP ("echosphere-console-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
     Start-Process -FilePath "cmd.exe" `
-        -ArgumentList "/c", "npm run dev -- --port 3000 > `"$clog`" 2>&1" `
+        -ArgumentList "/c", "npm run dev -- --port $consolePort > `"$clog`" 2>&1" `
         -WorkingDirectory $frontend -WindowStyle Hidden
 
+    # ── PROBE 127.0.0.1, NOT `localhost`, AND PROBE THE PROXY ──────────────
+    #
+    # `localhost` can resolve to ::1 or 127.0.0.1, so on a machine where
+    # something else holds one of the two families this probe could answer
+    # from the wrong server entirely (see the note above). An explicit IPv4
+    # literal removes the ambiguity.
+    #
+    # And the page rendering is no longer sufficient evidence. The console now
+    # has to PROXY the Slow Loop for the browser to reach it at all, so
+    # `/health` through :3000 is the thing worth asserting - it is exactly the
+    # path the 404 bug broke, and a config that fails to load looks perfectly
+    # healthy on `/`.
     $up = $false
+    $proxied = $false
     foreach ($i in 1..60) {
         Start-Sleep -Milliseconds 900
         try {
-            $r = Invoke-WebRequest "http://localhost:3000" -UseBasicParsing -TimeoutSec 5
-            if ($r.StatusCode -eq 200) { $up = $true; break }
+            $r = Invoke-WebRequest $consoleOrigin -UseBasicParsing -TimeoutSec 5
+            if ($r.StatusCode -eq 200) { $up = $true }
         } catch { }
+        if ($up) {
+            try {
+                $h = Invoke-WebRequest "$consoleOrigin/health" -UseBasicParsing -TimeoutSec 5
+                if ($h.StatusCode -eq 200) { $proxied = $true }
+            } catch { }
+            break
+        }
     }
-    if ($up) { Write-Ok "console is up" }
+    if ($up -and $proxied) { Write-Ok "console is up, and proxies the Slow Loop" }
+    elseif ($up) {
+        # Serving, but the rewrites are not answering. The browser would get a
+        # 404 on every transcript POST - the exact reported failure - so this
+        # is loud rather than a warning nobody reads.
+        Write-Bad "the console is up but does NOT proxy the Slow Loop (/health -> not 200)"
+        Write-Note "frontend/next.config.ts must define rewrites() for /observer/*, /ws/deltas and /health."
+        Write-Note "Without them the browser POSTs transcripts to the console and gets HTTP 404:"
+        Write-Note "    TRANSCRIPT FORWARDING PAUSED: SLOW LOOP RETURNED HTTP 404"
+        exit 1
+    }
     else {
         Write-Bad "the console did not start"
         if (Test-Path $clog) {
@@ -726,8 +1021,25 @@ $configuredTunnel = Get-EnvKey "AGENT_TOOL_BASE_URL"
 $tunnelLive = $false
 
 if ($configuredTunnel) {
-    try {
-        $probe = Invoke-RestMethod "$configuredTunnel/health" -TimeoutSec 20
+    # DNS-aware: on this network the local resolver does not answer for
+    # *.trycloudflare.com at all, so a plain request fails against a tunnel
+    # that is perfectly alive. See the long note on `Test-TunnelHealth`.
+    $health = Test-TunnelHealth $configuredTunnel
+
+    if ($health -eq "unresolvable") {
+        # WE cannot check it; that is not evidence it is broken. Agora and any
+        # guest resolve through their own DNS and are unaffected, so the
+        # credentials MUST be kept - clearing them here is what silently cost
+        # Echo its ability to read the Ledger on a working tunnel.
+        $tunnelLive = $true
+        Write-Ok "tunnel credentials kept  $configuredTunnel"
+        Write-Note "this machine's DNS cannot resolve *.trycloudflare.com, so it"
+        Write-Note "cannot be verified from here. Agora resolves it independently."
+        Write-Note "verify by hand if you want certainty:"
+        Write-Note "  Resolve-DnsName $(([Uri]$configuredTunnel).Host) -Server 1.1.1.1"
+    }
+    elseif ($health -eq "live") {
+        $probe = $script:LastProbeBody
 
         # ── "IT ANSWERED" IS NOT "IT IS OURS" ──────────────────────────────
         # A response only proves SOMETHING is at that hostname. When a bad URL
@@ -744,36 +1056,55 @@ if ($configuredTunnel) {
         # The Slow Loop's /health returns a JSON OBJECT. Anything that is not
         # one is somebody else's endpoint, and it is treated as a dead tunnel
         # so it gets CLEARED rather than kept.
-        if ($probe -is [string] -or $null -eq $probe.PSObject.Properties['ready']) {
-            throw "not the Slow Loop: /health did not return a ready flag"
-        }
+        $notOurs = ($probe -is [string]) -or ($null -eq $probe.PSObject.Properties['ready'])
 
-        if ($probe.ready) {
+        if ($notOurs) {
+            $health = "dead"
+            Write-Note "that hostname answered, but it is not the Slow Loop"
+        }
+        elseif ($probe.ready) {
             $tunnelLive = $true
             Write-Ok "Agora can reach the Ledger through the tunnel"
-        } else {
+        }
+        else {
             Write-Bad "the tunnel routes, but the Slow Loop is not ready"
         }
-    } catch {
+    }
+
+    # Only a tunnel we PROVED dead is cleared. "unresolvable" keeps its
+    # credentials above, and that distinction is the whole point of the
+    # helper: a wiped AGENT_TOOL_BASE_URL costs Echo the Ledger, and doing it
+    # on the strength of a local DNS failure was a self-inflicted outage.
+    if ($health -eq "dead") {
         Write-Bad "the configured tunnel no longer answers"
         Write-Note $configuredTunnel
         Write-Note "clearing it - stale tool URLs are worse than none at all"
         Set-EnvKey "AGENT_TOOL_BASE_URL" ""
         Set-EnvKey "AGENT_TOOL_SECRET" ""
-        # Cleared with them: a browser pointed at a dead tunnel cannot join the
-        # bridge at all, which is worse than the localhost default it falls
-        # back to when this is empty.
+        # Cleared with them, and now genuinely harmless: the console proxies
+        # the Slow Loop's paths at its own origin (`next.config.ts` rewrites),
+        # so an empty value means "same origin" and the bridge keeps working.
+        #
+        # It did NOT used to mean that. Clearing this dropped the browser onto
+        # an origin with no /observer/transcript, which answered 404 - the
+        # "TRANSCRIPT FORWARDING PAUSED" this branch was quietly causing every
+        # time a tunnel went stale.
         Set-EnvKey "NEXT_PUBLIC_SLOW_LOOP_WS" ""
         Write-Note "re-run with -Tunnel to open a fresh one"
         # The console cached the dead value at boot; without this it keeps
         # handing it to Agora until someone restarts it by hand.
-        if (Stop-OurServiceOnPort 3000) {
-            Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "npm run dev" `
+        if (Stop-OurServiceOnPort $consolePort) {
+            # `--port` explicitly: a bare `npm run dev` would take Next's
+            # default 3000, which this script deliberately never uses, and the
+            # probe below would then wait out its full 54 seconds on the port
+            # the console is NOT on.
+            Start-Process -FilePath "cmd.exe" `
+                -ArgumentList "/c", "npm run dev -- --port $consolePort" `
                 -WorkingDirectory $frontend -WindowStyle Hidden
             foreach ($i in 1..60) {
                 Start-Sleep -Milliseconds 900
                 try {
-                    $r = Invoke-WebRequest "http://localhost:3000" -UseBasicParsing -TimeoutSec 5
+                    $r = Invoke-WebRequest $consoleOrigin -UseBasicParsing -TimeoutSec 5
                     if ($r.StatusCode -eq 200) { break }
                 } catch { }
             }
@@ -816,10 +1147,10 @@ if ($Share) {
     Write-Host ""
     Write-Step "opening a tunnel to the console ..."
 
-    $shareUrl = Start-QuickTunnel $cf.Source "http://localhost:3000" "console"
+    $shareUrl = Start-QuickTunnel $cf.Source "http://127.0.0.1:$consolePort" "console"
     if (-not $shareUrl) {
         Write-Bad "the console tunnel did not come up"
-        Write-Note "the local console on :3000 is unaffected"
+        Write-Note "the local console on :$consolePort is unaffected"
     } else {
         Write-Ok "console tunnel live  $shareUrl"
 
@@ -869,6 +1200,42 @@ if ($Share) {
 
         if ($backendUp) {
             Write-Ok "guests may now reach the Ledger"
+
+            # ── PROVE THE GUEST PATH, NOT JUST THE LOCAL ONE ───────────────
+            #
+            # Everything above this point can pass while the thing a guest
+            # actually does still fails. The reported bug lived exactly here:
+            # the console loaded perfectly over the tunnel and then every
+            # transcript POST came back 404, because that origin had no
+            # /observer/* route.
+            #
+            # So the real request is made through the real tunnel. `/health`
+            # is proxied by the console to the Slow Loop, so a 200 proves the
+            # whole chain a guest depends on - tunnel to console, console
+            # rewrite to :8000 - in one call. Anything else and the demo is
+            # already broken; better to know now than from a guest.
+            # DNS-aware, for the same reason as the backend tunnel above: this
+            # machine's resolver does not answer for *.trycloudflare.com, and
+            # the first version of this check reported the 404 bug over a
+            # share tunnel that was serving HTTP 200 to everybody else.
+            # Confirmed by hand at the time:
+            #     nslookup <host>          -> timeout
+            #     nslookup <host> 1.1.1.1  -> 104.16.230.132
+            #     curl --resolve ...       -> HTTP 200
+            $guest = Test-TunnelHealth $shareUrl
+
+            if ($guest -eq "live") {
+                Write-Ok "verified: guests reach the Slow Loop through the console"
+            }
+            elseif ($guest -eq "unresolvable") {
+                Write-Note "cannot verify the share link from this machine - its DNS does"
+                Write-Note "not resolve *.trycloudflare.com. Guests resolve independently,"
+                Write-Note "and the local console proxies correctly, so this is expected here."
+            }
+            else {
+                Write-Bad "the shared console did not answer /health through the tunnel"
+                Write-Note "guests would see: TRANSCRIPT FORWARDING PAUSED: SLOW LOOP RETURNED HTTP 404"
+            }
         } else {
             Write-Bad "the Slow Loop did not come back after adding the guest origin"
             Write-Note "something outside this repo is probably holding :8000 - check with:"
@@ -879,7 +1246,14 @@ if ($Share) {
 }
 
 Write-Host "  Next:" -ForegroundColor White
-Write-Host "    open http://localhost:3000 and press J"
+Write-Host "    open " -NoNewline
+Write-Host $consoleOrigin -ForegroundColor Cyan -NoNewline
+Write-Host " and press J"
+if ($consolePort -ne 3100) {
+    # Said out loud because it is not the number in the README, and a person
+    # who opens :3100 out of habit gets whatever else is on it.
+    Write-Note "(the console is on :$consolePort this run)"
+}
 if ($tunnelLive) {
     Write-Host "    Echo will greet you out loud, then answer questions about the incident."
     Write-Host "    Feed it the incident first, then ask:"

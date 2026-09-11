@@ -11,6 +11,7 @@ import {
   isAuthorizedRole,
   OBSERVER_UID,
   putEntry,
+  releaseEntry,
   RosterWriteError,
   type ParticipantKind,
 } from "@/lib/server/roster";
@@ -101,34 +102,95 @@ export async function POST(request: Request) {
         (e) => e.kind === "human" && e.expiresAt > now,
       );
 
-      // Explicit exclusive role check (e.g. if requested or for single-lead constraint)
-      if (body.exclusive) {
-        const taken = live.find((e) => e.role === participantRole);
-        if (taken) {
-          const free = [...VALID_ROLES].filter(
-            (r) => !live.some((e) => e.role === r),
-          );
-          return NextResponse.json(
-            {
-              error:
-                `${participantRole} is already on this bridge (uid ${taken.uid}). ` +
-                (free.length
-                  ? `Pick a different role: ${free.join(", ")}.`
-                  : "Every role is taken — someone must leave first."),
-              role: participantRole,
-              availableRoles: free,
-            },
-            { status: 409 },
-          );
-        }
-      }
-
       // In multi-user mode: if a user is already connected on this channel, reconnect/renew
       if (effectiveUserId) {
         const existing = live.find((e) => e.userId === effectiveUserId);
         if (existing) {
           body.uid = existing.uid;
           body.renew = true;
+        }
+      }
+
+      // Exclusivity is opt-in (e.g. a single-lead constraint on a role) —
+      // by default multiple humans may share a role on the bridge.
+      if (body.exclusive) {
+        const taken = live.find((e) => e.role === participantRole);
+
+        /*
+          ── A ROLE HELD BY SOMEBODY WHO IS NOT HERE MUST BE RECLAIMABLE ──────
+          Reported live: one person joined as DevOps Lead and a second could not
+          select ANY role - the console showed all three as taken while only one
+          human was on the bridge.
+
+          The roster had three live rows (1001 Support Engineer, 1002 DevOps
+          Lead, 1003 Database Admin) left by earlier sessions. A row is only
+          released by an orderly leave (`/api/stop-agent` with a uid), so a
+          refresh, a closed laptop, a crashed tab or a restarted dev server
+          leaves a GHOST holding a role for the FULL TOKEN TTL - one hour.
+
+          "Someone must leave first" is then advice nobody can act on: the
+          holder is already gone and cannot leave again. That turned a stale
+          row into an hour-long lockout of the whole bridge.
+
+          So a role whose holder is not actually in the RTC channel is taken
+          over rather than refused. `EXCLUSIVE_GRACE_MS` is the only thing
+          protecting a genuine double-join, and it is deliberately short: a real
+          participant re-asserts their row on every token renewal, while a ghost
+          never touches it again.
+
+          This does NOT weaken the exclusivity invariant the 409 exists for. A
+          role still cannot be held by two people at once - the takeover DELETES
+          the previous row, so `getObserverView` still reports exactly one uid
+          per role and attribution stays unambiguous.
+        */
+        /*
+          ── WHY THIS MEASURES A HEARTBEAT, NOT THE ROW'S AGE ────────────────
+          The obvious test is "is `issuedAt` old?", and it is WRONG here:
+          nothing refreshes a human's roster row. `touchExpiry` is only ever
+          called for the agent (`/api/agent-events`), so a person who joined
+          and has been talking for ten minutes has an `issuedAt` ten minutes
+          old - indistinguishable by age from a ghost.
+
+          Taking over on age alone would therefore evict LIVE participants,
+          which is far worse than the lockout being fixed: two people would end
+          up sharing a role and the Ledger would attribute their claims to one
+          source.
+
+          So the console heartbeats its row (`PATCH /api/roster`) while it is on
+          the bridge, and the takeover asks how long ago that row was last SEEN.
+          A live participant is seen every 30s; a ghost is never seen again.
+          `lastSeen` falls back to `issuedAt` for a row written before this
+          existed, so an old row is takeable rather than permanently stuck.
+        */
+        const EXCLUSIVE_GRACE_MS = 90_000;
+        const lastSeen = taken ? (taken.lastSeen ?? taken.issuedAt) : 0;
+        const staleHold = taken && Date.now() - lastSeen > EXCLUSIVE_GRACE_MS;
+
+        if (taken && staleHold) {
+          // Reclaim it. The old uid's row goes, so the role has exactly one
+          // holder at every instant.
+          await releaseEntry(channel, taken.uid);
+          console.info(
+            `[/api/token] ${participantRole} reclaimed from uid ${taken.uid} ` +
+              `(row was ${Math.round((Date.now() - taken.issuedAt) / 1000)}s old ` +
+              `and never released) — treating it as a stale hold`,
+          );
+        } else if (taken) {
+          const free = [...VALID_ROLES].filter(
+            (r) => !live.some((e) => e.role === r),
+          );
+          return NextResponse.json(
+            {
+              error:
+                `${participantRole} was claimed moments ago (uid ${taken.uid}). ` +
+                (free.length
+                  ? `Pick a different role: ${free.join(", ")}.`
+                  : "Try again in a minute — a stale claim is released automatically."),
+              role: participantRole,
+              availableRoles: free,
+            },
+            { status: 409 },
+          );
         }
       }
     }
@@ -158,6 +220,10 @@ export async function POST(request: Request) {
       kind,
       authorized: isAuth,
       issuedAt: Date.now(),
+      // Seen NOW, by definition — this is the join. Without seeding it the
+      // row would look 90s-stale to the takeover the moment it was written,
+      // and a second joiner could evict somebody who just arrived.
+      lastSeen: Date.now(),
       expiresAt: tokens.expiresAt,
       userId: effectiveUserId,
       name: effectiveName,

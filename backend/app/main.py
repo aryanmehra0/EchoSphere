@@ -81,15 +81,29 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="EchoSphere — Slow Loop", version="0.1.0", lifespan=lifespan)
 
-# The dashboard is served from :3000 in development, but the console may run on
-# any port (e.g. :3001 when something else owns 3000). CORS_ORIGINS lets a host
-# override the dev defaults without editing source; the browser must be allowed
-# to POST /observer/transcript or the voice path dies silently.
+# ── WHICH ORIGINS MAY REACH THE SLOW LOOP DIRECTLY ─────────────────────────
+#
+# The console now PROXIES this service at its own origin (`next.config.ts`
+# rewrites /observer/*, /ws/deltas, /health and the rest to :8000), so the
+# browser's requests are same-origin and never preflight. That is the fix for
+# the reported "TRANSCRIPT FORWARDING PAUSED: SLOW LOOP RETURNED HTTP 404",
+# and it also means CORS is no longer on the critical path for the dashboard.
+#
+# This list still matters for everything that calls :8000 DIRECTLY - the demo
+# scripts, the rehearsal rig, a curl during diagnosis - and for a console
+# deliberately pointed at an absolute NEXT_PUBLIC_SLOW_LOOP_WS.
+#
+# `start.ps1` no longer uses :3000 at all: it is the default port of every
+# Node dev server on a machine, and losing the race to one silently published
+# somebody else's app through the share tunnel. The console starts at :3100
+# and walks 3200/3300/3400/3500, so those are listed. 3000/3001 stay for a
+# console started by hand with a plain `npm run dev`.
 _cors_origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
+    *[
+        f"http://{host}:{port}"
+        for port in (3000, 3001, 3100, 3200, 3300, 3400, 3500)
+        for host in ("localhost", "127.0.0.1")
+    ],
     *[o.strip() for o in config.cors_origins().split(",") if o.strip()],
 ]
 app.add_middleware(

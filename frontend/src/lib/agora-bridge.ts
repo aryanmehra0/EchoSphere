@@ -30,6 +30,20 @@ export interface AgoraBridgeEvents {
   onAgentState: (state: AgentState) => void;
   onSpeakerVolumes?: (volumes: Map<number, number>) => void;
   onError: (message: string) => void;
+  /**
+   * The RTC data stream is alive — at least one transcript update arrived.
+   *
+   * Exists to CLEAR the silence watchdog's banner. That watchdog fires 45s
+   * after a join, long after `openBridge` has finished, and the only thing
+   * that ever lowered a degradation banner was a successful join. So once
+   * "NO TRANSCRIPT DATA" appeared it stayed on screen for the rest of the
+   * session — including, as reported, over a bridge that was by then
+   * transcribing perfectly (FRAMES 001, a turn visible in the panel).
+   *
+   * A banner that outlives its own cause is worse than none: it trains
+   * people to ignore the next real one.
+   */
+  onStreamAlive: () => void;
 }
 
 type RTMConstructor = new (
@@ -107,7 +121,11 @@ export class AgoraBridge {
     this.voice = new VoiceAgent({
       resolveRole: (uid) => this.resolveRole(uid),
       onUtterance: (transcript, role) => void this.forwardTranscript(transcript, role),
-      onTranscriptView: () => {},
+      onTranscriptView: () => {
+        // Proof the data stream carries traffic. Fires on every update; the
+        // store makes clearing idempotent.
+        this.events.onStreamAlive();
+      },
       onAgentState: (state) => this.events.onAgentState(state),
       onError: (detail) => this.events.onError(detail),
     });
@@ -349,8 +367,83 @@ export class AgoraBridge {
     }
   }
 
+  /**
+   * Mute means STOP CAPTURING, not "send silence".
+   *
+   * ── WHY `setMuted` WAS THE WRONG CALL ───────────────────────────────────
+   * Reported live: "it's still listening when on mute". It was, and Agora's
+   * own docs say so plainly (`rtc-sdk_en.d.ts`):
+   *
+   *     "Calling setMuted(true) does not stop capturing audio or video
+   *      and takes shorter time to take effect than setEnabled."
+   *
+   * `setMuted(true)` keeps the microphone open and the track published; it
+   * only stops the media data being sent. On a product whose entire promise
+   * is a faithful record of who said what, a control labelled "Muted" in
+   * critical red has to be a hard stop — not a request to transmit silence.
+   * A participant muting to take a private call reasonably expects the mic
+   * to be OFF, and the browser's own tab indicator stays lit either way, so
+   * nothing on screen contradicted the impression that it was.
+   *
+   * `setEnabled(false)` releases the capture device, which is the honest
+   * meaning of the button. It is slower to take effect — that is the
+   * documented trade — and on a bridge the correct side of that trade is
+   * certainty over latency.
+   *
+   * ── AND THE TWO CALLS MUST NEVER BE MIXED ───────────────────────────────
+   * The same docs, twice: "Do not call setEnabled and setMuted together."
+   * They fight over the same internal state, and the result is a track that
+   * reports one thing and does another. So this class uses `setEnabled`
+   * exclusively and `setMuted` appears nowhere else.
+   *
+   * `setEnabled(false)` unpublishes the track, so remote clients see
+   * `user-unpublished` and Echo stops receiving our audio entirely — which
+   * is precisely the point. Re-enabling republishes and fires
+   * `user-published` again; the `subscribing` guard is already cleared on
+   * unpublish, so the resubscribe goes through cleanly.
+   */
   async setMuted(muted: boolean): Promise<void> {
-    await this.mic?.setMuted(muted);
+    const mic = this.mic;
+    const client = this.client;
+    if (!mic || !client) return;
+
+    if (muted) {
+      // Release the capture device. This also unpublishes the track, so Echo
+      // stops receiving our audio rather than receiving silence.
+      await mic.setEnabled(false);
+      return;
+    }
+
+    /*
+      ── UNMUTING MUST REPUBLISH, EXPLICITLY ─────────────────────────────────
+      Reported live: "when I mute a mic and unmute it, it stops responding."
+
+      `setEnabled(true)` re-enables capture and is documented to republish,
+      but the republish is implicit and the agent's subscription is the thing
+      that has to come back with it. Trusting an implicit republish here is
+      what makes the failure silent: the mic is live, the UI says
+      "Microphone open", and Echo simply never hears another word — with no
+      error anywhere, because from the SDK's point of view nothing failed.
+
+      So the track is re-enabled and then EXPLICITLY republished, and a
+      republish of something already published is treated as success rather
+      than as a fault. `INVALID_LOCAL_TRACK`/"already published" is the
+      normal outcome when the implicit path already did the work; anything
+      else is a real failure and is surfaced, because a mic that cannot be
+      unmuted has to be visible immediately on a live bridge.
+    */
+    await mic.setEnabled(true);
+
+    try {
+      await client.publish([mic]);
+    } catch (error) {
+      const detail = message(error);
+      if (/already published|INVALID_LOCAL_TRACK|DUPLICATE/i.test(detail)) {
+        // The implicit republish beat us to it. Nothing to do.
+        return;
+      }
+      throw error;
+    }
   }
 
   async leave(): Promise<void> {
@@ -364,13 +457,35 @@ export class AgoraBridge {
     // And without this a rejoin would see every uid as "already subscribing"
     // and silently never subscribe to anyone.
     this.subscribing.clear();
-    await this.voice.stop();
+
+    /*
+      ── EVERY STEP BEST-EFFORT: THIS METHOD MUST NOT THROW ──────────────────
+      `leave()` is called at the START of every join, before the guard that
+      releases `joining` is armed. A throw from here therefore stranded that
+      flag and killed the Join button for the rest of the session — silently,
+      because the only symptom was a console line nobody was reading.
+
+      Nothing below is worth failing for. Each call disposes of a resource
+      belonging to a session that is already over, so "it was already gone"
+      and "it succeeded" are the same outcome to every caller.
+    */
+    try {
+      await this.voice.stop();
+    } catch (error) {
+      console.warn("[agora bridge] transcript layer did not stop cleanly", error);
+    }
 
     const mic = this.mic;
     this.mic = null;
     if (mic) {
-      mic.stop();
-      mic.close();
+      try {
+        // A track disabled by mute is a normal state to close from; `stop`
+        // on an already-stopped track is also normal. Neither is a fault.
+        mic.stop();
+        mic.close();
+      } catch (error) {
+        console.warn("[agora bridge] microphone did not close cleanly", error);
+      }
     }
 
     const rtm = this.rtm;
