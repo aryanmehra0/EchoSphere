@@ -222,6 +222,37 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
           },
         });
       },
+
+      /*
+        ── EVIDENCE OUTRANKS A 45-SECOND-OLD SUSPICION ────────────────────
+        The silence watchdog raises "NO TRANSCRIPT DATA" 45s after a join,
+        which is long after `openBridge` — the only thing that ever lowered a
+        banner — has returned. So the warning stayed on screen for the rest
+        of the session, and it was reported over a bridge that was by then
+        transcribing correctly: FRAMES 001, a turn rendered in the panel, and
+        an alarm above it insisting the stream had carried nothing.
+
+        An arriving transcript is direct proof of the opposite, so it clears
+        the banner. Fires on every update, hence the guard: dispatching a
+        no-op DELTA sixty times a minute would re-render the whole console
+        for nothing.
+
+        Deliberately narrow — it only clears a banner the transcript stream
+        can actually disprove. A different failure (no RTM, a dead agent, a
+        failed invite) has nothing to do with this evidence and must keep
+        saying so.
+      */
+      onStreamAlive: () => {
+        const banner = stateRef.current.degraded?.banner;
+        if (!banner) return;
+        if (!/NO TRANSCRIPT DATA|NO TRANSCRIPTS/i.test(banner)) return;
+        dispatch({
+          type: "DELTA",
+          payload: {
+            degraded: { voice: false, extraction: false, model: null, banner: null },
+          },
+        });
+      },
     });
     agora.current = transport;
 
@@ -278,7 +309,26 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     clearTimers();
     socket.current?.close();
     socket.current = null;
-    await agora.current?.leave();
+    /*
+      ── TEARDOWN MUST NEVER STRAND THE JOIN FLAG ────────────────────────────
+      This `await` sat between `joining.current = true` and the try/finally
+      that releases it, so ANY throw from `leave()` escaped with the flag
+      still set — and every subsequent press of J hit the guard, logged
+      "join already in progress" to a console nobody has open, and did
+      nothing. The Join button simply stopped working, permanently, with no
+      error on screen and no way back short of a reload.
+
+      Reported exactly that way. `leave()` is best-effort cleanup of a
+      session that is being discarded anyway — a track that will not close or
+      an SDK that is already torn down is not a reason to refuse the NEXT
+      join. So it is contained here rather than being allowed to poison the
+      flag.
+    */
+    try {
+      await agora.current?.leave();
+    } catch (error) {
+      console.warn("[bridge] previous session did not tear down cleanly", error);
+    }
     setAgentTrack(null);
 
     /*
@@ -498,6 +548,43 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
             `[bridge] Echo joined as ${agentId}, listening to uid ${credentials.uid}` +
               `${toolsEnabled ? " with Ledger tools" : " WITHOUT tools"}`,
           );
+          /*
+            ── "WITHOUT tools" BELONGS ON SCREEN, NOT IN console.info ───────
+            Reported live: the Support Engineer said "Database is down", the
+            Ledger filed it correctly under Support Engineer, and Echo
+            answered "who reported that?" by saying it was not associated
+            with any person or role.
+
+            The cause was that AGENT_TOOL_BASE_URL was empty, so
+            `buildToolsBlock` returned `{}` and the agent was created with NO
+            TOOLS — it could not read the Ledger at all. The only evidence
+            was this line in `console.info`, which nobody has open during a
+            demo.
+
+            From the room that is indistinguishable from Echo evading the
+            question, and it invites exactly the wrong diagnosis: people go
+            looking for a broken attribution pipeline when attribution is
+            fine and the tunnel is simply missing. So it is said out loud.
+
+            Not `voice: true` — Echo can hear and speak perfectly. Only the
+            READ capability is missing, and the banner says which.
+          */
+          if (!toolsEnabled) {
+            dispatch({
+              type: "DELTA",
+              payload: {
+                degraded: {
+                  voice: false,
+                  extraction: false,
+                  model: null,
+                  banner:
+                    "ECHO CANNOT READ THE LEDGER — no tunnel, so it cannot " +
+                    "answer who said what. Restart with: .\\start.ps1 -Tunnel",
+                },
+              },
+            });
+          }
+
           if (!registeredWithSlowLoop) {
             // Echo is audible but will never speak ABOUT the incident. That
             // distinction is impossible to work out from inside the room, so
@@ -732,11 +819,45 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(timer);
   }, [state.bridge]);
 
+  /*
+    ── THE BUTTON MUST NEVER CLAIM A MUTE THAT DID NOT HAPPEN ──────────────
+    `setMicOn` used to live only inside `.then()`, so if `setEnabled` rejected
+    the track stayed live while the UI kept its previous label — and the
+    failure was reported to `console.warn`, which nobody has open. Someone
+    pressing M, seeing nothing change, and pressing it again could end up
+    muted-on-screen and hot on the bridge, or the reverse.
+
+    On a product about faithful records, a mute control that can lie is worse
+    than one that occasionally refuses. So the state is set from the ACTUAL
+    outcome: on success it moves, and on failure it is forced back to the
+    truth (still live) and said out loud rather than logged.
+  */
   const toggleMic = useCallback(() => {
     const next = !micOn;
-    void agora.current?.setMuted(!next)
+    const bridge = agora.current;
+    if (!bridge) return;
+
+    void bridge
+      .setMuted(!next)
       .then(() => setMicOn(next))
-      .catch((error) => console.warn("[bridge] microphone update failed", error));
+      .catch((error) => {
+        console.warn("[bridge] microphone update failed", error);
+        // The track did not change, so neither does the label.
+        setMicOn(!next);
+        dispatch({
+          type: "DELTA",
+          payload: {
+            degraded: {
+              voice: false,
+              extraction: false,
+              model: null,
+              banner: next
+                ? "MICROPHONE DID NOT UNMUTE — the bridge cannot hear you"
+                : "MICROPHONE DID NOT MUTE — you are still live on the bridge",
+            },
+          },
+        });
+      });
   }, [micOn]);
 
   const value = useMemo<IncidentStore>(

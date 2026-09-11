@@ -74,6 +74,29 @@ type ToolkitItem = TranscriptHelperItem<
  * or talking, and inventing more states than the dashboard can render would
  * only produce a badge nobody has designed.
  */
+/**
+ * A short, stable fingerprint of a turn's text.
+ *
+ * Used only to build a `messageId` when Agora omits `stream_id`. It has to be
+ * derived from data every console received identically — the whole duplicate
+ * bug was an id that included a locally-resolved uid, so two browsers
+ * disagreed about the same sentence and the Slow Loop filed it twice under two
+ * different roles.
+ *
+ * FNV-1a: tiny, synchronous and dependency-free. Collision resistance is not a
+ * security property here — the id is scoped by turn number and only has to
+ * distinguish two different sentences on the same turn, which a 32-bit hash
+ * does comfortably.
+ */
+function hashText(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 function toAgentState(raw: string | undefined): AgentState {
   switch ((raw ?? "").toLowerCase()) {
     case "listening":
@@ -585,7 +608,40 @@ export class VoiceAgent {
         is exactly the right thing to key on. Including the channel-scoped uid
         makes the id unique across the whole bridge.
       */
-      messageId: `${resolvedUid}:${item.stream_id}:${item.turn_id}`,
+      /*
+        ── KEYED ONLY ON WHAT AGORA SENT, NEVER ON WHAT WE DERIVED ─────────
+        This was `${resolvedUid}:${stream_id}:${turn_id}`, and `resolvedUid`
+        is computed LOCALLY — it falls back to `item.uid` (the toolkit's
+        constant "0") when `stream_id` is unusable. Two consoles therefore
+        produced two DIFFERENT ids for the SAME frame, and the Slow Loop's
+        `TurnWindow.add` dedupes on `message_id` alone, so neither collapsed.
+
+        Reported live, and visible in the Ledger as two rows:
+
+            "Database is down."  ->  Support Engineer
+            "Database is down."  ->  DevOps Lead
+
+        One person said it once. Reproduced exactly:
+            console A (uid 1001) -> "1001:undefined:1"
+            console B (uid 1002) -> "1002:undefined:1"
+
+        That is worse than a duplicate: the second row is MIS-SOURCED, and
+        §6.2 Rule 1 catches an unsourced claim while nothing downstream
+        catches a wrongly-sourced one. It also means the contradiction engine
+        can adjudicate a sentence against itself.
+
+        So the id is built only from fields that arrive from Agora and are
+        therefore identical in every browser. `stream_id` is included when it
+        is present (it disambiguates two speakers on the same turn number),
+        and omitted rather than stringified as "undefined" when it is not —
+        `text` then carries the disambiguation, which is the only
+        console-independent signal left. Same sentence, same id, everywhere.
+      */
+      messageId: [
+        "t",
+        item.turn_id,
+        Number.isFinite(streamUid) && streamUid > 0 ? streamUid : hashText(text),
+      ].join(":"),
       object: isAgentTurn ? "assistant.transcription" : "",
     };
 
