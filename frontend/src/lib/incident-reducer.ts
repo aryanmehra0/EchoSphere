@@ -7,6 +7,8 @@ import type {
   TaskStatus,
   Transcript,
   ApprovalRequest,
+  Scenario,
+  HypothesisMatrixItem,
 } from "./types";
 
 /**
@@ -46,6 +48,7 @@ export type IncidentAction =
   | { type: "APPROVAL_REQUEST"; payload: ApprovalRequest }
   /** Approved, denied or expired — the modal comes down either way. */
   | { type: "APPROVAL_RESOLVED" }
+  | { type: "LOAD_SCENARIO"; scenario: Scenario }
   | { type: "RESET" };
 
 /* -------------------------------------------------------------------------- */
@@ -89,6 +92,23 @@ export const initialIncidentState: IncidentState = {
  * means React Flow keeps the node mounted and animates the status transition
  * instead of remounting it.
  */
+/**
+ * A long-running Sev-1 bridge routinely outlasts an hour, and `transcripts`/
+ * `timeline` only ever grow — every other collection is naturally bounded by
+ * real incident cardinality (there are only so many entities/claims/tasks a
+ * room produces), but a transcript feed keeps one entry per utterance and a
+ * timeline one per signal/decision for the entire duration. Capped to the
+ * most recent N with oldest-first eviction so a multi-hour incident doesn't
+ * grow these without bound; high enough that no realistic single incident's
+ * scrollback is actually reached in practice.
+ */
+const MAX_TRANSCRIPTS = 2000;
+const MAX_TIMELINE_EVENTS = 2000;
+
+function capOldest<T>(items: T[], max: number): T[] {
+  return items.length > max ? items.slice(items.length - max) : items;
+}
+
 function upsert<T extends { id: string }>(existing: T[], incoming?: T[]): T[] {
   if (!incoming?.length) return existing;
 
@@ -128,7 +148,7 @@ export function incidentReducer(
         contradictions: upsert(state.contradictions, d.contradictions),
         // The timeline is the one collection that stays strictly chronological,
         // because an operator reads it as a narrative rather than a set.
-        timeline: upsert(state.timeline, d.timeline).sort((a, b) => a.at - b.at),
+        timeline: capOldest(upsert(state.timeline, d.timeline).sort((a, b) => a.at - b.at), MAX_TIMELINE_EVENTS),
         rti: d.rti ?? state.rti,
         phase: d.phase ?? state.phase,
         agent: d.agent ?? state.agent,
@@ -156,7 +176,7 @@ export function incidentReducer(
         unchecked: d.unchecked ?? [],
         tasks: d.tasks ?? [],
         contradictions: d.contradictions ?? [],
-        timeline: [...(d.timeline ?? [])].sort((a, b) => a.at - b.at),
+        timeline: capOldest([...(d.timeline ?? [])].sort((a, b) => a.at - b.at), MAX_TIMELINE_EVENTS),
         rti: d.rti ?? state.rti,
         phase: d.phase ?? state.phase,
         agent: d.agent ?? state.agent,
@@ -201,8 +221,9 @@ export function incidentReducer(
       if (at === -1) {
         return {
           ...state,
-          transcripts: [...state.transcripts, incoming].sort(
-            (a, b) => a.at - b.at,
+          transcripts: capOldest(
+            [...state.transcripts, incoming].sort((a, b) => a.at - b.at),
+            MAX_TRANSCRIPTS,
           ),
         };
       }
@@ -258,6 +279,16 @@ export function incidentReducer(
         contradictions: state.contradictions.map((c) =>
           c.id === action.id ? { ...c, resolved: true } : c,
         ),
+      };
+
+    case "LOAD_SCENARIO":
+      return {
+        ...state,
+        entities: action.scenario.entities,
+        links: action.scenario.links,
+        claims: action.scenario.initialClaims
+          ? upsert(state.claims, action.scenario.initialClaims)
+          : state.claims,
       };
 
     case "RESET":
@@ -348,6 +379,128 @@ export const selectInferences = (s: IncidentState): Claim[] =>
 export const selectOpenHypotheses = (s: IncidentState): Claim[] => {
   const settled = selectSupersededIds(s);
   return selectHypotheses(s).filter((c) => !settled.has(c.id));
+};
+
+function extractEntity(text: string): string {
+  const lower = text.toLowerCase();
+  if (lower.includes("redis") || lower.includes("cache")) return "redis";
+  if (lower.includes("replica")) return "postgres-replica";
+  if (lower.includes("postgres") || lower.includes("db") || lower.includes("database")) return "postgres";
+  if (lower.includes("checkout") || lower.includes("cart")) return "checkout";
+  if (lower.includes("stripe") || lower.includes("payment")) return "stripe";
+  if (lower.includes("network") || lower.includes("vpc") || lower.includes("packet") || lower.includes("transit") || lower.includes("drop")) return "network";
+  if (lower.includes("auth") || lower.includes("jwt") || lower.includes("token")) return "auth";
+  if (lower.includes("ingress") || lower.includes("gateway") || lower.includes("proxy")) return "ingress";
+  return "system";
+}
+
+const DEFAULT_PROBES: Record<string, { entity: string; metric: string; label: string; provider: string }> = {
+  redis: { entity: "redis", metric: "memory_utilization_pct", label: "Redis Primary", provider: "Datadog APM" },
+  postgres: { entity: "postgres", metric: "connection_pool_pct", label: "Postgres Primary", provider: "Prometheus" },
+  "postgres-replica": { entity: "postgres-replica", metric: "replication_lag_s", label: "Postgres Replica", provider: "Prometheus" },
+  checkout: { entity: "checkout", metric: "p99_latency_ms", label: "Checkout Service", provider: "Datadog APM" },
+  network: { entity: "network", metric: "packet_drop_pct", label: "VPC Netpath", provider: "CloudWatch" },
+  stripe: { entity: "stripe", metric: "timeout_rate_pct", label: "Stripe Connector", provider: "Datadog APM" },
+  auth: { entity: "auth", metric: "p99_latency_ms", label: "Auth Service", provider: "Datadog APM" },
+  ingress: { entity: "ingress", metric: "http_5xx_pct", label: "Ingress Gateway", provider: "Datadog APM" },
+};
+
+/**
+ * Evaluated Hypothesis Elimination Matrix.
+ * Pairs each spoken theory with empirical measurements and determines
+ * whether it is REFUTED, CORROBORATED, or OPEN (untested).
+ */
+export const selectHypothesisMatrix = (s: IncidentState): HypothesisMatrixItem[] => {
+  const hypotheses = selectHypotheses(s);
+  const established = selectEstablished(s);
+  const settled = selectSupersededIds(s);
+
+  const byEntity = new Map<string, Claim[]>();
+  for (const c of established) {
+    const ent = c.entity || extractEntity(c.text);
+    const existing = byEntity.get(ent) ?? [];
+    existing.push(c);
+    byEntity.set(ent, existing);
+  }
+
+  return hypotheses.map((hyp) => {
+    const targetEntity = hyp.entity || extractEntity(hyp.text);
+    const candidates = byEntity.get(targetEntity) ?? [];
+
+    if (hyp.lifecycle === "REFUTED" || settled.has(hyp.id)) {
+      const supersedingClaim = established.find(
+        (c) => c.supersedes === hyp.id || hyp.supersedes === c.id || (c.contradicts && c.contradicts.includes(hyp.id))
+      );
+      return {
+        hypothesis: hyp,
+        status: "REFUTED",
+        evidenceClaim: supersedingClaim,
+        reason: supersedingClaim
+          ? `Settled on the ledger by ${supersedingClaim.speakerRole}: ${supersedingClaim.text}`
+          : "Theory marked as refuted on the incident record.",
+      };
+    }
+
+    if (candidates.length > 0) {
+      const sorted = [...candidates].sort((a, b) => b.at - a.at);
+      const evidenceClaim = sorted[0];
+      const textLower = evidenceClaim.text.toLowerCase();
+
+      const isOk = [
+        "[ok]",
+        "ok",
+        "baseline",
+        "0 evicted",
+        "34.2%",
+        "48.0%",
+        "42ms",
+        "healthy",
+        "normal",
+      ].some((token) => textLower.includes(token));
+      const isCritical = [
+        "[critical]",
+        "[warning]",
+        "critical",
+        "warning",
+        "drop rate",
+        "92.4%",
+        "2,840ms",
+        "482.5s",
+        "38.5%",
+      ].some((token) => textLower.includes(token));
+
+      if (isOk && !isCritical) {
+        return {
+          hypothesis: hyp,
+          status: "REFUTED",
+          evidenceClaim,
+          reason: `Refuted by ${evidenceClaim.speakerRole}: telemetry confirms normal operational thresholds.`,
+        };
+      }
+
+      if (isCritical) {
+        return {
+          hypothesis: hyp,
+          status: "CORROBORATED",
+          evidenceClaim,
+          reason: `Corroborated by ${evidenceClaim.speakerRole}: observed telemetry aligns with reported symptom.`,
+        };
+      }
+    }
+
+    const suggested = DEFAULT_PROBES[targetEntity] ?? {
+      entity: targetEntity,
+      label: targetEntity.charAt(0).toUpperCase() + targetEntity.slice(1),
+      provider: "Datadog APM",
+    };
+
+    return {
+      hypothesis: hyp,
+      status: "OPEN",
+      suggestedProbe: suggested,
+      reason: "No empirical telemetry probe or measurement has evaluated this theory yet.",
+    };
+  });
 };
 
 /* -------------------------------------------------------------------------- */

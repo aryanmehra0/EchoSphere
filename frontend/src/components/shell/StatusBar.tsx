@@ -29,7 +29,7 @@ function Item({
   title?: string;
 }) {
   return (
-    <span className="flex items-center gap-1.5" title={title}>
+    <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap" title={title}>
       <span className="text-[10px] tracking-[0.06em] text-ink-4 uppercase">
         {label}
       </span>
@@ -42,8 +42,8 @@ export function StatusBar() {
   const { state, now, source } = useIncident();
 
   return (
-    <footer className="z-20 flex h-6 shrink-0 items-center gap-3 border-t border-line bg-raised px-3">
-      <span className="flex items-center gap-1.5">
+    <footer className="scroll-thin z-20 flex h-6 shrink-0 items-center gap-3 overflow-x-auto border-t border-line bg-raised px-3">
+      <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
         <Dot
           tone={state.bridge === "live" ? "stable" : "neutral"}
           pulse={state.bridge === "live"}
@@ -63,7 +63,7 @@ export function StatusBar() {
       */}
       {source ? (
         <span
-          className="flex items-center gap-1.5"
+          className="flex shrink-0 items-center gap-1.5 whitespace-nowrap"
           title={
             source === "live"
               ? "Receiving sequenced deltas from the Slow Loop"
@@ -83,7 +83,7 @@ export function StatusBar() {
         </span>
       ) : null}
 
-      <Rule className="h-3" />
+      <Rule className="h-3 shrink-0" />
 
       {/*
         These must stay TRUE. This strip is where an operator looks to confirm
@@ -109,7 +109,7 @@ export function StatusBar() {
       <Item label="ASR" value={ASR_LABEL} title="Speech-to-text — Agora-managed Deepgram nova-3, no vendor key required" />
       <Item label="TTS" value={TTS_LABEL} title="Echo's voice — low-latency model, chosen because the cascade already costs us the §12.1 budget" />
 
-      <Rule className="h-3" />
+      <Rule className="h-3 shrink-0" />
 
       <Item
         label="Frames"
@@ -129,7 +129,7 @@ export function StatusBar() {
 
       {/* Keyboard affordances sit at the right, out of the reading path but
           always visible — discoverable without being loud. */}
-      <div className="ml-auto flex items-center gap-3">
+      <div className="ml-auto flex shrink-0 items-center gap-3">
         <span className="hidden items-center gap-1.5 lg:flex">
           <Kbd>J</Kbd>
           <span className="text-[10px] text-ink-4">bridge</span>
@@ -138,9 +138,9 @@ export function StatusBar() {
           <Kbd>M</Kbd>
           <span className="text-[10px] text-ink-4">mute</span>
         </span>
-        <Rule className="h-3" />
+        <Rule className="h-3 shrink-0" />
         <span
-          className="tnum font-mono text-[10px] text-ink-3"
+          className="tnum font-mono text-[10px] whitespace-nowrap text-ink-3"
           suppressHydrationWarning
         >
           {now ? clock(now) : "--:--:--"}

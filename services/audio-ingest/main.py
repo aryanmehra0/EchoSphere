@@ -1,10 +1,29 @@
 """
 Native Audio Ingestion Sidecar — Python 3.11 / Agora RTC C++ Engine.
 
-Subscribes to live RTC channel audio, extracts acoustic features over a 500ms
-sliding aggregation window (RMS energy, speaking cadence, VAD, overlap),
-excludes Echo's own voice (G2 invariant), and streams batched telemetry to the
-Python 3.14 Slow Loop (Phase 5 P2).
+── CURRENT STATUS: NOT YET WIRED TO REAL AUDIO ─────────────────────────────
+This module's aggregation/telemetry-forwarding logic below (the RMS/VAD math
+in `AcousticWindowAggregator` and `process_audio_frame`) is real and tested,
+but nothing in this file actually calls it: there is no Agora RTC subscriber
+here, so `process_audio_frame` is never invoked with a live audio frame in
+this build, and the Room Tension Index feature it feeds
+(`/observer/acoustic_telemetry` -> `RoomTensionService` -> the dashboard's
+tension meter) stays permanently at its default in a real deployment.
+
+`main()` used to log "ready" and return immediately — with this container's
+`restart: unless-stopped` in `docker-compose.yml`, that meant a crash-loop:
+exit near-instantly, get restarted, exit again, forever, doing nothing.
+It now idles instead, which is honest about the actual state: a harmless
+no-op sidecar, not a broken one.
+
+To make this real: install Python 3.11/3.12 specifically for this
+container (already true — see the Dockerfile), add
+`agora-python-server-sdk` for real (it is declared in requirements.txt but
+never imported here), and subscribe to `on_playback_audio_frame_before_mixing`
+per-UID unmixed PCM, calling `process_audio_frame(uid, pcm_bytes, vad)` for
+each frame. `backend/requirements.txt`'s own comment on why the MAIN Slow
+Loop doesn't do this directly (no wheel for Python 3.14) is exactly why this
+is a separate sidecar in the first place.
 """
 
 from __future__ import annotations
@@ -141,12 +160,32 @@ def process_audio_frame(uid: int, pcm_bytes: bytes, vad: bool = True) -> None:
         forward_telemetry_payload(batched)
 
 
+IDLE_LOG_INTERVAL_S = 300  # 5 minutes — present in logs without spamming them
+
+
 def main() -> None:
     log.info("Starting Audio Ingestion Sidecar (500ms Aggregation Window)")
     log.info("Target Slow Loop: %s, initial channel: %s", SLOW_LOOP_URL, CHANNEL)
+    log.warning(
+        "audio capture is NOT implemented in this build — no Agora RTC subscriber is "
+        "wired up, so no acoustic telemetry will be sent and the Room Tension Index "
+        "stays at its default. See this module's docstring for what's needed to make "
+        "it real. Idling rather than exiting, so the container does not crash-loop."
+    )
 
     sync_config_from_slow_loop()
-    log.info("Sidecar audio observer listener ready.")
+
+    # Idle rather than return: this process previously exited right after the
+    # line above, and `docker-compose.yml` runs it with `restart:
+    # unless-stopped` — an immediate exit meant an immediate restart, forever,
+    # doing nothing each time. Blocking here makes it a stable, harmless
+    # no-op instead of a crash-loop. Re-syncing periodically costs nothing
+    # and picks up a channel/agent UID change even though nothing here acts
+    # on it yet.
+    while True:
+        time.sleep(IDLE_LOG_INTERVAL_S)
+        sync_config_from_slow_loop()
+        log.info("audio-ingest sidecar idle — no audio capture implemented in this build")
 
 
 if __name__ == "__main__":

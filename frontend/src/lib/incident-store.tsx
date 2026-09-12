@@ -23,6 +23,8 @@ import { DEMO_SCRIPT, rebaseAction } from "./mock-stream";
 import {
   beaconLeave,
   BridgeCredentialError,
+  fetchProjectDetails,
+  fetchProjects,
   fetchRosterParticipants,
   heartbeatRoster,
   inviteAgent,
@@ -34,7 +36,12 @@ import {
 } from "./delta-socket";
 import { AgoraBridge } from "./agora-bridge";
 import type { IRemoteAudioTrack } from "agora-rtc-sdk-ng";
-import type { IncidentState, ParticipantRole, RosterParticipant } from "./types";
+import type {
+  IncidentState,
+  ParticipantRole,
+  ProjectWorkspace,
+  RosterParticipant,
+} from "./types";
 
 /**
  * Where the incident data on screen is coming from.
@@ -99,6 +106,14 @@ interface IncidentStore {
   refreshParticipants: () => Promise<void>;
   postMortemOpen: boolean;
   setPostMortemOpen: (open: boolean) => void;
+  historicalSearchOpen: boolean;
+  setHistoricalSearchOpen: (open: boolean) => void;
+  projectModalOpen: boolean;
+  setProjectModalOpen: (open: boolean) => void;
+  activeProject: ProjectWorkspace | null;
+  projects: ProjectWorkspace[];
+  selectProject: (projectId: string) => Promise<void>;
+  refreshProjects: () => Promise<void>;
 }
 
 /**
@@ -139,6 +154,39 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
   const [activeSpeakers, setActiveSpeakers] = useState<Set<number>>(new Set());
   const [participants, setParticipants] = useState<RosterParticipant[]>([]);
   const [postMortemOpen, setPostMortemOpen] = useState(false);
+  const [historicalSearchOpen, setHistoricalSearchOpen] = useState(false);
+  const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [projects, setProjects] = useState<ProjectWorkspace[]>([]);
+  const [activeProject, setActiveProject] = useState<ProjectWorkspace | null>(null);
+
+  const refreshProjects = useCallback(async () => {
+    const list = await fetchProjects();
+    if (list && list.length > 0) {
+      setProjects(list);
+      setActiveProject((prev) => {
+        if (prev) {
+          const found = list.find((p) => p.id === prev.id);
+          return found || prev;
+        }
+        return list[0];
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refreshProjects();
+  }, [refreshProjects]);
+
+  const selectProject = useCallback(async (projectId: string) => {
+    const details = await fetchProjectDetails(projectId);
+    if (details) {
+      setActiveProject(details);
+    } else {
+      const found = projects.find((p) => p.id === projectId);
+      if (found) setActiveProject(found);
+    }
+  }, [projects]);
 
   /**
    * The latest state, readable from inside `openBridge`.
@@ -419,7 +467,8 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       says which capability was lost rather than silently pretending.
     */
     socket.current = openDeltaSocket({
-      url: slowLoopUrl(),
+      url: slowLoopUrl(cleanChannel),
+      channel: cleanChannel,
       dispatch,
       onStatus: (s) => {
         if (s === "live") {
@@ -929,6 +978,14 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       refreshParticipants,
       postMortemOpen,
       setPostMortemOpen,
+      historicalSearchOpen,
+      setHistoricalSearchOpen,
+      projectModalOpen,
+      setProjectModalOpen,
+      activeProject,
+      projects,
+      selectProject,
+      refreshProjects,
     }),
     [
       state,
@@ -946,6 +1003,12 @@ export function IncidentProvider({ children }: { children: ReactNode }) {
       participants,
       refreshParticipants,
       postMortemOpen,
+      historicalSearchOpen,
+      projectModalOpen,
+      activeProject,
+      projects,
+      selectProject,
+      refreshProjects,
     ],
   );
 

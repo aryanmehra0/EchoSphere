@@ -87,11 +87,35 @@ class TunnelGate(unittest.TestCase):
     def _client(self) -> TestClient:
         return TestClient(app)
 
+    # A real request that transited Cloudflare's tunnel always carries this —
+    # stamped on by Cloudflare's own edge, not something the caller sets. It
+    # is what actually marks these test requests as "remote" now; the `host`
+    # header is kept alongside it for readability but is no longer what the
+    # gate checks (see `middleware.is_local`'s docstring for why).
+    _TUNNELED_HEADERS = {"cf-ray": "8a1b2c3d4e5f6789-SJC"}
+
     def test_localhost_is_never_challenged(self) -> None:
         with mock.patch.dict(os.environ, {"AGENT_TOOL_SECRET": "s3cret"}):
             with self._client() as c:
                 r = c.get("/health", headers={"host": "127.0.0.1:8000"})
                 self.assertNotIn(r.status_code, (401, 503))
+
+    def test_a_spoofed_host_header_alone_no_longer_bypasses_the_gate(self) -> None:
+        """
+        The vulnerability this project's tunnel gate used to have: `Host` is
+        picked entirely by the caller, and a Cloudflare Quick Tunnel forwards
+        it unmodified. A request carrying `Host: 127.0.0.1` but no Cloudflare
+        fingerprint is exactly what a remote attacker sending that header
+        would produce, and it must still be refused.
+        """
+        with mock.patch.dict(os.environ, {"AGENT_TOOL_SECRET": "s3cret"}):
+            with self._client() as c:
+                r = c.post(
+                    "/tools/query_incident_state",
+                    json={},
+                    headers={"host": "127.0.0.1:8000", **self._TUNNELED_HEADERS},
+                )
+                self.assertEqual(r.status_code, 401)
 
     def test_remote_tool_call_without_a_token_is_refused(self) -> None:
         with mock.patch.dict(os.environ, {"AGENT_TOOL_SECRET": "s3cret"}):
@@ -99,7 +123,7 @@ class TunnelGate(unittest.TestCase):
                 r = c.post(
                     "/tools/query_incident_state",
                     json={},
-                    headers={"host": "abc-def.trycloudflare.com"},
+                    headers={"host": "abc-def.trycloudflare.com", **self._TUNNELED_HEADERS},
                 )
                 self.assertEqual(r.status_code, 401)
 
@@ -112,6 +136,7 @@ class TunnelGate(unittest.TestCase):
                     headers={
                         "host": "abc-def.trycloudflare.com",
                         "x-echo-tool-token": "s3cret",
+                        **self._TUNNELED_HEADERS,
                     },
                 )
                 self.assertNotIn(r.status_code, (401, 503))
@@ -125,6 +150,7 @@ class TunnelGate(unittest.TestCase):
                     headers={
                         "host": "abc-def.trycloudflare.com",
                         "x-echo-tool-token": "wrong",
+                        **self._TUNNELED_HEADERS,
                     },
                 )
                 self.assertEqual(r.status_code, 401)
@@ -140,7 +166,7 @@ class TunnelGate(unittest.TestCase):
                 r = c.post(
                     "/bridge/say",
                     json={"text": "anything"},
-                    headers={"host": "abc-def.trycloudflare.com"},
+                    headers={"host": "abc-def.trycloudflare.com", **self._TUNNELED_HEADERS},
                 )
                 self.assertEqual(r.status_code, 503)
 
@@ -152,8 +178,24 @@ class TunnelGate(unittest.TestCase):
         """
         with mock.patch.dict(os.environ, {"AGENT_TOOL_SECRET": "s3cret"}):
             with self._client() as c:
-                r = c.get("/health", headers={"host": "abc-def.trycloudflare.com"})
+                r = c.get("/health", headers={"host": "abc-def.trycloudflare.com", **self._TUNNELED_HEADERS})
                 self.assertNotIn(r.status_code, (401, 503))
+
+    def test_remote_transcript_ingest_without_a_token_is_now_refused(self) -> None:
+        """
+        `/observer/transcript` used to be an always-exempt "browser path", so
+        a remote caller with no secret at all could inject a fabricated,
+        fully-attributed transcript line into a live incident. It is a normal
+        gated path now, like every other write-capable route.
+        """
+        with mock.patch.dict(os.environ, {"AGENT_TOOL_SECRET": "s3cret"}):
+            with self._client() as c:
+                r = c.post(
+                    "/observer/transcript",
+                    json={"uid": 42, "role": "DevOps Lead", "text": "fabricated", "isFinal": True},
+                    headers={"host": "abc-def.trycloudflare.com", **self._TUNNELED_HEADERS},
+                )
+                self.assertEqual(r.status_code, 401)
 
 
 class Registration(unittest.TestCase):

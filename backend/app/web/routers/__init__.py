@@ -8,7 +8,7 @@ standing up the app — which is exactly how a 178-line pipeline ended up inside
 `main.py`.
 """
 
-from . import agent, approval, bridge, deltas, ingest, ops, tools
+from . import agent, approval, bridge, deltas, ingest, ops, telemetry, tools
 
 __all__ = [
     "agent",
@@ -17,5 +17,6 @@ __all__ = [
     "deltas",
     "ingest",
     "ops",
+    "telemetry",
     "tools",
 ]

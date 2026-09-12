@@ -1,12 +1,17 @@
-# 🛡️ EchoSphere Hackathon — Master Context Document
+# 🛡️ EchoSphere Hackathon — Master Context Document (ARCHIVE)
+
+> [!WARNING]
+> **SUPERSEDED / LEGACY RECORD (DO NOT FOLLOW)**
+> This document is **Golden Master v5**, kept strictly as an archive of the baseline that v6's depth analysis was performed against.
+> **DO NOT FOLLOW THIS ARCHITECTURE.** The authoritative specification is **Golden Master v6** (`docs/echosphere_architecture_v6.md`) and the code-grounded **`ARCHITECTURE.md`**.
 
 ## Real-Time AI Incident Commander: "Echo"
 
 > **Project Name:** Echo — Real-Time AI Incident Commander
 > **Hackathon:** EchoSphere: Agora Conversational AI Hackathon
 > **Track:** AI Incident Commander
-> **Architecture Version:** Golden Master v5 (FINAL)
-> **Last Updated:** August 24, 2026
+> **Architecture Version:** Golden Master v5 (SUPERSEDED)
+
 
 ---
 

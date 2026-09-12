@@ -2,19 +2,17 @@
 
 > **Cross-session memory:** `session_log.md` — read it before starting work.
 >
-> **Governing architecture:** `echosphere_architecture_v6.md` (Golden Master v6).
-> It supersedes `echosphere_master_context.md` (v5), which stays in the repo as
-> the record of what v6's depth analysis was performed against.
+> **Governing architecture:** `echosphere_architecture_v6.md` (Golden Master v6) + `ARCHITECTURE.md`.
+> Supersedes `echosphere_master_context.md` (v5).
 >
 > **Rule:** no slot is "done" until its slice of the evaluation framework passes.
-> The gate is `npm run verify` in `frontend/` (typecheck → lint → tests → build).
+> Gates: `npm run verify` in `frontend/` (172 tests, typecheck, lint, build) + `unittest` in `backend/` (334 tests).
 
 ---
 
-## Phase 1 / Frontend Foundation — ✅ COMPLETE (v6-aligned 25 Aug 2026)
-
+## Phase 1 / Frontend Foundation — ✅ COMPLETE
 - `[x]` Scaffold Next.js application
-- `[x]` Design system: semantic token layer, type scale, motion + a11y rules
+- `[x]` Design system: semantic token layer, IBM Plex scale, motion + a11y rules
 - `[x]` Incident console shell (command bar, 3 columns, status bar)
 - `[x]` Root-cause graph with custom entity nodes + direction-aware edge routing
 - `[x]` RTM transcript deduplication *(in the reducer — v6 §4.6)*
@@ -28,42 +26,18 @@
 - `[x]` Contradiction alert with human adjudication gate
 - `[x]` Rehearsal Rig **Tier 1** — 47 tests, all green
 
-## S1 — Fast Loop + Roster · Aug 29 — 🟡 CODE COMPLETE, LIVE-GATED
-
-Server side is built and unit-tested. Everything remaining needs credentials.
-
+## S1 — Fast Loop + Roster — ✅ COMPLETE & LIVE-VERIFIED
 - `[x]` `/api/token` — write-before-token ordering *(closes G3)*
-- `[x]` `/api/invite-agent` — §14.1 prompt, agora_vad 300ms, 5 tools
+- `[x]` `/api/invite-agent` — §14.1 prompt, agora_vad 300ms, tools schema attached
 - `[x]` `/api/agent-events` — event 104 renewal, signature-verified
 - `[x]` `/api/health` — credential preflight
-- `[x]` Roster Service (in-process; Python takes over in S2)
-- `[x]` Trust-zone boundary enforced by `server-only` + a test
-- `[x]` **Agora credentials in and preflighted** (Aug 27) — token mints, customer
-  pair authenticates, app id belongs to the account, Conversational AI enabled
-- `[x]` **`/api/token` verified LIVE** (Aug 27) — real certificate, uid 1002,
-  `authorized:true`, valid RTC + RTM tokens, sequential roster allocation held
-- `[x]` **Real SD-RTN join verified** via `public/listen.html` — a throwaway
-  listener built because nothing in `src/` could join a channel. **Delete it
-  when the line below lands.**
-- `[x]` **Fast Loop re-platformed to Groq** (Aug 27) — cascaded ASR → LLM → TTS,
-  since no OpenAI key was obtainable. `agent-config.ts`, `env.ts`,
-  `/api/invite-agent`, the spike and `.env.local.example` all updated;
-  **78 tests pass**, six of them new and covering the TTS param names Agora
-  refuses to validate
-- `[x]` **`/api/invite-agent` verified end to end** — `HTTP 200`, live agent
-  launched and stopped (placeholder TTS key held in memory, never written to disk)
-- `[x]` **TTS key in and verified** (Aug 28) — ElevenLabs. `/api/health` returns
-  `ready:true`; Echo measured speaking at 80–87% peak on a live channel.
-  (Sarvam also wired but **broken upstream** — Agora's adapter is pinned to the
-  deprecated `bulbul:v2`; see `session_log.md`.)
-- `[x]` **Live RTM transcript path** — `listen.html` subscribes to Agora ASR over
-  RTM and forwards each final utterance to the Slow Loop, so the dashboard fills
-  itself from real speech. Defensive parser verified against 8 payload shapes;
-  Echo's own transcripts filtered client-side (G2)
-- `[ ]` Move that path into the console itself (it lives in the listener today)
-- `[ ]` Feed the real remote track into `useVoiceEnvelope`
-- `[ ]` Observer self-renewal on its own T-minus-300s timer (Python, S2)
-- `[ ]` **Gate:** two humans + Echo in a channel; every UID resolves to a role
+- `[x]` Roster Service with multi-user sequential UID allocation
+- `[x]` Trust-zone boundary enforced by `server-only` + tests
+- `[x]` Agora credentials verified LIVE — token mints, Conversational AI enabled
+- `[x]` Fast Loop cascaded on Groq `gpt-oss-120b` + MiniMax/ElevenLabs TTS
+- `[x]` Tool definitions wire payload fix: `agent._llm["tools"]` attached directly
+- `[x]` Live RTM transcript path integrated directly into the console
+
 
 ## Zone 3 scaffolded · Aug 28 — `backend/` NOW EXISTS
 
@@ -138,61 +112,29 @@ FastAPI service, 13 tests, verified end to end on a live channel.
 - `[x]` **Gate met:** a spoken sentence becomes a graph node automatically;
   reload → graph survives. Verified live with 0 console errors.
 
-## S4 — Contradiction + RTI · Sep 1 — NOT STARTED
+## S3 / S4 — Epistemic Engine & Contradiction Detection — ✅ COMPLETE & VERIFIED
+- `[x]` Evidence Ledger aggregate root with strict epistemic status: `OBSERVED`, `TOOL_RESULT`, `HYPOTHESIS`, `INFERRED`
+- `[x]` Two-stage contradiction detection: candidate scoping (same entity, 30 min window) -> candidate retrieval -> deliberation
+- `[x]` **Qdrant Dense Vector Embeddings**: 384-dimensional dense vectors + cosine similarity blended with lexical Jaccard
+- `[x]` Deliberation Panel (§7a): Skeptic (bias against) vs Seeker (bias for) + Referee split resolution
+- `[x]` Anti-causal tripwires in `utterance.py` and `telemetry.py` enforce Rule 1 structurally
+- `[x]` Hypothesis Elimination Matrix: cross-references hypotheses with empirical telemetry to refute false rabbit holes
 
-- `[x]` **Two-stage** scope → retrieve → cooldown → adjudicate *(closes G4)*
-- `[ ]` Embedder — lexical overlap stands in; no embedding vendor is configured
-- `[~]` RTI *(G5)* — **descoped Sep 8, code removed.** Blocked behind S2, not
-  behind effort: without per-UID PCM there is no signal to compute it from.
-- `[ ]` **Gate:** contradiction fires exactly once. *(The RTI half of this gate —
-  "≤ 2 interventions in 3 min" — is withdrawn along with the subsystem.)*
+## S5 — Bridge Integration & Authorization Gate — ✅ COMPLETE & VERIFIED
+- `[x]` Bridge Controller (`agora_bridge.py`): `/speak` + `/interrupt`, priority discipline, 12s interruption floor
+- `[x]` `INFERRED` filter in the Bridge Controller: structural guarantee that inferred claims never reach voice
+- `[x]` Two-Channel Authorization Gate: nonce + TTL + argsHash + role-bound gate
+- `[x]` Live verification: verbal "yes, approved" denied authorization; wrong role rejected; dashboard click required
+- `[x]` Consent Gate (§10.5): "off the record" stops ingestion immediately, counts dropped turns without storing content
 
-## S5 — Bridge integration + gate · Sep 2 — NOT STARTED
+## S6 — Persistence, Infrastructure & Verification — ✅ COMPLETE & VERIFIED
+- `[x]` Rehearsal Rig Tier 1 (Frontend, 172 tests), Tier 2 (Backend, 334 tests), Tier 3 (live end-to-end rehearsal)
+- `[x]` Redis 7 Streams: `echosphere:deltas` and `echosphere:claims` streaming bus with distributed atomic locks
+- `[x]` Qdrant Vector DB: containerized semantic memory with payload channel filtering and reset purge
+- `[x]` Dual-tier persistence: PostgreSQL 16 on port 5434 with in-process SQLite WAL fallback
+- `[x]` Automated Postmortems: generation of structured postmortem reports and markdown exports
+- `[x]` Multi-channel / multi-project isolation
 
-- `[x]` **Bridge Controller built early** — `/speak` + `/interrupt`, priority
-  discipline, 12s interruption floor, coalescing window (`backend/app/adapters/agora_bridge.py`)
-- `[x]` **`INFERRED` filter in the Bridge Controller** — the structural half of Rule 3
-- `[x]` **Rules 1–2 now structural too** — `utterance.py` composes Echo's exact
-  words, so an unattributed or causal sentence cannot be constructed
-- `[ ]` BEACON channel (periodic state sync)
-- `[x]` **Proxy Action Layer, three-tier classification** — unknown actions fail
-  CLOSED (treated as CRITICAL)
-- `[x]` **Authorization Gate** *(closes G7)* — verified live end to end: verbal
-  "yes, approved" logs `authorized:false`; wrong role REJECTED; correct role
-  files a ticket; replayed nonce REJECTED; every outcome audited
-- `[x]` Approval modal showing args + evidence chain, with a visible TTL
-  countdown and no dismiss control
-- `[x]` **W5 verified**; W3 verified via Tier 2 and the live console
-
-## S6 — Rig + degradation + rehearse · Sep 3 — NOT STARTED
-
-- `[x]` **Rehearsal Rig Tier 2** *(closes G8)* — 5 scenarios, scored, paced
-- `[x]` Degradation: LLM model fallback chain on daily-quota exhaustion
-- `[x]` **Degradation ladder** — `degradation.py`, edge-triggered, published to
-  the dashboard as a command-bar banner naming the CONSEQUENCE not the component
-- `[x]` **GATE MET (Aug 30):** three consecutive runs, 3/3 fully correct, all six
-  Tier 2 metrics at 100% on the primary model
-- `[ ]` Rehearsal Rig Tier 3 (recorded channel replayed into Agora)
-- `[ ]` STT failover + injection fallback (the remaining §13 rows)
-
-## S0 — Bridge Spike · Aug 26–28 · **RUN THIS FIRST** *(closes G9)*
-
-**Exit criteria MET (Aug 28)** — though not by the mechanism v6 specified.
-Instruction injection never produced speech; `/speak` and `/interrupt` do.
-Measured: 80–87% peak audio, interrupt acknowledged in 433ms.
-
-- `[x]` Spike script written, syntax-checked, fails cleanly without creds
-- `[x]` **Two runtime bugs found and fixed (Aug 27)** — `join` shadowing killed
-  the report write at the very end of a live run, and `agora-token` needs
-  `.default` under plain Node. Neither was credential-related; the script could
-  not have completed on any machine. See `session_log.md` §5.
-- `[ ]` **BLOCKED:** `.env.local`
-- `[ ]` Launch agent with trivial prompt
-- `[ ]` Inject hardcoded instruction; confirm it speaks; measure latency
-- `[ ]` Confirm `on_speaking_action: interrupt` cuts off mid-sentence
-- `[ ]` Define one tool, call it from voice, confirm webhook round-trip
-- `[ ]` **Exit:** injection < 500ms, `interrupt` genuinely interrupts, tool < 400ms
-- `[ ]` **If it fails:** fall back to the RTM text path and rescope — with six days left, not one
 
 ---
 

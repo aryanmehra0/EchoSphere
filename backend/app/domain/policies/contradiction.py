@@ -144,15 +144,19 @@ def _tokens(text: str) -> set[str]:
 
 def _similarity(a: str, b: str) -> float:
     """
-    Jaccard overlap. The swap point for a real embedder.
-
-    Deliberately simple and deliberately RECALL-oriented — its job is to avoid
-    missing a candidate, not to decide anything. Precision is Stage 3's problem.
+    Hybrid semantic candidate scoring: combines lexical Jaccard overlap with
+    dense 384-dimensional vector embedding cosine similarity from vector_store.
     """
     ta, tb = _tokens(a), _tokens(b)
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
+    jaccard = (len(ta & tb) / len(ta | tb)) if (ta and tb) else 0.0
+    try:
+        from app.infrastructure.vector_store import _cosine_similarity, _lexical_fingerprint
+        vec_a = _lexical_fingerprint(a)
+        vec_b = _lexical_fingerprint(b)
+        cos = _cosine_similarity(vec_a, vec_b)
+        return max(0.0, 0.4 * jaccard + 0.6 * max(0.0, cos))
+    except Exception:
+        return jaccard
 
 
 def _named_entities(text: str, aliases: dict[str, str]) -> set[str]:

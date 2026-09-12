@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import typing
 from dataclasses import fields, is_dataclass
 from typing import Any, Iterable
 
@@ -72,6 +73,154 @@ _TABLES: dict[str, str] = {
     "TimelineEvent": "timeline",
     "Transcript": "transcripts",
 }
+
+# Postgres `information_schema.columns.data_type` spellings that are all
+# fine representations of the same Python-level shape — retyping WITHIN a
+# group is unnecessary churn (and, on the one live database this ran
+# against, is exactly what over-eagerly turned an already-working
+# `transcripts.uid integer` into `bigint` for no benefit). Only a column
+# whose existing type falls in a DIFFERENT group than the one its dataclass
+# field expects is actually broken and worth the risk of a retype.
+_SQL_TYPE_FAMILY: dict[str, str] = {
+    "smallint": "integer", "integer": "integer", "bigint": "integer",
+    "real": "float", "double precision": "float", "numeric": "float",
+    "text": "text", "character varying": "text", "varchar": "text", "char": "text",
+    "boolean": "boolean",
+    "json": "json", "jsonb": "json",
+}
+
+
+def _sql_type_family(data_type: str) -> str:
+    return _SQL_TYPE_FAMILY.get(data_type.lower(), data_type.lower())
+
+
+def _sql_type_for(py_type: Any) -> str:
+    """
+    The Postgres column type for a dataclass field's resolved annotation.
+
+    Used only by `_reconcile_schema` to ADD a genuinely missing column — it
+    never touches an existing one. `Optional[X]` / `X | None` and `Literal`
+    string unions (e.g. `EpistemicStatus`) are unwrapped first: a Literal is
+    still text on the wire, and `list[str] | None` is still JSONB.
+    """
+    origin = typing.get_origin(py_type)
+    if origin is typing.Union:
+        # `X | None` -> X. A field typed as more than one real (non-None)
+        # alternative doesn't occur in these models; TEXT is the safe
+        # fallback if it ever does.
+        args = [a for a in typing.get_args(py_type) if a is not type(None)]
+        if len(args) == 1:
+            return _sql_type_for(args[0])
+        return "TEXT"
+    if origin is typing.Literal:
+        return "TEXT"
+    if origin in (list, dict):
+        return "JSONB"
+    if py_type is bool:
+        return "BOOLEAN"
+    if py_type is int:
+        return "BIGINT"
+    if py_type is float:
+        return "DOUBLE PRECISION"
+    return "TEXT"
+
+
+async def _reconcile_schema(pool: Any) -> None:
+    """
+    Self-heal `schema.sql` drift: add any dataclass field with no matching
+    column, for every table this store writes to.
+
+    ── WHY THIS EXISTS ──────────────────────────────────────────────────────
+    This project has no migration tool (`backend/db/README.md` says so
+    plainly): the documented process for a field added to a model is "edit
+    schema.sql, then by hand either `docker compose down -v` or run an
+    `ALTER TABLE` yourself" against an already-initialized volume. Nobody
+    did the second half when `Claim` gained `valid_from`/`valid_until`/
+    `ttl_seconds`/`lifecycle`/`speaker_name`/`speaker_user_id` (and
+    `TimelineEvent`/`Transcript` similarly) — `schema.sql` only runs on a
+    FRESH Postgres data directory, so every already-running dev volume kept
+    the old, narrower table. Every write of one of those fields then threw
+    `UndefinedColumnError`, caught by `_upsert`'s broad `except Exception`
+    and only logged — `/health` kept reporting Postgres as fully healthy.
+
+    Deriving the column list from `dataclasses.fields()` (as `_columns()`
+    already does for INSERT) instead of a hand-kept list was supposed to
+    make this impossible; it only closed half the gap, because the SCHEMA
+    itself was still hand-kept. This closes the other half: on every
+    connect, diff each table's real columns against its dataclass's fields
+    and add whatever is missing. Additive only — it never drops, renames, or
+    retypes a column, so it cannot lose data; the worst case is doing
+    nothing when a column already matches (the common case, and cheap).
+    """
+    from app.domain import models as domain_models
+
+    classes_by_name = {
+        "Claim": domain_models.Claim,
+        "Entity": domain_models.Entity,
+        "Link": domain_models.Link,
+        "Unchecked": domain_models.Unchecked,
+        "Task": domain_models.Task,
+        "Contradiction": domain_models.Contradiction,
+        "TimelineEvent": domain_models.TimelineEvent,
+        "Transcript": domain_models.Transcript,
+    }
+
+    async with pool.acquire() as conn:
+        for class_name, table in _TABLES.items():
+            cls = classes_by_name[class_name]
+            hints = typing.get_type_hints(cls, include_extras=True)
+            existing = {
+                row["column_name"]: row["data_type"]
+                for row in await conn.fetch(
+                    "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1",
+                    table,
+                )
+            }
+            if not existing:
+                # Table itself doesn't exist yet — schema.sql hasn't run and
+                # never will on this connection (it's initdb-only); nothing
+                # to reconcile until an operator creates it.
+                continue
+
+            for f in fields(cls):
+                sql_type = _sql_type_for(hints.get(f.name, str))
+
+                if f.name not in existing:
+                    try:
+                        await conn.execute(
+                            f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "{f.name}" {sql_type}'
+                        )
+                        log.info("store: added missing column %s.%s (%s)", table, f.name, sql_type)
+                    except Exception as exc:  # noqa: BLE001 — one bad column must not block startup
+                        log.warning("store: could not add column %s.%s: %s", table, f.name, exc)
+                    continue
+
+                # A column can exist with the WRONG type: this happened for
+                # real on a live dev database — `valid_from`/`ttl_seconds`
+                # etc. had already been hand-added as TEXT (a guess made
+                # before this reconciliation existed), which made every
+                # write of a non-null value throw `invalid input for query
+                # argument: expected str, got int`, right back to the same
+                # silent failure this whole mechanism exists to prevent.
+                # `USING col::type` is Postgres's explicit-cast retype: safe
+                # to attempt unconditionally because it fails loudly (caught
+                # below, logged, left as-is) rather than corrupting anything
+                # if the column already holds data that cannot be cast.
+                if _sql_type_family(existing[f.name]) != _sql_type_family(sql_type):
+                    try:
+                        await conn.execute(
+                            f'ALTER TABLE {table} ALTER COLUMN "{f.name}" TYPE {sql_type} USING "{f.name}"::{sql_type}'
+                        )
+                        log.info(
+                            "store: retyped column %s.%s from %s to %s",
+                            table, f.name, existing[f.name], sql_type,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — one bad column must not block startup
+                        log.warning(
+                            "store: could not retype column %s.%s (%s -> %s): %s",
+                            table, f.name, existing[f.name], sql_type, exc,
+                        )
+
 
 def _is_json_column(record: Any, column: str) -> bool:
     """
@@ -132,6 +281,21 @@ async def connect() -> bool:
         _enabled = False
         return True
 
+    if dsn == config.DEFAULT_DATABASE_URL:
+        # Loud rather than silent: `echo:echo` is a fine default for the
+        # `docker-compose.yml` this project ships, and a real liability if
+        # it's ever what a production deployment is actually running
+        # against because nobody set DATABASE_URL. `tool_secret()` already
+        # fails CLOSED when unset for exactly this class of risk; a DSN
+        # can't fail closed the same way (no database is worse than a weak
+        # one), so this is the next best thing — impossible to miss in logs.
+        log.warning(
+            "store: DATABASE_URL is not set — using the default dev DSN "
+            "(postgres/echo:echo on 127.0.0.1:5434). Set DATABASE_URL explicitly "
+            "before running this against anything other than the bundled "
+            "docker-compose Postgres."
+        )
+
     try:
         import asyncpg
     except ImportError:
@@ -156,6 +320,11 @@ async def connect() -> bool:
         _pool = None
         _enabled = False
         return True
+
+    try:
+        await _reconcile_schema(_pool)
+    except Exception as exc:  # noqa: BLE001 — a reconciliation bug must not block startup
+        log.warning("store: schema reconciliation failed: %s", exc)
 
     _enabled = True
     _last_error = None
@@ -237,11 +406,21 @@ def save(record: Any, channel: str) -> None:
     if not _enabled:
         return
     try:
-        task = asyncio.create_task(_upsert(record, channel))
+        loop = asyncio.get_running_loop()
     except RuntimeError:
         # No running loop (a synchronous test, the Rehearsal Rig). Persistence
         # is a side effect; its absence must not break the caller.
+        #
+        # This check used to happen by calling `asyncio.create_task(_upsert(...))`
+        # directly and catching the RuntimeError it raises with no loop — but
+        # `_upsert(record, channel)` is evaluated (creating the coroutine
+        # object) BEFORE `create_task` ever runs, so that coroutine was left
+        # created and never awaited or closed, which is exactly the
+        # `RuntimeWarning: coroutine '_upsert' was never awaited` seen in the
+        # test suite. Checking for a loop first means `_upsert(...)` is never
+        # even constructed on this path.
         return
+    task = loop.create_task(_upsert(record, channel))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
 
@@ -301,3 +480,18 @@ async def load(channel: str) -> dict[str, list[dict[str, Any]]]:
 
     # Fallback to local SQLite WAL store
     return event_store.load_channel_snapshots(channel)
+
+
+def archive_postmortem(channel: str, report: dict[str, Any], markdown: str) -> str:
+    """Archive a postmortem snapshot into durable storage."""
+    return event_store.archive_postmortem(channel, report, markdown)
+
+
+def list_postmortem_archives(channel: str | None = None) -> list[dict[str, Any]]:
+    """List historical archived postmortems."""
+    return event_store.list_postmortem_archives(channel)
+
+
+def get_postmortem_archive(archive_id: str) -> dict[str, Any] | None:
+    """Get specific archived postmortem by ID."""
+    return event_store.get_postmortem_archive(archive_id)

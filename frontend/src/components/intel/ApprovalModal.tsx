@@ -6,6 +6,7 @@ import { ShieldAlert } from "lucide-react";
 import { useIncident } from "@/lib/incident-store";
 import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/cn";
+import { slowLoopHttpUrl } from "@/lib/delta-socket";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/badge";
 
@@ -38,8 +39,6 @@ import { Badge } from "@/components/ui/badge";
  *      off the screen without a ruling would be indistinguishable in the audit
  *      log from a decision.
  */
-
-const SLOW_LOOP = process.env.NEXT_PUBLIC_SLOW_LOOP_HTTP ?? "http://127.0.0.1:8000";
 
 export function ApprovalModal() {
   const { state, dispatch, currentUid, currentRole } = useIncident();
@@ -92,7 +91,16 @@ export function ApprovalModal() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`${SLOW_LOOP}/approval/${path}`, {
+      /*
+        Straight to Zone 3, deliberately (see phase1-evaluation.test.ts) —
+        routing this through Zone 2 would put a second service in the
+        authorization path. `slowLoopHttpUrl()` (shared with delta-socket.ts)
+        resolves to the actual Slow Loop origin whether this page was loaded
+        locally or by a remote guest over a shared tunnel link; the previous
+        hardcoded `127.0.0.1:8000` fallback pointed a remote guest's browser
+        at their OWN machine, where nothing is listening.
+      */
+      const res = await fetch(`${slowLoopHttpUrl()}/approval/${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

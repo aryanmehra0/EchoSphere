@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
+from app.infrastructure import config
+
 
 # Canonical clusters of IT operations synonyms
 _SYNONYM_CLUSTERS: list[set[str]] = [
@@ -95,13 +97,33 @@ class CanonicalEntityResolver:
         if not norm:
             return ""
 
+        if not config.entity_synonym_clusters_enabled():
+            # A deployment whose vocabulary doesn't match this project's own
+            # demo topology (see `config.entity_synonym_clusters_enabled`'s
+            # docstring) turns the built-in clusters off entirely here.
+            # `are_synonyms()`'s `custom_aliases` path is untouched by this —
+            # only the global, unconditional built-in clustering is skipped.
+            return norm
+
         # Direct cluster lookup
         if norm in _CANONICAL_LOOKUP:
             return _CANONICAL_LOOKUP[norm]
 
-        # Check each segment in a hierarchical identifier
+        # Check each segment in a hierarchical identifier, RIGHTMOST first.
+        #
+        # A path like "owner-type-instance" names its most specific subsystem
+        # last — "checkout-db" is a database owned by checkout, not the
+        # checkout service itself. Scanning left-to-right got this backwards
+        # for real: "checkout" is itself a cluster member (the checkout/cart
+        # group), so `canonical_id("checkout-db")` matched "checkout" before
+        # "db" was ever checked and resolved the whole path to the SERVICE
+        # instead of its DATABASE — silently merging two distinct subsystems
+        # for contradiction-scoping purposes. Scanning in reverse still
+        # resolves this module's own documented example unchanged
+        # ("service/db/primary" -> "db", since "service" isn't a cluster
+        # member either way) and additionally fixes the collision case.
         segments = norm.split("-")
-        for seg in segments:
+        for seg in reversed(segments):
             if seg in _CANONICAL_LOOKUP:
                 return _CANONICAL_LOOKUP[seg]
 

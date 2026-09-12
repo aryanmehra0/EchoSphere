@@ -338,6 +338,13 @@ def credential_status() -> dict[str, bool]:
     }
 
 
+# Exposed (not just inlined into `database_url()`) so `store.connect()` can
+# tell whether an operator ever actually set `DATABASE_URL` — a fresh dev
+# checkout matching `docker-compose.yml` and a production deployment nobody
+# configured are indistinguishable from the DSN string alone otherwise.
+DEFAULT_DATABASE_URL = "postgresql://echo:echo@127.0.0.1:5434/echosphere"
+
+
 def database_url() -> str:
     """
     Postgres DSN for the Evidence Ledger, or "" when persistence is off.
@@ -366,9 +373,7 @@ def database_url() -> str:
 
     Keep this in step with `docker-compose.yml`.
     """
-    return _optional(
-        "DATABASE_URL", "postgresql://echo:echo@127.0.0.1:5434/echosphere"
-    )
+    return _optional("DATABASE_URL", DEFAULT_DATABASE_URL)
 
 
 def persistence_enabled() -> bool:
@@ -403,3 +408,78 @@ def tool_secret() -> str:
     the Rehearsal Rig keep working exactly as before.
     """
     return _optional("AGENT_TOOL_SECRET", "")
+
+
+def redis_url() -> str:
+    """
+    Redis connection URL for streams, pub/sub and distributed locks.
+    Defaults to redis://127.0.0.1:6379/0. If empty or unavailable, falls back gracefully.
+    """
+    return _optional("REDIS_URL", "redis://127.0.0.1:6379/0")
+
+
+def qdrant_url() -> str:
+    """
+    Qdrant vector database HTTP URL for semantic search.
+    Defaults to http://127.0.0.1:6333. If empty or unavailable, falls back gracefully.
+    """
+    return _optional("QDRANT_URL", "http://127.0.0.1:6333")
+
+
+def max_concurrent_incidents() -> int:
+    """
+    A ceiling on how many distinct channels can have a live `IncidentSession`
+    at once in this process.
+
+    Several unauthenticated-by-design endpoints (`/observer/transcript`
+    chief among them — it must be able to start a brand new incident on its
+    very first transcript) accept an arbitrary `channel` string and will
+    create a full session for it: a `Ledger`, a `DeltaHub`, and a Postgres
+    snapshot query on construction. With no cap, a caller sending many
+    distinct channel names grows this without bound — a straightforward
+    memory/DB-exhaustion path. The default is generous enough that no
+    legitimate multi-incident use of this product would ever come close.
+    """
+    try:
+        return int(_optional("MAX_CONCURRENT_INCIDENTS", "50"))
+    except ValueError:
+        return 50
+
+
+def prometheus_url() -> str:
+    """
+    Prometheus HTTP API base URL for real telemetry probes.
+
+    Defaults to the local `docker-compose.yml` `prometheus` service
+    (`--profile telemetry` or `full`). Empty disables the live path
+    entirely — `telemetry.py` falls back to its static fixture catalog,
+    exactly as it did before this integration existed.
+    """
+    return _optional("PROMETHEUS_URL", "http://127.0.0.1:9090").rstrip("/")
+
+
+def loki_url() -> str:
+    """
+    Loki HTTP API base URL for real log-based telemetry probes.
+
+    Port 3101, not Loki's default 3100 — see `docker-compose.yml`'s comment
+    on the `loki` service for why (it collides with the console's own
+    dev-server port range).
+    """
+    return _optional("LOKI_URL", "http://127.0.0.1:3101").rstrip("/")
+
+
+def entity_synonym_clusters_enabled() -> bool:
+    """
+    Whether `entity_resolver.py`'s built-in synonym clusters apply at all.
+
+    Those clusters (`redis`==`cache`, `kafka`==`queue`==`broker`,
+    `network`==`gateway`, ...) are unconditional and global — fine for this
+    project's own demo vocabulary, wrong the moment a real deployment has,
+    say, a genuinely distinct `queue` (SQS) and `kafka`, or a `gateway`
+    entity that is not its `network`. There is no per-cluster override, only
+    an on/off switch: a deployment whose topology doesn't match this one can
+    turn the built-in clustering off entirely and rely on `custom_aliases`
+    (which `are_synonyms()` still honours either way) to declare its own.
+    """
+    return _optional("ENTITY_SYNONYM_CLUSTERS", "on").lower() not in ("off", "0", "false")

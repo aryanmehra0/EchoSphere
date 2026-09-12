@@ -160,13 +160,13 @@ export function Metric({
     <div className="flex flex-col gap-px" title={title}>
       <span
         className={cn(
-          "tnum font-mono text-sm leading-none font-medium",
+          "tnum font-mono text-sm leading-none font-medium whitespace-nowrap",
           TONE_TEXT[tone],
         )}
       >
         {value}
       </span>
-      <span className="text-2xs leading-none font-medium tracking-[0.08em] text-ink-4 uppercase">
+      <span className="text-2xs leading-none font-medium tracking-[0.08em] text-ink-4 uppercase whitespace-nowrap">
         {label}
       </span>
     </div>

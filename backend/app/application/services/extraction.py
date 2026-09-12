@@ -291,6 +291,12 @@ class SchemaError(ValueError):
     pass
 
 
+class ExtractionDropped(Exception):
+    """Raised when both the initial call and its one repair attempt fail
+    schema validation. Callers (`LlmExtractionStep`) are expected to requeue
+    the window's frames on this, the same as any other extraction failure."""
+
+
 # Roles that are not roles. §6.2 Rule 1 needs a SOURCE, and the emptiness
 # check below is not enough on its own: asked for a speakerRole it could not
 # determine, the model wrote the literal string "unknown" and the claim sailed
@@ -864,8 +870,17 @@ async def extract(
         raw = await llm(EXTRACTION_PROMPT, repair)
         return _finish(_parse(raw))
     except (SchemaError, json.JSONDecodeError) as second:
-        log.error("extraction: dropped a window after two failures: %s", second)
-        return {k: [] for k in _KEYS}
+        # Raise rather than return `{k: [] for k in _KEYS}` here — the sole
+        # caller, `LlmExtractionStep.execute()`, is documented (and tested)
+        # to requeue every drained frame "on any extraction exception", but
+        # that requeue lives in an `except Exception` block. Returning
+        # normally with an empty result used to skip it entirely: the
+        # window's frames were neither processed nor put back, so the speech
+        # in them was silently gone — exactly the "never lose an utterance"
+        # guarantee this two-attempt retry exists to uphold. The next
+        # window's Compacted State still carries prior context regardless, so
+        # requeuing here costs nothing extra and closes that gap.
+        raise ExtractionDropped(f"dropped a window after two schema failures: {second}") from second
 
 
 def _parse(raw: str) -> Any:

@@ -17,12 +17,14 @@ without needing C-extensions directly in the main service process.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from app.domain.services.rti import rti_service
 from app.web.deps import session
 
 log = logging.getLogger("echo.audio_stream")
@@ -58,7 +60,7 @@ async def receive_acoustic_telemetry(body: dict[str, Any]) -> dict[str, Any]:
         return JSONResponse({"error": "uid or active_uids is required"}, status_code=400)
 
     # Check G2: ensure Echo's agent UID is rejected if mistakenly forwarded
-    current_session = session()
+    current_session = session(channel)
     agent_id = (current_session.agent or {}).get("agent_id")
     agent_uid_str = str(agent_id) if agent_id is not None else None
 
@@ -78,23 +80,32 @@ async def receive_acoustic_telemetry(body: dict[str, Any]) -> dict[str, Any]:
     peak_energy = float(body.get("peak_energy_rms", energy))
     vad_active = bool(body.get("vad_active", False))
     overlap_detected = bool(body.get("overlap_detected", False))
+    active_count = len(active_uids) if active_uids else (1 if uid is not None else 0)
 
-    # Multi-factor RTI Update (v6 §8):
-    # 1. Overlapping speech carries highest weight (0.45 in §8.1)
-    if overlap_detected or (active_uids and len(active_uids) > 1 and vad_active):
-        current_session.ledger.rti = min(1.0, current_session.ledger.rti + 0.10)
-    # 2. Volume elevation
-    elif vad_active and (energy > 0.08 or peak_energy > 0.12):
-        current_session.ledger.rti = min(1.0, current_session.ledger.rti + 0.05)
-    # 3. Decay on calm/silence
-    elif not vad_active:
-        current_session.ledger.rti = max(0.0, current_session.ledger.rti - 0.02)
+    # Multi-factor RTI update using domain service (v6 §8)
+    reading = rti_service.compute_next_rti(
+        current_rti=current_session.ledger.rti,
+        energy_rms=energy,
+        peak_energy_rms=peak_energy,
+        vad_active=vad_active,
+        overlap_detected=overlap_detected,
+        active_talker_count=active_count,
+    )
+    current_session.ledger.rti = reading.rti
+
+    # Stream live RTI updates to connected dashboards
+    if hasattr(current_session, "hub") and current_session.hub:
+        res = current_session.hub.publish({"rti": reading.rti})
+        if inspect.isawaitable(res):
+            await res
 
     return {
         "status": "received",
         "channel": channel,
         "uid": uid if uid is not None else (active_uids[0] if active_uids else None),
-        "current_rti": round(current_session.ledger.rti, 3),
+        "current_rti": reading.rti,
+        "band": reading.band,
+        "escalated": reading.escalated,
         "overlap_detected": overlap_detected,
     }
 

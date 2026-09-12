@@ -18,7 +18,7 @@ from app.application.services.extraction import note_redactions
 from app.domain.models import TimelineEvent, Transcript, now_ms
 from app.domain.policies.redaction import redact
 from app.domain.policies.utterance import EpistemicViolation
-from app.infrastructure import store
+from app.infrastructure import redis_bus, store
 from ..deps import session, speech
 
 log = logging.getLogger("echo.ingest")
@@ -52,7 +52,8 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
     must never re-enter the Ledger as if a human said it.
     ────────────────────────────────────────────────────────────────────────
     """
-    current = session()
+    channel = (body.get("channel") or "").strip() or None
+    current = session(channel)
     ledger = current.ledger
     hub = current.hub
     privacy = current.privacy
@@ -217,18 +218,49 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
     exists to provide. The pipeline takes the session's lock, so overlapping
     tasks are safe.
     """
-    def _report(task: asyncio.Task[Any]) -> None:
-        # `cancelled()` first: `/incident/reset` cancels the previous
-        # incident's analysis on purpose, and calling `.exception()` on a
-        # cancelled task raises CancelledError rather than returning it.
-        if not task.cancelled() and task.exception() is not None:
-            log.exception("pipeline failed in the background", exc_info=task.exception())
+    queued_to_stream = False
+    if redis_bus.is_enabled():
+        msg_id = await redis_bus.xadd(
+            "echosphere:ingest:events",
+            {
+                "channel": ledger.channel,
+                "message_id": t.message_id,
+                "uid": uid,
+                "role": role,
+                "at": t.at,
+            },
+        )
+        if msg_id:
+            queued_to_stream = True
 
-    # `spawn_pipeline` holds the strong reference — asyncio keeps only a weak
-    # one, and a garbage-collected task cancels the analysis mid-flight.
-    current.spawn_pipeline(
-        pipeline.run_if_ready(current, speech(current)), on_error=_report,
-    )
+    if not queued_to_stream and not current.pipeline_pending:
+        def _report(task: asyncio.Task[Any]) -> None:
+            # Safety net for `pipeline_pending`: the runner clears it once
+            # the task acquires the lock, but if the task fails/is cancelled
+            # BEFORE ever reaching that point (an exception raised earlier
+            # in `pipeline.run_if_ready`, or a reset cancelling it while
+            # still queued), nothing else would ever clear it — permanently
+            # blocking every future spawn for this session, which is a worse
+            # bug than the redundant-task one this flag exists to fix.
+            # Idempotent: a no-op if the runner already cleared it.
+            current.pipeline_pending = False
+
+            # `cancelled()` first: `/incident/reset` cancels the previous
+            # incident's analysis on purpose, and calling `.exception()` on a
+            # cancelled task raises CancelledError rather than returning it.
+            if not task.cancelled() and task.exception() is not None:
+                log.exception("pipeline failed in the background", exc_info=task.exception())
+
+        # Set BEFORE spawning, synchronously, so a second transcript arriving
+        # before this task is even scheduled still sees it — there's no
+        # `await` between this line and the task actually existing.
+        current.pipeline_pending = True
+
+        # `spawn_pipeline` holds the strong reference — asyncio keeps only a weak
+        # one, and a garbage-collected task cancels the analysis mid-flight.
+        current.spawn_pipeline(
+            pipeline.run_if_ready(current, speech(current)), on_error=_report,
+        )
 
     return {
         "accepted": True,
@@ -236,4 +268,5 @@ async def ingest_transcript(body: dict[str, Any]) -> dict[str, Any]:
         # The analysis is now in flight rather than finished. Named so no
         # caller mistakes a fast 200 for a completed extraction.
         "queued": True,
+        "stream": queued_to_stream,
     }

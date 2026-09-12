@@ -48,6 +48,12 @@ class PipelineRunner:
         Returns a summary dict if a window was processed, or None otherwise.
         """
         async with session.pipeline_lock:
+            # From here on, a NEW incoming transcript spawning its own task
+            # is no longer redundant with this run — this run already
+            # drained whatever was in the window at the moment it acquired
+            # the lock, so it will never see frames that arrive after this
+            # point. See `pipeline_pending`'s docstring on `IncidentSession`.
+            session.pipeline_pending = False
             ctx = PipelineContext(session=session, speech=speech)
 
             try:

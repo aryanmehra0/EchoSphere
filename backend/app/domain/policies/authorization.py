@@ -47,6 +47,13 @@ APPROVAL_TTL_SECONDS = 120.0
 
 Outcome = Literal["APPROVED", "DENIED", "EXPIRED", "REPLAYED", "WRONG_ROLE", "ARGS_MISMATCH", "UNKNOWN"]
 
+# The single source of truth for which bridge roles carry approval authority.
+# Defined here (not in proxy.py, which imports AuthorizationGate from this
+# module) so the two files cannot drift into disagreement about who may
+# approve — proxy.py re-exports these names for its existing callers.
+AUTHORIZED_ROLE = "DevOps Lead"
+AUTHORIZED_ROLES = {"DevOps Lead", "Incident Commander"}
+
 
 def args_hash(args: dict[str, Any]) -> str:
     """
@@ -228,8 +235,7 @@ class AuthorizationGate:
             return False, "EXPIRED"
 
         role_allowed = (role == approval.required_role) or (
-            role in ("Incident Commander", "DevOps Lead")
-            and approval.required_role in ("Incident Commander", "DevOps Lead")
+            role in AUTHORIZED_ROLES and approval.required_role in AUTHORIZED_ROLES
         )
         if not authorized or not role_allowed:
             # Property 4. Being on the bridge is not the same as being allowed
@@ -297,11 +303,24 @@ class AuthorizationGate:
         return True
 
     def expire_stale(self, *, now: float | None = None) -> int:
+        """
+        Expire and evict stale approvals.
+
+        `pending` used to only ever grow: a redeemed, denied, or expired
+        `Approval` stayed in the dict forever, since only its `outcome` field
+        was updated. Every terminal outcome is already durably recorded in
+        `audit`, so once an entry is past its TTL there is nothing left that
+        needs it in `pending` — deleting it here (not just marking it) is what
+        actually bounds this dict's size for a long-running session.
+        """
         t = now if now is not None else time.time()
-        stale = [n for n, a in self.pending.items() if not a.redeemed and a.expired(t)]
+        stale = [n for n, a in self.pending.items() if a.expired(t)]
         for nonce in stale:
-            self.pending[nonce].outcome = "EXPIRED"
-            self._log(t, None, self.pending[nonce].action, "EXPIRED", "expired unredeemed")
+            approval = self.pending[nonce]
+            if not approval.redeemed:
+                approval.outcome = "EXPIRED"
+                self._log(t, None, approval.action, "EXPIRED", "expired unredeemed")
+            del self.pending[nonce]
         return len(stale)
 
     def _log(

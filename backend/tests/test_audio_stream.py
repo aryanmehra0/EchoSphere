@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -19,6 +19,7 @@ class TestAudioStreamRouter(unittest.TestCase):
         with patch("app.web.routers.audio_stream.session") as mock_sess:
             mock_session_obj = MagicMock()
             mock_session_obj.agent = {"agent_id": "9999"}
+            mock_session_obj.hub.publish = AsyncMock()
             mock_sess.return_value = mock_session_obj
 
             resp = self.client.post(
@@ -35,6 +36,7 @@ class TestAudioStreamRouter(unittest.TestCase):
             mock_session_obj = MagicMock()
             mock_session_obj.agent = {"agent_id": "9999"}
             mock_session_obj.ledger.rti = 0.2
+            mock_session_obj.hub.publish = AsyncMock()
             mock_sess.return_value = mock_session_obj
 
             resp = self.client.post(
@@ -71,6 +73,7 @@ class TestAudioStreamRouter(unittest.TestCase):
             mock_session_obj = MagicMock()
             mock_session_obj.agent = {"agent_id": "9999"}
             mock_session_obj.ledger.rti = 0.2
+            mock_session_obj.hub.publish = AsyncMock()
             mock_sess.return_value = mock_session_obj
 
             resp = self.client.post(

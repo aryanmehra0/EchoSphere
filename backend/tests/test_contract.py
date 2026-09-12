@@ -64,6 +64,7 @@ REQUIRED_PATHS: dict[str, str] = {
     "/bridge/say": "validate.ps1:191 and test_conversation — auth-gate target",
     "/bridge/interrupt": "rehearsal / operator escape hatch",
     "/bridge/close-out": "W9 close-out, operator driven",
+    "/bridge/roster": "frontend api/token/route.ts, server-side, at join time",
 }
 
 # Paths deleted because nothing in the repository called them. Listed so a

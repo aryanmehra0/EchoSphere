@@ -6,11 +6,12 @@
 docker compose up -d          # from the repo root
 ```
 
-Postgres comes up on **5433** (not 5432 — a developer machine very often
-already runs one on the default port, and connecting to the wrong server
-produces a confusing "database exists but the tables are missing").
+Services started:
+- **PostgreSQL 16**: port **5434** (not 5432 or 5433 — avoids colliding with local developer Postgres instances)
+- **Redis 7 Alpine**: port **6379** (Streams backbone for `echosphere:deltas` and distributed state)
+- **Qdrant Vector DB v1.11.3**: port **6333** (REST) and **6334** (gRPC) for semantic claim embeddings and similarity retrieval
 
-`schema.sql` is applied automatically the first time the volume is created.
+`schema.sql` is applied automatically the first time the Postgres volume is created.
 
 ```bash
 docker compose down           # stop; data survives
@@ -21,6 +22,7 @@ docker compose down -v        # stop and DELETE the data
 
 The incident **record**: claims, entities, links, unchecked items, tasks,
 contradictions, the timeline, and the raw transcripts beneath them.
+
 
 Deliberately **not** persisted:
 
@@ -76,10 +78,25 @@ SELECT role, text FROM transcripts WHERE channel = 'inc-4417' ORDER BY at;
 2. That is all.
 
 The INSERT column list is derived from `dataclasses.fields()`, so there is no
-second place to forget it. `backend/app/store.py` explains why that matters:
-hand-written field lists fail *silently* — the column simply never gets
-written.
+second place to forget it. `backend/app/infrastructure/store.py` explains why
+that matters: hand-written field lists fail *silently* — the column simply
+never gets written.
 
-Note this repo has no migration tool yet. An existing volume will not pick up
-a new column; either `docker compose down -v` (destroys data) or apply the
-`ALTER TABLE` by hand.
+There is still no migration TOOL, but an already-initialized volume is no
+longer stuck on the old schema: `store.connect()` runs `_reconcile_schema()`
+on every startup, which diffs each table's real columns against its
+dataclass's fields (via `information_schema.columns`) and runs
+`ALTER TABLE ... ADD COLUMN` for anything missing, inferring the SQL type
+from the field's annotation. It will also RETYPE a column whose existing type
+is in the wrong family for what the field now expects (this happened for
+real: `valid_from`/`ttl_seconds` had been hand-added as `TEXT` before this
+reconciliation existed, so every write of a non-null value threw
+`UndefinedColumnError`'s cousin, `invalid input ... expected str, got int`,
+right back to the same silent failure). A retype is attempted via
+`ALTER COLUMN ... TYPE x USING col::x`, which fails loudly (logged, column
+left as-is) rather than corrupting anything if existing data can't be cast —
+so on a volume where that column already holds incompatible values, you're
+back to applying an `ALTER TABLE` by hand, exactly as before this existed.
+
+`docker compose down -v` (destroys all data) remains the alternative for
+anyone who would rather start from a clean, fully fresh `schema.sql`.

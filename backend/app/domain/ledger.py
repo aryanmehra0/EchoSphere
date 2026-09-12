@@ -11,11 +11,10 @@ the wire answer the same questions the same way.
 
 from __future__ import annotations
 
+import bisect
 import logging
 import re
 from dataclasses import dataclass, field
-
-import logging
 from dataclasses import fields as dataclass_fields
 
 from app.infrastructure import store
@@ -116,6 +115,40 @@ class Ledger:
 
         self.claims[claim.id] = claim
         store.save(claim, self.channel)
+
+        # Mirror to vector store (semantic indexing) and Redis stream (event
+        # log). `background_tasks.spawn` (not a bare `loop.create_task`)
+        # holds a strong reference — without it, asyncio's only WEAK
+        # reference to the task means it can be garbage-collected mid-write,
+        # silently dropping the mirror for that claim. `store.save()` two
+        # lines up already solved this exact problem for its own Postgres
+        # write; this reuses the same fix rather than repeating the bug.
+        # `spawn` itself handles "no running loop" (sync unit tests, the
+        # Rehearsal Rig) by doing nothing, so no try/except is needed here.
+        from app.infrastructure import background_tasks, redis_bus, vector_store
+        background_tasks.spawn(lambda: vector_store.upsert_claim(
+            self.channel,
+            claim.id,
+            claim.text,
+            {
+                "entity": claim.entity,
+                "speaker_role": claim.speaker_role,
+                "epistemic_status": claim.epistemic_status,
+                "valid_from": claim.valid_from,
+            },
+        ))
+        if redis_bus.is_enabled():
+            background_tasks.spawn(lambda: redis_bus.xadd(
+                f"echosphere:claims:{self.channel}",
+                {
+                    "id": claim.id,
+                    "text": claim.text,
+                    "entity": claim.entity or "",
+                    "speakerRole": claim.speaker_role,
+                    "epistemicStatus": claim.epistemic_status,
+                },
+            ))
+
         return claim
 
     def upsert_entity(self, entity: Entity) -> Entity:
@@ -198,8 +231,12 @@ class Ledger:
         # restart on every batch, so two windows can each emit a "t1" -
         # without this, both land in the list and React sees a duplicate key.
         self.timeline = [e for e in self.timeline if e.id != event.id]
-        self.timeline.append(event)
-        self.timeline.sort(key=lambda e: e.at)
+        # Insert into the already-sorted list directly rather than
+        # re-sorting the whole thing on every single event — `self.timeline`
+        # is a sorted-by-`.at` invariant maintained incrementally, so a full
+        # `list.sort()` here was doing O(n log n) work to redo a comparison
+        # that was already settled for every element but the new one.
+        bisect.insort_right(self.timeline, event, key=lambda e: e.at)
         store.save(event, self.channel)
         return event
 
@@ -352,15 +389,17 @@ class Ledger:
 
         lines: list[str] = []
 
-        claims = sorted(self.claims.values(), key=lambda c: c.at)[-max_claims:]
+        # INFERRED claims never enter a prompt — §6.2 Rule 3. They are the
+        # model's own guesses and must not return to it as fact. Filtered
+        # BEFORE slicing to `max_claims`, not after: slicing first could
+        # spend several of the most-recent slots on INFERRED claims that get
+        # dropped anyway, silently shrinking the real context a replacement
+        # agent resumes with below what `max_claims` promises.
+        sourceable = [c for c in self.claims.values() if getattr(c, "epistemic_status", "") != "INFERRED"]
+        claims = sorted(sourceable, key=lambda c: c.at)[-max_claims:]
         if claims:
             lines.append("Already on the record (most recent last):")
             for c in claims:
-                status = getattr(c, "epistemic_status", "") or ""
-                # INFERRED claims never enter a prompt — §6.2 Rule 3. They are
-                # the model's own guesses and must not return to it as fact.
-                if status == "INFERRED":
-                    continue
                 who = getattr(c, "speaker_role", None) or "someone"
                 lines.append(f"  - {who} said: {c.text}")
 
@@ -391,9 +430,31 @@ class Ledger:
                 "unchecked": [u.to_wire() for u in self.open_unchecked()],
             }
 
+        if scope in ("theories", "matrix", "hypotheses"):
+            from app.domain.services.elimination import hypothesis_matrix_service
+            evals = hypothesis_matrix_service.evaluate_claims(list(self.claims.values()))
+            refuted = [e.to_wire() for e in evals if e.status == "REFUTED"]
+            corroborated = [e.to_wire() for e in evals if e.status == "CORROBORATED"]
+            open_theories = [e.to_wire() for e in evals if e.status == "OPEN"]
+            return {
+                "theories": [e.to_wire() for e in evals],
+                "refuted": refuted,
+                "corroborated": corroborated,
+                "open": open_theories,
+                "counts": {
+                    "total": len(evals),
+                    "refuted": len(refuted),
+                    "corroborated": len(corroborated),
+                    "open": len(open_theories),
+                },
+            }
+
         if scope == "unresolved":
+            from app.domain.services.elimination import hypothesis_matrix_service
+            evals = hypothesis_matrix_service.evaluate_claims(list(self.claims.values()))
             return {
                 "openHypotheses": [c.to_wire() for c in self.open_hypotheses()],
+                "theoriesMatrix": [e.to_wire() for e in evals],
                 "unchecked": [u.to_wire() for u in self.open_unchecked()],
                 "openTasks": [t.to_wire() for t in self.open_tasks()],
                 "unresolvedContradictions": [

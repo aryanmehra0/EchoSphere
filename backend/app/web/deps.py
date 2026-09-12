@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import httpx
 
-from app.application.services.session import IncidentSession, registry
+from fastapi import HTTPException
+
+from app.application.services.session import IncidentSession, TooManySessions, registry
 from app.application.services.speech import SpeechCoordinator
 
 # ── THE POOLED HTTP CLIENT ─────────────────────────────────────────────────
@@ -37,15 +39,22 @@ def http_client() -> httpx.AsyncClient | None:
     return _http["client"]
 
 
-def session() -> IncidentSession:
+def session(channel: str | None = None) -> IncidentSession:
     """
-    The active incident.
+    The active incident, resolved per request for a specific channel or the default.
 
     Resolved per request rather than captured, because `/incident/reset`
     REPLACES the session object — a handler holding a reference across that
     boundary would keep writing to a Ledger nobody is reading.
+
+    Translates `TooManySessions` into a clean 503 here — this is the one
+    place every router actually reaches a session through, so it's the
+    right (and only) spot that needs to know the registry can refuse.
     """
-    return registry.current()
+    try:
+        return registry.get_or_create(channel)
+    except TooManySessions as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def speech(for_session: IncidentSession | None = None) -> SpeechCoordinator:

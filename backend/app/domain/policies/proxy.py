@@ -33,7 +33,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .authorization import AuthorizationGate
+# AUTHORIZED_ROLE(S) live in authorization.py now — this module used to define
+# its own copy, and the two literal tuples had already drifted apart once
+# (authorization.py's redeem() carried its own hardcoded pair). Importing
+# instead of duplicating makes that impossible going forward; both names are
+# re-exported here unchanged so existing callers (`from .proxy import
+# AUTHORIZED_ROLE`) keep working.
+from .authorization import AUTHORIZED_ROLE, AUTHORIZED_ROLES, AuthorizationGate
 
 log = logging.getLogger("echo.proxy")
 
@@ -50,11 +56,6 @@ TIERS: dict[str, Tier] = {
     "page_oncall_team": "CRITICAL",
     "execute_runbook_script": "CRITICAL",
 }
-
-# Only this role may approve. An allow-list, so adding a participant type can
-# never accidentally grant authority.
-AUTHORIZED_ROLE = "DevOps Lead"
-AUTHORIZED_ROLES = {"DevOps Lead", "Incident Commander"}
 
 
 def idempotency_key(channel: str, task: str, action: str) -> str:

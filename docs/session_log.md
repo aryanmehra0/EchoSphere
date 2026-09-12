@@ -2224,8 +2224,235 @@ Following the completion of Enterprise Identity and Multi-User RBAC, two high-im
 
 ---
 
+### Session 11 — Active Telemetry Probing & Interactive Topology Explorer (Sep 10)
+
+**Ask:** Implement Active Telemetry Probing (Option 2: Read-Only Datadog / Prometheus simulator & validator) and Interactive Topology Explorer (Option 5: Pre-hydrated architecture scenarios & node inspector probing).
+
+#### Architectural Decisions & Epistemic Invariants
+1. **Rule 1 Compliance (Echo Never Asserts Causation)**:
+   - Probes return clinical telemetry measurements only (e.g. `34.2% memory utilization`, `0 key evictions`, `2,840ms p99 latency`, `92.4% packet drop`).
+   - Probes NEVER state or imply root cause ("This caused the outage", "Redis is the culprit").
+   - Enforced by automated causal connector tripwire regex in `backend/app/domain/services/telemetry.py`.
+2. **Epistemic Classification**:
+   - Telemetry probe results carry first-class `epistemic_status: "TOOL_RESULT"` with 100% confidence, attributed to `Datadog APM`, `Prometheus`, or `CloudWatch`.
+   - In both backend `Ledger.established()` and frontend `selectEstablished`, `TOOL_RESULT` claims enter the established facts pane immediately.
+3. **Zone 1 Blast Radius & Trust Boundaries (v6 §10.1)**:
+   - All browser telemetry queries route strictly through `delta-socket.ts::triggerTelemetryProbe()`.
+   - Tool classification remains `READ` tier: deterministic, non-destructive read operations requiring no authorization token. High-risk runbooks remain gated under `CRITICAL`.
+4. **Determinism & Scenario State (Rule 2)**:
+   - All scenario switching actions dispatch `{ type: "LOAD_SCENARIO", scenario }` into `incidentReducer`.
+
+#### What Was Built
+1. **Backend Domain Telemetry Service Layer**:
+   - [`backend/app/domain/services/telemetry.py`](file:///c:/projects/EchoSphere/backend/app/domain/services/telemetry.py):
+     - Comprehensive metric catalog (`redis`, `postgres`, `postgres-replica`, `checkout`, `auth`, `network`, `stripe`, `ingress`, plus generic fallback).
+     - `probe(entity, metric) -> TelemetryReading`
+     - `synthesize_claim(reading, entity_id) -> Claim` with `TOOL_RESULT` and anti-causal tripwire.
+   - [`backend/app/web/routers/telemetry.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/telemetry.py): `POST /telemetry/probe` and `GET /telemetry/catalog`.
+   - [`backend/app/web/routers/tools.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/tools.py): Added `POST /tools/probe_telemetry` for Agora Fast Loop agent calls.
+   - [`backend/app/main.py`](file:///c:/projects/EchoSphere/backend/app/main.py): Mounted `telemetry.router`.
+   - [`backend/tests/test_telemetry.py`](file:///c:/projects/EchoSphere/backend/tests/test_telemetry.py): Unit tests for catalog lookup, non-causal assertion verification, tripwire enforcement, and REST endpoints.
+2. **Fast Loop Agent Configuration**:
+   - [`frontend/src/lib/server/agent-config.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/server/agent-config.ts): Added `probe_telemetry` to `AGENT_TOOLS` with tier `READ` and mapped route in `TOOL_ROUTES` to `/tools/probe_telemetry`.
+3. **Frontend Topology Scenarios & Explorer**:
+   - [`frontend/src/lib/types.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/types.ts): Defined `TelemetryReading`, `Scenario`, and extended `ParticipantRole`.
+   - [`frontend/src/lib/topology-scenarios.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/topology-scenarios.ts): Pre-hydrated scenarios (`clean`, `ecommerce_checkout`, `database_failover`, `network_partition`).
+   - [`frontend/src/lib/incident-reducer.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/incident-reducer.ts): Handled `LOAD_SCENARIO` action.
+   - [`frontend/src/lib/delta-socket.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/delta-socket.ts): Added `triggerTelemetryProbe()` preserving the single egress boundary.
+   - [`frontend/src/components/graph/GraphCanvas.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/graph/GraphCanvas.tsx): Integrated Scenario Selector dropdown menu with smooth React Flow `fitView`.
+   - [`frontend/src/components/graph/GraphInspector.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/graph/GraphInspector.tsx): Overhauled inspector with live telemetry gauge, "Run Telemetry Probe" button, real-time verified reading card, and categorized claims (`TOOL_RESULT`, `OBSERVED`, `HYPOTHESIS`).
+   - [`frontend/src/components/intel/LedgerPanel.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/intel/LedgerPanel.tsx): Added distinct `TOOL_RESULT` telemetry badge with status pill in the Evidence Ledger.
+
+#### Verification & Quality Gates
+- **Backend Tests**: 304/304 passing (`.venv/Scripts/python -m unittest discover -s tests -t .`).
+- **Frontend Verify Gate (`npm run verify`)**:
+  - `tsc --noEmit`: 0 errors.
+  - `eslint src tests --max-warnings=0`: 0 warnings, 0 errors.
+  - Test suite (`node --test`): 167/167 tests passed, 0 failed.
+  - Production build (`next build`): Compiled and optimized cleanly for all 10 routes.
+- **Visual Inspection**:
+  - `console_scenario_topology.png`: Verified pre-hydrated scenario graph rendering with directed links and status colors.
+  - `console_telemetry_probe.png`: Verified on-demand probe execution on `Redis Primary`, showing the verified `Datadog APM` reading in both the Node Inspector and the Evidence Ledger under `ESTABLISHED`.
+
+### Session 12 — Hypothesis Elimination Matrix (Automated Telemetry-Assisted Theory Adjudication)
+
+#### What was built
+1. **Backend Domain & Service Layer**:
+   - [`backend/app/domain/services/elimination.py`](file:///c:/projects/EchoSphere/backend/app/domain/services/elimination.py):
+     - Domain service `HypothesisMatrixService` and `HypothesisEvaluation` dataclass.
+     - Evaluates spoken/loaded `HYPOTHESIS` claims against empirical measurements (`TOOL_RESULT`, `OBSERVED`).
+     - Normal operational readings refute resource exhaustion/crash theories (`REFUTED ❌`).
+     - Saturated/critical readings corroborate reported symptoms (`CORROBORATED ⚠️`).
+     - Untested theories remain `OPEN ❓` with matching `suggested_probe` from the telemetry catalog.
+     - Enforces Rule 1 epistemic discipline via `_CAUSAL_FORBIDDEN` tripwire regex.
+     - `reconcile_lifecycle(ledger)`: Auto-transitions disproven theories to `claim.lifecycle = "REFUTED"`.
+   - [`backend/app/domain/ledger.py`](file:///c:/projects/EchoSphere/backend/app/domain/ledger.py):
+     - Extended `Ledger.query(scope, entity)` to handle `scope in ("theories", "matrix")` returning structured counts and status arrays.
+     - Enriched `scope == "unresolved"` with `theoriesMatrix` for Fast Loop voice recall.
+   - [`backend/app/web/routers/telemetry.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/telemetry.py):
+     - `POST /telemetry/probe` reconciles hypothesis lifecycle and broadcasts both the new probe claim and updated hypothesis claims in a single WebSocket delta.
+     - Added `GET /telemetry/matrix` endpoint for live theory status.
+   - [`backend/app/web/routers/tools.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/tools.py):
+     - Wired lifecycle reconciliation into Fast Loop `/tools/probe_telemetry`.
+   - [`backend/tests/test_elimination.py`](file:///c:/projects/EchoSphere/backend/tests/test_elimination.py):
+     - 7 unit tests covering refutation by normal telemetry, corroboration by critical telemetry, open state probe suggestions, Rule 1 anti-causal compliance, lifecycle transition, and REST endpoints.
+2. **Frontend State & Components**:
+   - [`frontend/src/lib/types.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/types.ts):
+     - Defined `HypothesisStatus` (`OPEN` | `REFUTED` | `CORROBORATED`) and `HypothesisMatrixItem`.
+   - [`frontend/src/lib/incident-reducer.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/incident-reducer.ts):
+     - Added selector `selectHypothesisMatrix(s: IncidentState): HypothesisMatrixItem[]`.
+   - [`frontend/src/components/intel/TheoriesPanel.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/intel/TheoriesPanel.tsx):
+     - Elimination Matrix UI with summary stats (`0 refuted | 1 confirmed | 2 open`), filter pills (`All`, `Open`, `Refuted`, `Corroborated`), and 1-click **`[Run Probe]`** action that triggers `/telemetry/probe` and immediately transitions the theory live!
+   - [`frontend/src/components/intel/IntelColumn.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/intel/IntelColumn.tsx):
+     - Added 5th tab `Theories` (`icon: FlaskConical`) with dynamic warning badge displaying count of open theories.
+   - [`frontend/src/components/intel/LedgerPanel.tsx`](file:///c:/projects/EchoSphere/frontend/src/components/intel/LedgerPanel.tsx):
+     - Enriched hypothesis cards in "Open questions" with Elimination Matrix status pills.
+   - [`frontend/src/lib/topology-scenarios.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/topology-scenarios.ts):
+     - Pre-populated realistic theories and measurements in `ecommerce_checkout` scenario.
+   - [`frontend/tests/hypothesis-matrix.test.ts`](file:///c:/projects/EchoSphere/frontend/tests/hypothesis-matrix.test.ts):
+     - 5 unit tests verifying open state, refutation, corroboration, and DELTA reducer updates.
+
+#### Verification & Quality Gates
+- **Backend Tests**: 311/311 passing (`.venv/Scripts/python -m unittest discover -s tests -t .`).
+- **Frontend Verify Gate (`npm run verify`)**:
+  - `tsc --noEmit`: 0 errors.
+  - `eslint src tests --max-warnings=0`: 0 warnings, 0 errors.
+  - Test suite (`node --test`): 172/172 tests passed, 0 failed.
+  - Production build (`next build`): Compiled cleanly with Turbopack in 5.4s.
+- **Visual Inspection via Playwright**:
+  - `console_theories_matrix.png`: Verified the 5-tab layout in Intel Column, Theories tab with live badge, summary bar, and filter pills.
+  - `console_theories_probed.png`: Verified clicking `[Run Probe]` on the open Redis theory queried Datadog APM, proved 34.2% memory / 0 evictions, and instantly transitioned the card to `REFUTED ❌` with strikethrough, decrementing open theories count in real-time.
+
+### Session 14 — Comprehensive Codebase Issue Remediation (Sep 12, 2026)
+
+#### Context & Objective
+A full architectural and code audit identified 5 concrete runtime and security issues:
+1. Tunnel middleware dropping remote browser requests to `/projects`, `/telemetry`, and `/incident/postmortem`.
+2. Hardcoded single-channel session registry (`inc-4417`) causing cross-war-room pollution.
+3. Fragile magic numbers (`"34.2%"`, `"42ms"`) in the frontend Hypothesis Elimination Matrix selector.
+4. Permanent data loss of postmortems on `/incident/reset` without durable archiving.
+5. Frontend WebSocket omission of channel query parameters in `slowLoopUrl`.
+
+#### What was built & verified:
+1. **Phase 1: Tunnel Gateway Whitelist Fix**
+   - [`backend/app/web/middleware.py`](file:///c:/projects/EchoSphere/backend/app/web/middleware.py):
+     - Added `_BROWSER_PREFIXES` covering `/projects`, `/telemetry`, `/incident/postmortem`, and `/incident/archives`.
+     - Created `is_browser_path(path)` helper ensuring console browser routes are accessible remotely while keeping internal agent tools protected with `AGENT_TOOL_SECRET`.
+     - Verified with 6 unit tests in `test_gateway_security.py`.
+2. **Phase 2: Multi-Channel Session Routing & Ledger Isolation**
+   - [`backend/app/application/services/session.py`](file:///c:/projects/EchoSphere/backend/app/application/services/session.py):
+     - Refactored `SessionRegistry` with `get_or_create(channel: str | None)`, `reset(channel: str | None)`, and `list_channels()`.
+     - Defaults to `"inc-4417"` when no channel is provided, preserving 100% backward compatibility with test harnesses.
+   - [`backend/app/web/deps.py`](file:///c:/projects/EchoSphere/backend/app/web/deps.py):
+     - `session(channel: str | None = None)` delegates to `registry.get_or_create(channel)`.
+   - [`backend/app/web/routers/deltas.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/deltas.py) & [`ingest.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/ingest.py):
+     - Extract `channel` from WebSocket query params and HTTP body to isolate ingestion and live WebSocket deltas.
+   - [`backend/app/web/routers/telemetry.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/telemetry.py) & [`ops.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/ops.py):
+     - Parameterized with optional `channel` query/body parameters.
+   - Added unit test suite [`backend/tests/test_multi_channel.py`](file:///c:/projects/EchoSphere/backend/tests/test_multi_channel.py) (3 tests passing).
+3. **Phase 3: Robust Hypothesis Evidence Matching (Eliminating Magic Numbers)**
+   - [`backend/app/domain/services/telemetry.py`](file:///c:/projects/EchoSphere/backend/app/domain/services/telemetry.py):
+     - Claims formatted with explicit status marker: `f"{reading.provider} telemetry: [{reading.status}] {reading.formatted}"`.
+     - Fully verified to satisfy Rule 1 non-causal constraints (`_CAUSAL_FORBIDDEN` tripwire).
+   - [`backend/app/domain/services/elimination.py`](file:///c:/projects/EchoSphere/backend/app/domain/services/elimination.py) & [`frontend/src/lib/incident-reducer.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/incident-reducer.ts):
+     - Added `[ok]`, `[critical]`, `[warning]`, `healthy`, `normal` tokens.
+     - Preserves legacy string numbers for backward compatibility.
+4. **Phase 4: Postmortem Auto-Archival & Historical Persistence**
+   - [`backend/app/infrastructure/event_store.py`](file:///c:/projects/EchoSphere/backend/app/infrastructure/event_store.py):
+     - Added SQLite table `postmortem_archives` and methods `archive_postmortem`, `list_postmortem_archives`, `get_postmortem_archive`.
+   - [`backend/app/web/routers/ops.py`](file:///c:/projects/EchoSphere/backend/app/web/routers/ops.py):
+     - Auto-archives active incident postmortem snapshot to SQLite before `store.clear(channel)` purges the active ledger.
+     - Added `GET /incident/archives`, `GET /incident/archives/{id}`, and `GET /incident/archives/{id}/markdown`.
+   - Added unit test suite [`backend/tests/test_postmortem_archive.py`](file:///c:/projects/EchoSphere/backend/tests/test_postmortem_archive.py).
+5. **Phase 5: Frontend Channel Awareness**
+   - [`frontend/src/lib/delta-socket.ts`](file:///c:/projects/EchoSphere/frontend/src/lib/delta-socket.ts):
+     - Added `channel` parameter to `slowLoopUrl(channel?: string)` and `openDeltaSocket({ channel, ... })`.
+   - [`frontend/src/lib/incident-store.tsx`](file:///c:/projects/EchoSphere/frontend/src/lib/incident-store.tsx):
+     - Passed `cleanChannel` to `slowLoopUrl` and `openDeltaSocket`.
+
+#### Verification Results
+- **Backend Tests:** **331 / 331 tests passing** (`.venv\Scripts\python -m unittest discover -s tests -t .`).
+- **Frontend Verify Gate (`npm run verify`):**
+  - `tsc --noEmit`: 0 errors.
+  - `eslint src tests --max-warnings=0`: 0 warnings, 0 errors.
+  - Test suite (`node --test`): **172 / 172 tests passing**, 0 failed.
+  - Production build (`next build`): Compiled cleanly with Turbopack in 6.3s.
+
+### Session 14 — Event-Driven Streaming (Redis Streams), Semantic Search (Qdrant Vector DB), and Agora Tool Wire Forwarding Fix
+
+#### What was built & discovered
+1. **Root Cause of Echo *"Hold on..."* / *"Reading..."* / *"Cannot read the record"***:
+   - In `backend/app/infrastructure/agora_agent.py`, `start()` received `tools` from Zone 2 and enabled tools in `advanced_features={"enable_tools": True}`, but **never attached `tools` to `agent._llm["tools"]`**.
+   - Agora Agentkit's `OpenAI.to_config()` strips unknown kwargs, so `tools` was omitted from the wire payload sent to Agora's `/join` endpoint.
+   - Agora told the LLM tools exist, but had no tool schemas or webhook endpoints registered on the wire. When the model tried to call `query_incident_state`, Agora held the line or recited the no-tools addendum.
+   - **Fix**: Attached `agent._llm["tools"] = tools` in `agora_agent.py`. Verified that `to_properties()` properly includes `llm.tools` on the wire with full schemas and Cloudflare tunnel webhook URLs.
+2. **Infrastructure Provisioning (`docker-compose.yml`)**:
+   - Added **Redis 7 Alpine** (`redis:7-alpine`) on port `6379:6379` with `appendonly yes` persistence, volume `echosphere-redisdata`, and healthcheck.
+   - Added **Qdrant Vector DB** (`qdrant/qdrant:v1.11.3`) on ports `6333:6333` (REST) and `6334:6334` (gRPC) with volume `echosphere-qdrantdata` and healthcheck.
+   - Added `REDIS_URL` and `QDRANT_URL` to `backend/app/infrastructure/config.py` and `frontend/src/lib/server/env.ts`.
+3. **Redis Event Bus & Streaming Backbone (`redis_bus.py`)**:
+   - Created `backend/app/infrastructure/redis_bus.py` supporting Redis Streams (`XADD`, `XREAD`), connection health, and distributed locks (`SET NX PX`).
+   - Integrated into `deltas.py` to stream UI deltas to `echosphere:deltas` stream.
+   - Graceful degradation: falls back to in-memory queues if Redis is unavailable (v6 §13).
+4. **Vector Database Adapter (`vector_store.py`)**:
+   - Created `backend/app/infrastructure/vector_store.py` with `AsyncQdrantClient` integration.
+   - Uses 384-dimensional dense semantic feature embeddings with L2 normalization (deterministic, offline-safe, zero external API latency).
+   - Stores claim vectors in collection `echosphere_claims` with payload filtering by `channel`.
+   - Wired `upsert_claim` in `backend/app/domain/ledger.py` and `purge_channel` in `backend/app/web/routers/ops.py` (reset endpoint).
+   - In-memory cosine fallback if Qdrant is unavailable.
+5. **Cross-Platform Launcher & Tooling**:
+   - Added `start.sh` for Git Bash, MINGW64, and Linux environments, resolving the Windows Bash newline syntax error by delegating to PowerShell with `ExecutionPolicy Bypass`.
+   - Updated `validate.ps1` to auto-detect whether the frontend console is listening on port 3000 or 3100 and bypass local proxy interception.
+
+#### Verification Results
+- **Backend Tests:** **334 / 334 tests passing** (`test_vector_and_redis.py` included).
+- **Frontend Verify Gate (`npm run verify`):**
+  - Typecheck: 0 errors.
+  - Lint: 0 warnings.
+  - Unit tests: **172 / 172 tests passing**.
+  - Turbopack production build: 12/12 static/dynamic pages compiled cleanly.
+- **End-to-End Validation (`validate.ps1 -Quick`):**
+  - **VERDICT: PASS (13/13 checks passing)**.
+  - Slow Loop health: ready=True, Postgres dual-tier healthy, Redis connected, Qdrant connected.
+  - Console health: ready=True with all credentials present.
+  - Public tunnel: verified routing tool calls with 401 token authentication gates.
+  - Evidence Ledger answers Agora tool calls in 299 ms.
+
+### Session 15 — Phased Enterprise Overhaul: Redis Streams Extraction Worker, Cross-Incident Semantic RAG (Qdrant), Native Audio Observer RTI, and Production Hardening
+
+#### What was built & verified
+1. **Phase 1: Asynchronous Redis Stream Extraction Worker Pool (`backend/app/application/services/worker.py`)**:
+   - Implemented `StreamExtractionWorker` consuming `echosphere:ingest:events` via Redis Consumer Groups (`XREADGROUP`, `XACK`).
+   - Distributed locking (`lock(name, timeout)`) prevents concurrent duplicate worker processing across horizontal pods.
+   - Updated `backend/app/web/routers/ingest.py` to route transcripts directly into the Redis stream when connected, falling back seamlessly to in-process `current.spawn_pipeline()` when Redis is offline.
+   - Added `backend/tests/test_stream_worker.py` (4 tests passing).
+2. **Phase 2: Cross-Incident Semantic RAG in Qdrant & Precedent Intelligence Modal**:
+   - Added permanent collection `echosphere_historical` to `backend/app/infrastructure/vector_store.py` with `index_postmortem()` and `search_historical_postmortems()`. Active working claims remain ephemeral in `echosphere_claims` and are wiped per-channel on reset (v6 §10.4).
+   - In `backend/app/web/routers/ops.py`, `POST /incident/reset` auto-indexes postmortem summaries into Qdrant before purging active state; added `GET /incident/search` endpoint.
+   - Created Fast Loop tool `POST /tools/query_historical_incidents` in `tools.py` with strict Rule 1 causal language scrubbing (`caused by` -> `correlated with`, `root cause` -> `investigation focus`).
+   - Integrated into Zone 2 `agent-config.ts` under tier `READ`.
+   - Built mission-control UI in `frontend/src/components/intel/HistoricalSearchModal.tsx` with global `⌘K` / `Ctrl+K` shortcut and interactive Precedents button in `CommandBar.tsx`. Egress strictly confined to `delta-socket.ts`.
+   - Added `backend/tests/test_historical_search.py` (4 tests passing).
+3. **Phase 3: Native Audio Observer Sidecar & Room Tension Index (RTI) Restoration**:
+   - Provisioned `services/audio-ingest` Docker service (`python:3.11-slim`) in `docker-compose.yml` (profiles `["audio", "full"]`) to isolate native C-extension audio SDKs from Python 3.14.
+   - Re-implemented `backend/app/domain/services/rti.py` (`RoomTensionService`) with normalized multi-factor weighting (overlap, RMS energy, VAD persistence) and Schmitt-trigger hysteresis (`CRITICAL` at 0.75, recovery at 0.50).
+   - In `backend/app/web/routers/audio_stream.py`, integrated live RTI computation and broadcasted `{"rti": reading.rti}` to `hub.publish()`.
+   - Added `backend/tests/test_rti.py` (7 tests passing).
+4. **Phase 4: Production Hardening & Enterprise Identity Integration**:
+   - Built sliding-window Redis token bucket rate limiter in `backend/app/web/middleware.py` with atomic pipeline increments, TTL expiry, and in-memory fallback.
+   - Expanded enterprise identity in `frontend/src/lib/server/auth.ts` with JWT Bearer parsing, `x-user-profile` header inspection, and role mapping (e.g. `sre-lead` -> `DevOps Lead`, `db-admins` -> `Database Admin`).
+   - Added `backend/tests/test_gateway_security.py` (6 tests passing).
+
+#### Verification Results
+- **Backend Test Suite:** **349 / 349 tests passing** (`.venv\Scripts\python -m unittest discover -s backend\tests -t backend`).
+- **Frontend Verify Gate (`npm run verify`):**
+  - Typecheck (`tsc --noEmit`): 0 errors.
+  - Lint (`eslint`): 0 warnings, 0 errors.
+  - Tests (`node --test`): **172 / 172 tests passing**.
+  - Production build (`next build`): 12/12 static/dynamic pages compiled cleanly with Turbopack.
+
+---
+
 > **Maintenance:** update this file at the end of any session that makes a
 > decision, hits a dead end, or discovers something the code doesn't say.
 > It is only useful if it stays honest — record the corrections too.
-
-

@@ -20,5 +20,117 @@ services:
       retries: 20
       start_period: 5s
 
+  redis:
+    image: redis:7-alpine
+    container_name: echosphere-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - echosphere-redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 3s
+
+  qdrant:
+    image: qdrant/qdrant:v1.11.3
+    container_name: echosphere-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - echosphere-qdrantdata:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 4s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # ── Observability stack (Prometheus + Loki + a synthetic data source) ──────
+  #
+  # WHY THIS EXISTS: `TelemetryService.probe()` used to be a hardcoded Python
+  # dict — Echo's "Datadog/Prometheus" tool never made a network call. These
+  # three services make that real: `telemetry-sim` emits the same values the
+  # old fixture dict hardcoded (so the demo incident narrative is unchanged),
+  # `prometheus` scrapes them for real, and `loki` receives real log lines.
+  # Opt-in via the `telemetry` profile (also included in `full`) so a plain
+  # `docker compose up` without either flag behaves exactly as before.
+  telemetry-sim:
+    image: python:3.12-slim
+    container_name: echosphere-telemetry-sim
+    restart: unless-stopped
+    volumes:
+      - ./backend/observability/telemetry_sim.py:/app/telemetry_sim.py:ro
+    command: ["python", "-u", "/app/telemetry_sim.py"]
+    ports:
+      - "9105:9105"
+    profiles: ["telemetry", "full"]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: echosphere-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./backend/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - echosphere-promdata:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - telemetry-sim
+    profiles: ["telemetry", "full"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: echosphere-loki
+    restart: unless-stopped
+    # Host port 3101, NOT Loki's default 3100 — the frontend console's own
+    # dev-server fallback ports start at 3100 (see start.ps1), and colliding
+    # with that is exactly the kind of "which service actually answered"
+    # confusion this project has been bitten by before.
+    ports:
+      - "3101:3100"
+    volumes:
+      - ./backend/observability/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - echosphere-lokidata:/loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    profiles: ["telemetry", "full"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  audio-ingest:
+    build:
+      context: ./services/audio-ingest
+      dockerfile: Dockerfile
+    container_name: echosphere-audio-ingest
+    restart: unless-stopped
+    environment:
+      SLOW_LOOP_URL: ${SLOW_LOOP_URL:-http://host.docker.internal:8000}
+      AGENT_TOOL_SECRET: ${AGENT_TOOL_SECRET:-}
+      AGORA_CHANNEL: ${AGORA_CHANNEL:-inc-4417}
+      ECHO_AGENT_UID: "9000"
+    profiles: ["audio", "full"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   echosphere-pgdata:
+  echosphere-redisdata:
+  echosphere-qdrantdata:
+  echosphere-promdata:
+  echosphere-lokidata:

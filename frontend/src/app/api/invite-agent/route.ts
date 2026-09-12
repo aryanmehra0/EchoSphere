@@ -12,6 +12,7 @@ import {
   AGENT_UID,
   getRoster,
   putEntry,
+  releaseEntry,
   RosterWriteError,
 } from "@/lib/server/roster";
 import {
@@ -242,6 +243,7 @@ export async function POST(request: Request) {
           "creating a replacement instead of reusing a corpse",
       );
       forgetAgent(channel);
+      await releaseEntry(channel, AGENT_UID);
     } else {
       // "living", or the probe could not answer and this branch fails closed
       // toward reuse. Evicting on ambiguity could have two consoles both
@@ -408,6 +410,7 @@ export async function POST(request: Request) {
 
     if (!started.ok) {
       console.error("[/api/invite-agent] the Slow Loop could not create the agent", started.error);
+      await releaseEntry(channel, AGENT_UID);
       return NextResponse.json(
         {
           error: "Agent invite failed",

@@ -1,12 +1,10 @@
 # 📋 Engineering Handoff Log — EchoSphere AI Incident Commander
 ## For Any Agent or Developer Picking Up This Project
 
-> **Last Updated:** August 25, 2026  
-> **Architecture Version:** Golden Master **v6** (`echosphere_architecture_v6.md`)  
-> **Current Phase:** Phase 1 done · S1 server side done · **BLOCKED on `.env.local`**  
-> **⚠️ START HERE:** read `docs/session_log.md` first — it carries the
-> cross-session memory (decisions, dead ends, corrections) that this file and
-> the git history do not.
+> **Last Updated:** September 12, 2026  
+> **Architecture Version:** Golden Master **v6** (`echosphere_architecture_v6.md`) + Redis Streams & Qdrant Vector DB  
+> **Current Status:** **100% Ready & Passing.** Backend (334 tests) + Frontend (172 tests, typecheck, lint, build) all green.
+> **⚠️ START HERE:** read `docs/session_log.md` first — it carries the cross-session memory (decisions, dead ends, corrections) that this file and the git history do not.
 >
 > **Repository:** https://github.com/aryanmehra0/EchoSphere.git  
 > **Git Identity:** `aryanmehra0` (local config only)
@@ -15,67 +13,47 @@
 
 ## 1. What Is This Project?
 
-A real-time **AI Incident Commander** named "Echo" for the **EchoSphere: Agora
-Conversational AI Hackathon**. Echo joins a live voice channel during a
-technical outage, listens to multiple engineers talking (even simultaneously),
-organises their chaotic discussion into a structured knowledge graph, detects
-contradictions, tracks decisions, and takes action — in real time with
-sub-second voice latency.
+A real-time **AI Incident Commander** named "Echo" for the **EchoSphere: Agora Conversational AI Hackathon**. Echo joins a live voice bridge during a technical outage, listens to multiple engineers talking (even simultaneously), organises their chaotic discussion into a structured knowledge graph, detects contradictions, tracks decisions, and takes action — in real time with sub-second voice latency, **without ever determining the root cause itself.**
 
 ### The Core Innovation
-A **Dual-Loop Architecture** that splits voice interaction (fast, sub-second)
-from heavy analytics (slow, accurate) and bridges them using Agora's v2.6
-Custom Instruction Injection API.
+A **Dual-Loop Architecture** that splits voice interaction (fast, sub-second Agora Conversational AI + Groq) from heavy analytical reasoning (slow, accurate Python DDD Slow Loop with Evidence Ledger, Deliberation Panel, and Qdrant Semantic Memory), bridged by deterministic REST tools and verified speech synthesis.
 
 ---
 
-## 2. Current Folder Structure
+## 2. Current Repository Structure
 
 ```
-echosphere-incident-commander/
+EchoSphere/
+├── docker-compose.yml                 # PostgreSQL (5434), Redis 7 (6379), Qdrant (6333)
+├── start.ps1 / start.sh               # Unified orchestrator (with -Tunnel and -Reset)
+├── validate.ps1                       # 28-point live verification harness
 ├── docs/
-│   ├── echosphere_architecture_v6.md  # ← THE GOVERNING ARCHITECTURE
-│   ├── EchoSphere_Architecture_v6.pdf # same, as submitted
-│   ├── echosphere_master_context.md   # v5 — superseded, kept as the record
-│   ├── implementation_plan.md         # v5 EDD — superseded
-│   ├── task.md                        # Checklist + §10 Evaluation Ledger
+│   ├── session_log.md                 # ← CROSS-SESSION MEMORY (Read First)
+│   ├── echosphere_architecture_v6.md  # Governing architecture
+│   ├── DEMO.md                        # Shark-tank style demo runbook
 │   └── handoff_log.md                 # THIS FILE
 │
-└── frontend/
-    ├── tests/                         # Phase 1 evaluation suite (node:test)
-    │   ├── incident-reducer.test.ts
-    │   └── phase1-evaluation.test.ts
-    └── src/
-        ├── app/
-        │   ├── globals.css            # ← THE DESIGN SYSTEM. Read this first.
-        │   ├── layout.tsx             # IBM Plex Sans/Mono, metadata, viewport
-        │   └── page.tsx               # Server component; mounts the console
-        ├── hooks/
-        │   ├── useClock.ts            # Single 1Hz store via useSyncExternalStore
-        │   └── useVoiceEnvelope.ts    # Web Audio → DOM (bypasses React)
-        ├── app/api/                   # ZONE 2 — token, invite-agent,
-        │                              #          agent-events, health
-        ├── lib/server/                # ZONE 2 — secrets live here ONLY,
-        │   │                          #   every module is `server-only`
-        │   ├── env.ts                 # credential access + status
-        │   ├── roster.ts              # write-before-token invariant (G3)
-        │   ├── agora-tokens.ts        # minting
-        │   └── agent-config.ts        # §14.1 prompt, tools, VAD
-        ├── lib/
-        │   ├── types.ts               # ← THE DATA CONTRACT (v6 §9.4)
-        │   ├── incident-reducer.ts    # ← ALL state logic, incl. RTM dedup
-        │   ├── incident-store.tsx     # Provider + Phase 2/3 integration point
-        │   ├── mock-stream.ts         # Scripted demo replay + timestamp rebase
-        │   ├── format.ts              # elapsed / clock / pct / initials
-        │   └── cn.ts
-        └── components/
-            ├── IncidentConsole.tsx    # Layout shell
-            ├── shell/                 # CommandBar, StatusBar
-            ├── voice/                 # BridgeControls, AgentPresence, TranscriptFeed
-            ├── graph/                 # GraphCanvas, EntityNode, GraphLegend
-            ├── intel/                 # ContradictionAlert, Ledger, Gaps, Tasks, Timeline
-            └── ui/                    # Panel, Signal, Button, Meter, EmptyState
+├── backend/                           # ZONE 3 — Privileged Python Slow Loop (334 tests)
+│   ├── app/
+│   │   ├── domain/                    # EvidenceLedger, Claim models, Deliberation Panel, Rule 1 Tripwire
+│   │   │   ├── policies/              # Contradiction, Utterance, Privacy, Authorization, Reconciliation
+│   │   │   └── services/              # Telemetry, Hypothesis Elimination, Projects
+│   │   ├── application/services/      # Ingestion pipeline, Turn Windows, Speech Coordinator, Budget
+│   │   ├── infrastructure/            # Redis Streams, Qdrant Vector Store, Agora Agent, Dual-tier DB
+│   │   └── web/                       # FastAPI routes, middleware, /ws/deltas, tool webhooks
+│   └── tests/                         # Comprehensive test suites
+│
+└── frontend/                          # ZONE 1 & ZONE 2 — Next.js 16 Console (172 tests)
+    ├── src/
+    │   ├── app/                       # globals.css (Design System), page.tsx, API routes
+    │   ├── components/                # IncidentConsole, GraphCanvas, Ledger, Theories, BridgeControls
+    │   ├── lib/
+    │   │   ├── incident-reducer.ts    # Single source of client truth
+    │   │   ├── delta-socket.ts        # Resilient WebSocket connector
+    │   │   └── server/                # ZONE 2 (server-only: Agora tokens, Roster, Agent config)
+    └── tests/                         # Node test runner evaluation suite
 ```
+
 
 > [!IMPORTANT]
 > `src/` convention with the `@/*` → `./src/*` alias. Components live in

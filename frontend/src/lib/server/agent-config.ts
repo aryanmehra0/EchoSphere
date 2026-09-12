@@ -61,6 +61,7 @@ response is the correct response, and it is never turned into speech.
 
 [TOOLS]
   query_incident_state  READ      — use freely, use constantly
+  probe_telemetry       READ      — query Datadog/Prometheus live metrics
   create_jira_ticket    ADVISORY  — files a ticket, executes nothing
   post_slack_update     ADVISORY
   page_oncall_team      CRITICAL  — requires dashboard approval
@@ -424,6 +425,47 @@ export const AGENT_TOOLS = [
         },
       },
       required: ["scope"],
+    },
+  },
+  {
+    name: "probe_telemetry",
+    tier: "READ" as ActionTier,
+    description:
+      "Query a subsystem's telemetry — a real Prometheus metric when the Slow Loop's " +
+      "telemetry stack is reachable, or a last-known static reading when it is not. " +
+      "Returns a measured value, threshold, and timestamp. Use this whenever an operator " +
+      "asks about metric values, health, or subsystem telemetry.",
+    parameters: {
+      type: "object",
+      properties: {
+        entity: {
+          type: "string",
+          description: "Subsystem to probe, e.g. 'redis', 'postgres', 'checkout', 'network', 'stripe'.",
+        },
+        metric: {
+          type: "string",
+          description: "Optional metric name to query, e.g. 'memory_utilization_pct', 'p99_latency_ms'.",
+        },
+      },
+      required: ["entity"],
+    },
+  },
+  {
+    name: "query_historical_incidents",
+    tier: "READ" as ActionTier,
+    description:
+      "Search historical postmortems and past incident precedents using semantic vector search. " +
+      "Use this when engineers ask if an issue, symptom, or failure pattern has occurred previously. " +
+      "Returns past incident findings with mandatory attribution. Never assert root cause.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Symptom, error pattern, or subsystem behavior to search for across past incidents.",
+        },
+      },
+      required: ["query"],
     },
   },
   {
@@ -875,6 +917,14 @@ const TOOL_ROUTES: Record<string, { path: string; body: Record<string, unknown> 
     // Only declared fields are sent, and `{{args.x}}` is substituted from the
     // model's tool call — so the model cannot smuggle extra fields through.
     body: { scope: "{{args.scope}}", entity: "{{args.entity}}" },
+  },
+  probe_telemetry: {
+    path: "/tools/probe_telemetry",
+    body: { entity: "{{args.entity}}", metric: "{{args.metric}}" },
+  },
+  query_historical_incidents: {
+    path: "/tools/query_historical_incidents",
+    body: { query: "{{args.query}}" },
   },
   create_jira_ticket: {
     path: "/tools/invoke",

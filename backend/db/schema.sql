@@ -42,6 +42,17 @@ CREATE TABLE IF NOT EXISTS claims (
     -- the durable Ledger would have been missing exactly the rows this
     -- product exists to record.
     contradicts      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- Lifecycle fields added to Claim after this table's first version.
+    -- `store.py`'s `_reconcile_schema()` adds these automatically on an
+    -- already-initialized volume that predates them; they're listed here so
+    -- a FRESH volume gets them for free from `docker-entrypoint-initdb.d`
+    -- without needing that reconciliation pass at all.
+    valid_from       BIGINT,
+    valid_until      BIGINT,
+    ttl_seconds      BIGINT,
+    lifecycle        TEXT,
+    speaker_name     TEXT,
+    speaker_user_id  TEXT,
     PRIMARY KEY (channel, id)
 );
 
@@ -114,12 +125,14 @@ CREATE TABLE IF NOT EXISTS contradictions (
 );
 
 CREATE TABLE IF NOT EXISTS timeline (
-    channel TEXT   NOT NULL,
-    id      TEXT   NOT NULL,
-    kind    TEXT   NOT NULL,
-    text    TEXT   NOT NULL,
-    actor   TEXT,
-    at      BIGINT NOT NULL,
+    channel       TEXT   NOT NULL,
+    id            TEXT   NOT NULL,
+    kind          TEXT   NOT NULL,
+    text          TEXT   NOT NULL,
+    actor         TEXT,
+    at            BIGINT NOT NULL,
+    actor_name    TEXT,
+    actor_user_id TEXT,
     PRIMARY KEY (channel, id)
 );
 
@@ -129,13 +142,15 @@ CREATE INDEX IF NOT EXISTS timeline_channel_at ON timeline (channel, at);
 -- exactly was said" is the question every disputed claim ends at, and the
 -- extraction that produced the claim is not reversible.
 CREATE TABLE IF NOT EXISTS transcripts (
-    channel    TEXT    NOT NULL,
-    message_id TEXT    NOT NULL,
-    uid        INTEGER NOT NULL,
-    role       TEXT    NOT NULL,
-    text       TEXT    NOT NULL,
-    is_final   BOOLEAN NOT NULL DEFAULT TRUE,
-    at         BIGINT  NOT NULL,
+    channel         TEXT    NOT NULL,
+    message_id      TEXT    NOT NULL,
+    uid             INTEGER NOT NULL,
+    role            TEXT    NOT NULL,
+    text            TEXT    NOT NULL,
+    is_final        BOOLEAN NOT NULL DEFAULT TRUE,
+    at              BIGINT  NOT NULL,
+    speaker_name    TEXT,
+    speaker_user_id TEXT,
     PRIMARY KEY (channel, message_id)
 );
 

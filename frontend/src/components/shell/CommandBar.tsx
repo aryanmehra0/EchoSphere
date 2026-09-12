@@ -1,6 +1,7 @@
 "use client";
 
-import { FileText, MicOff, Radio } from "lucide-react";
+import { useEffect } from "react";
+import { ChevronDown, FileText, Layers, MicOff, Radio, Search } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
 import { Button } from "@/components/ui/Button";
@@ -91,11 +92,30 @@ function PhaseTrack({ phase }: { phase: IncidentPhase }) {
 }
 
 export function CommandBar() {
-  const { state, now, setPostMortemOpen } = useIncident();
+  const {
+    state,
+    now,
+    setPostMortemOpen,
+    historicalSearchOpen,
+    setHistoricalSearchOpen,
+    activeProject,
+    setProjectModalOpen,
+  } = useIncident();
   const openContradictions = selectOpenContradictions(state);
   const openTasks = selectOpenTasks(state);
 
   const live = state.bridge === "live";
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setHistoricalSearchOpen(!historicalSearchOpen);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [historicalSearchOpen, setHistoricalSearchOpen]);
 
   return (
     <header
@@ -105,7 +125,7 @@ export function CommandBar() {
       )}
     >
       {/* ── Identity ──────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-2.5">
+      <div className="flex shrink-0 items-center gap-2.5">
         <span
           className={cn(
             "flex h-7 w-7 items-center justify-center rounded-sm border",
@@ -125,6 +145,18 @@ export function CommandBar() {
             <Badge tone="critical" variant="solid">
               Sev {state.severity}
             </Badge>
+            <button
+              type="button"
+              onClick={() => setProjectModalOpen(true)}
+              className="flex items-center gap-1.5 rounded-xs border border-line bg-sunken px-2 py-0.5 text-2xs text-ink-2 hover:border-line-strong hover:bg-raised transition-colors cursor-pointer"
+              title="Open Project Workspace & Observability Connectors"
+            >
+              <Layers size={11} className="text-live" />
+              <span className="font-medium truncate max-w-[125px]">
+                {activeProject?.name || "Payments Core"}
+              </span>
+              <ChevronDown size={10} className="text-ink-4" />
+            </button>
           </div>
           <span className="font-mono text-2xs leading-none text-ink-4">
             {state.id}
@@ -132,22 +164,72 @@ export function CommandBar() {
         </div>
       </div>
 
-      <Rule />
+      <Rule className="shrink-0" />
 
-      {/* ── Headline ──────────────────────────────────────────────────────── */}
-      <div className="flex min-w-0 flex-col gap-1">
+      {/*
+        ── Headline ──────────────────────────────────────────────────────
+        `overflow-hidden` is load-bearing, not decorative: this box has
+        `min-w-0` so the flex row is allowed to shrink it below its
+        children's natural width once the row runs out of space, but
+        `PhaseTrack` has no truncation of its own (it is four labels and
+        connective rules, not a single string an ellipsis can shorten). With
+        `overflow: visible` (the default) a shrunk box does not clip its
+        content — it just lets it render past the box edge, straight into
+        the metrics block sitting to its right. That is what produced
+        "MITIGATING" bleeding into "ELAPSED" in practice. Clipping here means
+        the phase track is cut cleanly at the box edge under real pressure
+        instead of overlapping the next element.
+
+        `shrink-[9999]` on top of that decides WHO gives up space first.
+        Plain `flex-shrink: 1` (the default) distributes the header's
+        shortfall proportionally to each item's own content size — and
+        because the metrics block on the right is by far the widest thing in
+        the bar, that default made IT surrender space long before this much
+        smaller headline gave up any, forcing the metrics row into its
+        horizontal scroll fallback on perfectly ordinary laptop widths. The
+        title is the one element here with a designed degrade path (an
+        ellipsis); the incident metrics are not, so this box is set to
+        absorb essentially all of the shrinking first, down to 0, before the
+        metrics block loses a single pixel.
+      */}
+      <div className="flex min-w-0 shrink-[9999] flex-col gap-1 overflow-hidden">
         <h1 className="truncate text-xs leading-none font-medium text-ink-2">
           {state.title}
         </h1>
         <PhaseTrack phase={state.phase} />
       </div>
 
-      {/* Everything past here is right-aligned instrumentation with rich tooltips. */}
+      {/*
+        Everything past here is right-aligned instrumentation with rich
+        tooltips.
+
+        THIS ROW DOES NOT FIT EVERY ITEM AT EVERY WINDOW WIDTH — there are
+        eleven distinct controls here, and no amount of gap-tightening makes
+        that free. The old version let the flex row simply overflow the
+        header, which the app shell clips with `overflow-hidden`: whatever
+        didn't fit was silently cut off the right edge (the user's own
+        screenshot caught `UserMenu` and the Post-Mortem button half-gone).
+
+        Two changes fix that structurally rather than cosmetically:
+          1. `min-w-0` on this container lets the flex algorithm actually
+             shrink it (the header's headline block truncates first, since
+             it already carries `truncate`), and `overflow-x-auto` turns
+             whatever doesn't fit into an internal scroll instead of a
+             layout overflow the ancestor clips.
+          2. Every child gets `shrink-0` so the shrinking above never
+             compresses a metric or a label below its own content width —
+             that compression is what produced the overlapping/garbled text
+             in the screenshot, not this container's overall size.
+          3. The least essential labels (connector-chip text, button
+             captions, the ⌘K hint) hide progressively below `lg`/`xl`,
+             which keeps the row inside common laptop widths as icon+tooltip
+             affordances, so the scrollbar fallback rarely has to be used.
+      */}
       <TooltipProvider delayDuration={150}>
-        <div className="ml-auto flex items-center gap-4">
+        <div className="scroll-thin ml-auto flex min-w-0 items-center gap-3 overflow-x-auto">
           <Tooltip>
             <TooltipTrigger asChild>
-              <div className="cursor-default">
+              <div className="shrink-0 cursor-default">
                 <Metric
                   label="Elapsed"
                   value={elapsed(state.startedAt, now)}
@@ -157,11 +239,11 @@ export function CommandBar() {
             <TooltipContent>Time since the incident bridge opened</TooltipContent>
           </Tooltip>
 
-          <Rule />
+          <Rule className="shrink-0" />
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <div className="cursor-default">
+              <div className="shrink-0 cursor-default">
                 <Metric
                   label="Conflicts"
                   value={openContradictions.length.toString().padStart(2, "0")}
@@ -177,7 +259,7 @@ export function CommandBar() {
               rather than buried a tab deep. */}
           <Tooltip>
             <TooltipTrigger asChild>
-              <div className="cursor-default">
+              <div className="shrink-0 cursor-default">
                 <Metric
                   label="Gaps"
                   value={state.unchecked.length.toString().padStart(2, "0")}
@@ -190,7 +272,7 @@ export function CommandBar() {
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <div className="cursor-default">
+              <div className="shrink-0 cursor-default">
                 <Metric
                   label="Open"
                   value={openTasks.length.toString().padStart(2, "0")}
@@ -201,29 +283,29 @@ export function CommandBar() {
             <TooltipContent>Action items not yet closed</TooltipContent>
           </Tooltip>
 
-          <Rule />
+          <Rule className="shrink-0" />
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <div>
+              <div className="shrink-0">
                 <TensionMeter value={state.rti} />
               </div>
             </TooltipTrigger>
             <TooltipContent>Real-Time Tension Index (RTI)</TooltipContent>
           </Tooltip>
 
-          <Rule />
+          <Rule className="shrink-0" />
 
           {/* ── Transport status ───────────────────────────────────────────── */}
           <Tooltip>
             <TooltipTrigger asChild>
               <div
-                className="flex items-center gap-1.5 cursor-default"
+                className="flex shrink-0 items-center gap-1.5 cursor-default"
                 role="status"
                 aria-live="polite"
               >
                 <Dot tone={live ? "stable" : "neutral"} pulse={live} />
-                <span className="text-2xs font-medium tracking-[0.06em] text-ink-3 uppercase">
+                <span className="text-2xs font-medium tracking-[0.06em] text-ink-3 uppercase whitespace-nowrap">
                   {state.bridge === "live"
                     ? "SD-RTN Connected"
                     : state.bridge === "connecting"
@@ -237,25 +319,87 @@ export function CommandBar() {
             <TooltipContent>Agora Real-Time Network & Voice Bridge Status</TooltipContent>
           </Tooltip>
 
-          <Rule />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => setProjectModalOpen(true)}
+                className="flex shrink-0 items-center gap-2 rounded-xs border border-line bg-sunken/60 px-2 py-1 text-2xs hover:bg-raised hover:border-line-strong transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-1 text-orange-400">
+                  <span className="flex h-1.5 w-1.5 shrink-0 rounded-full bg-live" />
+                  <span className="hidden font-mono text-[10px] xl:inline">Prom</span>
+                </div>
+                <span className="hidden text-ink-4 xl:inline">|</span>
+                <div className="flex items-center gap-1 text-purple-400">
+                  <span className="flex h-1.5 w-1.5 shrink-0 rounded-full bg-live" />
+                  <span className="hidden font-mono text-[10px] xl:inline">DD</span>
+                </div>
+                <span className="hidden text-ink-4 xl:inline">|</span>
+                <div className="flex items-center gap-1 text-cyan-400">
+                  <span className="flex h-1.5 w-1.5 shrink-0 rounded-full bg-live" />
+                  <span className="hidden font-mono text-[10px] xl:inline">CW</span>
+                </div>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Observability Connectors (Prometheus, Datadog, CloudWatch) — Click to open Hub</TooltipContent>
+          </Tooltip>
 
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="secondary"
                 size="sm"
+                className="shrink-0"
+                icon={<Layers size={12} strokeWidth={2.2} className="text-live" />}
+                onClick={() => setProjectModalOpen(true)}
+              >
+                <span className="hidden lg:inline">Workspace</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Manage Project Workspace, Team Roster & Connectors</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="shrink-0"
+                icon={<Search size={12} strokeWidth={2.2} />}
+                onClick={() => setHistoricalSearchOpen(true)}
+              >
+                <span className="hidden lg:inline">Precedents</span>
+                <span className="hidden rounded border border-line bg-sunken px-1 py-0.5 text-3xs font-mono text-ink-4 xl:inline">
+                  ⌘K
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Search Cross-Incident Historical Postmortems (Ctrl+K)</TooltipContent>
+          </Tooltip>
+
+          <Rule className="shrink-0" />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="shrink-0"
                 icon={<FileText size={12} strokeWidth={2.2} />}
                 onClick={() => setPostMortemOpen(true)}
               >
-                Post-Mortem
+                <span className="hidden lg:inline">Post-Mortem</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>Export Incident Post-Mortem & SOC2 Audit Report</TooltipContent>
           </Tooltip>
 
-          <Rule />
+          <Rule className="shrink-0" />
 
-          <UserMenu />
+          <div className="shrink-0">
+            <UserMenu />
+          </div>
         </div>
       </TooltipProvider>
 

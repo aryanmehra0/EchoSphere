@@ -46,11 +46,19 @@ from app.domain.policies.contradiction import ContradictionEngine
 from app.domain.policies.degradation import Degradation
 from app.domain.policies.privacy import PrivacyGate
 from app.domain.policies.proxy import ProxyActionLayer
+from app.infrastructure import config
 from app.infrastructure.deltas import DeltaHub
 
 log = logging.getLogger("echo.session")
 
 DEFAULT_CHANNEL = "inc-4417"
+
+
+class TooManySessions(RuntimeError):
+    """Raised by `SessionRegistry.get_or_create` when creating a session for
+    a genuinely new channel would exceed `config.max_concurrent_incidents()`.
+    An already-existing channel is never affected by this — only growth is
+    capped."""
 
 
 class IncidentSession:
@@ -87,6 +95,15 @@ class IncidentSession:
         # it.
         self.agent: dict[str, str | None] = {"agent_id": None, "channel": None}
 
+        # Who is actually on this bridge, and what they're allowed to approve.
+        # Recorded ONCE, server-side, at join time (POST /bridge/roster) by
+        # Zone 2 after it has already decided — from the authenticated
+        # enterprise identity, not a free client claim — what role a
+        # participant may hold. `/approval/redeem` looks a uid up here rather
+        # than trusting whatever role string arrives with the redeem request;
+        # without this, redemption had no real roster to check against at all.
+        self.roster: dict[int, dict[str, Any]] = {}
+
         # Serialises the pipeline. Both an incoming frame and the flush ticker
         # can reach extraction, and running the same window twice would double
         # every claim in it.
@@ -97,6 +114,18 @@ class IncidentSession:
         # mid-extraction by the garbage collector — silently losing claims for
         # speech that was already spoken.
         self.pipeline_tasks: set[asyncio.Task[Any]] = set()
+
+        # True from the moment a pipeline task is spawned until that task
+        # actually acquires `pipeline_lock` and starts running (cleared by
+        # `PipelineRunner.run`). Under sustained LLM slowness, every incoming
+        # transcript used to spawn its own task, and each one just queues on
+        # the same lock — since `WindowDrainStep` re-checks the window fresh
+        # once a task finally runs, a task still queued behind another is
+        # guaranteed to pick up everything accumulated by then, so spawning
+        # more than one queued-but-not-yet-running task per session is pure
+        # redundant overhead, not extra throughput. `ingest.py`'s fallback
+        # (non-Redis-stream) spawn path checks this before spawning.
+        self.pipeline_pending = False
 
         # Phase 5 (P1): Rehydrate from event store if snapshots exist for this channel
         from app.infrastructure import event_store
@@ -160,14 +189,36 @@ class SessionRegistry:
         # flight. See `total_in_flight`.
         self._retired: list[IncidentSession] = []
 
-    def current(self) -> IncidentSession:
-        """The active session, created on first use."""
-        session = self._sessions.get(self._default)
+    def get_or_create(self, channel: str | None = None) -> IncidentSession:
+        """
+        Get or create an IncidentSession for a specific channel or the default.
+
+        Raises `TooManySessions` rather than creating one when the channel is
+        genuinely new AND the process is already at `max_concurrent_incidents`
+        — an existing channel is always returned regardless of that cap, so
+        this only ever blocks growth, never a channel already in use.
+        """
+        target_channel = (channel or "").strip() or self._default
+        session = self._sessions.get(target_channel)
         if session is None:
-            session = IncidentSession(self._default)
-            self._sessions[self._default] = session
-            log.info("session: created for channel %s", self._default)
+            limit = config.max_concurrent_incidents()
+            if len(self._sessions) >= limit:
+                raise TooManySessions(
+                    f"already at the {limit}-incident limit (MAX_CONCURRENT_INCIDENTS); "
+                    f"refusing to create a session for a new channel {target_channel!r}"
+                )
+            session = IncidentSession(target_channel)
+            self._sessions[target_channel] = session
+            log.info("session: created for channel %s", target_channel)
         return session
+
+    def current(self) -> IncidentSession:
+        """The default active session, created on first use."""
+        return self.get_or_create(self._default)
+
+    def list_channels(self) -> list[str]:
+        """Return all active channel identifiers."""
+        return list(self._sessions.keys())
 
     @property
     def total_in_flight(self) -> int:
@@ -197,9 +248,9 @@ class SessionRegistry:
         self._retired = [s for s in self._retired if s.in_flight]
         return live + sum(s.in_flight for s in self._retired)
 
-    def reset(self) -> IncidentSession:
+    def reset(self, channel: str | None = None) -> IncidentSession:
         """
-        Replace the active session with a fresh one, keeping the channel.
+        Replace the session for the given channel (or default) with a fresh one.
 
         This is the whole reason the class exists. Previously five module
         globals were rebound by hand and the engine's cooldown was cleared
@@ -212,31 +263,9 @@ class SessionRegistry:
         nothing, which is the one failure mode of that feature nobody would
         notice until afterwards. `PrivacyGate()` in `__init__` guarantees it.
         """
-        old = self.current()
-        channel = old.channel
+        target_channel = (channel or "").strip() or self._default
+        old = self._sessions.get(target_channel) or IncidentSession(target_channel)
 
-        # ── CANCEL THE PREVIOUS INCIDENT'S ANALYSIS ────────────────────────
-        #
-        # A pipeline task spawned moments before the reset is still extracting
-        # the OLD incident's window. Two things go wrong if it is left alone:
-        #
-        #   - it publishes the previous run's claims onto the hub the fresh
-        #     dashboards are now reading, so a cleared board repopulates with
-        #     the incident that was just discarded;
-        #   - `/health` reported `inFlight` from the current session only, so
-        #     the straggler was invisible and Rehearsal Rig Tier 3 sampled
-        #     while it was still writing. That is what failed run 2 of 3 on
-        #     "hypothesis kept OUT of established" — the claim was late, not
-        #     missing.
-        #
-        # A reset means "this incident is over", so cancelling is the honest
-        # reading. The frames it was working on belonged to the discarded
-        # incident and are not wanted in the new one.
-        #
-        # It is still RETIRED rather than dropped, because cancellation is not
-        # instantaneous — the task observes it at its next await. Retired
-        # sessions keep counting toward `total_in_flight` until they actually
-        # finish, so a harness polling `inFlight` waits for the real quiescence.
         cancelled = 0
         for task in list(old.pipeline_tasks):
             if not task.done():
@@ -245,12 +274,20 @@ class SessionRegistry:
         if cancelled:
             self._retired.append(old)
             log.info(
-                "session: cancelled %d in-flight analysis task(s) on reset", cancelled,
+                "session: cancelled %d in-flight analysis task(s) on reset for %s",
+                cancelled,
+                target_channel,
             )
 
-        session = IncidentSession(channel)
-        self._sessions[channel] = session
-        log.info("session: reset for channel %s", channel)
+        from app.infrastructure import event_store
+        try:
+            event_store.clear_channel(target_channel)
+        except Exception as exc:
+            log.warning("session: failed to clear event store for %s on reset: %s", target_channel, exc)
+
+        session = IncidentSession(target_channel)
+        self._sessions[target_channel] = session
+        log.info("session: reset for channel %s", target_channel)
         return session
 
 

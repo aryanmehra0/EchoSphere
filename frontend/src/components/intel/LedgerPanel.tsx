@@ -1,11 +1,12 @@
 "use client";
 
-import { CircleCheck, FlaskConical, Sparkles, Wrench } from "lucide-react";
+import { CircleCheck, FlaskConical, Radio, Sparkles, Wrench } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
 import {
   selectEstablished,
   selectHypotheses,
+  selectHypothesisMatrix,
   selectInferences,
   selectSupersededIds,
 } from "@/lib/incident-reducer";
@@ -67,6 +68,15 @@ function Attribution({ claim }: { claim: Claim }) {
         {initials(claim.speakerRole)}
       </span>
       <span className="text-[9px] text-ink-4">{claim.speakerRole}</span>
+      {claim.epistemicStatus === "TOOL_RESULT" && (
+        <span
+          className="rounded-[2px] border border-stable/40 bg-stable/15 px-1 font-mono text-[8px] font-semibold text-stable flex items-center gap-0.5"
+          title="Verified read-only telemetry probe"
+        >
+          <Radio size={8} className="text-stable" />
+          TOOL_RESULT
+        </span>
+      )}
       {claim.lifecycle === "STALE" && (
         <span
           className="rounded-[2px] border border-warning/40 bg-warning/15 px-1 font-mono text-[8px] font-semibold text-warning"
@@ -113,6 +123,8 @@ export function LedgerPanel() {
   const established = filterClaims(rawEstablished);
   const hypotheses = filterClaims(rawHypotheses);
   const inferences = filterClaims(rawInferences);
+  const matrix = selectHypothesisMatrix(state);
+  const matrixMap = new Map(matrix.map((m) => [m.hypothesis.id, m]));
 
   if (state.claims.length === 0) {
     return (
@@ -228,13 +240,28 @@ export function LedgerPanel() {
                       {initials(c.speakerRole)}
                     </span>
                     <span className="text-[9px] text-ink-4">{c.speakerRole}</span>
-                    <Badge
-                      tone={closed ? "stable" : "warning"}
-                      variant="outline"
-                      className="ml-auto"
-                    >
-                      {closed ? "Settled" : "Open"}
-                    </Badge>
+                    {(() => {
+                      const m = matrixMap.get(c.id);
+                      if (closed || m?.status === "REFUTED") {
+                        return (
+                          <Badge tone="stable" variant="outline" className="ml-auto">
+                            Refuted
+                          </Badge>
+                        );
+                      }
+                      if (m?.status === "CORROBORATED") {
+                        return (
+                          <Badge tone="warning" variant="outline" className="ml-auto">
+                            Corroborated
+                          </Badge>
+                        );
+                      }
+                      return (
+                        <Badge tone="neutral" variant="outline" className="ml-auto">
+                          Open
+                        </Badge>
+                      );
+                    })()}
                   </div>
                 </div>
               </li>

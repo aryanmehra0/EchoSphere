@@ -17,6 +17,7 @@ import {
 } from "@/lib/server/roster";
 import type { ParticipantRole } from "@/lib/types";
 import { getSessionUser } from "@/lib/server/auth";
+import { slowLoopBase } from "@/lib/server/active-agents";
 
 /**
  * POST /api/token — v6 W1, step 2–6.
@@ -87,11 +88,28 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
-  const participantRole = role as ParticipantRole;
+  const requestedRole = role as ParticipantRole;
 
   const sessionUser = await getSessionUser(request);
   const effectiveUserId = body.userId || sessionUser.id;
   const effectiveName = body.name || sessionUser.name;
+
+  /*
+    ── A REQUESTED ROLE IS NOT AN ENTITLEMENT ──────────────────────────────
+    `isAuthorizedRole` below decides whether the bridge role being ASSIGNED
+    carries approval power. Without this check, that decision was driven
+    entirely by `body.role` — any caller could request "Incident Commander"
+    from this dropdown-backed field and be recorded as authorized to approve
+    critical actions, regardless of who they actually are. Non-privileged
+    roles (Observer, SRE, DB Admin, ...) stay freely selectable, matching the
+    live-war-room flexibility the two-axis RBAC design intends; only the two
+    roles that grant `APPROVE_CRITICAL_ACTIONS` are capped against the
+    caller's real, authenticated identity.
+  */
+  const participantRole: ParticipantRole =
+    isAuthorizedRole(requestedRole) && !sessionUser.permissions.includes("APPROVE_CRITICAL_ACTIONS")
+      ? sessionUser.defaultRole
+      : requestedRole;
 
   const kind: ParticipantKind = body.kind === "observer" ? "observer" : "human";
 
@@ -231,6 +249,39 @@ export async function POST(request: Request) {
         ? ["APPROVE_CRITICAL_ACTIONS", "SPEAK_ON_BRIDGE", "MINT_TIMELINE_DECISIONS"]
         : ["SPEAK_ON_BRIDGE"],
     });
+
+    /*
+      ── SYNC THE ROLE THE BACKEND WILL TRUST FOR APPROVAL ───────────────────
+      `/approval/redeem` looks a uid up in the Slow Loop's own roster rather
+      than trusting a role claimed at redeem time — this is that roster's
+      only writer. `participantRole`/`isAuth` here are already the CAPPED,
+      server-decided values (see the capping block above), not the raw
+      client request, so this is the trustworthy value reaching the backend.
+
+      Never blocks the join: a human joining and being able to speak/be heard
+      must not depend on this sync succeeding, matching how agent
+      registration below degrades rather than fails the whole request. Worst
+      case on failure, this uid simply cannot redeem a critical approval
+      until a renewal retries the sync — strictly safer than the alternative
+      of joining unattributably.
+    */
+    try {
+      await fetch(`${slowLoopBase()}/bridge/roster`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channel,
+          uid,
+          role: participantRole,
+          authorized: isAuth,
+          actorName: effectiveName,
+          actorUserId: effectiveUserId,
+        }),
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch (error) {
+      console.warn("[/api/token] Slow Loop roster sync failed — approval redemption may be unavailable for this uid until it retries", error);
+    }
 
     // ── Step 4. Only now. ─────────────────────────────────────────────────
     return NextResponse.json({

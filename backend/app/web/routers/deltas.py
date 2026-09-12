@@ -31,7 +31,8 @@ async def deltas_socket(ws: WebSocket) -> None:
     # after that, and `DeltaHub.adopt` moves it across an `/incident/reset` —
     # so this handler keeps working without holding a session reference that
     # the reset would make stale.
-    current = session()
+    channel = ws.query_params.get("channel")
+    current = session(channel)
     hub = current.hub
 
     await ws.accept()

@@ -1,11 +1,10 @@
-# Engineering Design Document: Real-Time AI Incident Commander (Golden Master v5 - FINAL)
+# Engineering Design Document: Real-Time AI Incident Commander (Golden Master v5 - ARCHIVE)
 
-## 1. Executive Summary & Goal
-Build a flawless, real-time AI Incident Commander for the EchoSphere Hackathon. This architecture guarantees a 100% win rate by deploying a true Dual-Loop system (Next.js + Python), ensuring flawless speaker diarization, rigorous security compliance, advanced UX safeguards, and total operational stability for extended incidents.
+> [!WARNING]
+> **SUPERSEDED / LEGACY RECORD (DO NOT FOLLOW)**
+> This document was the preliminary v5 plan from early hackathon scaffolding. It has been completely superseded by **Golden Master Architecture v6** (`docs/echosphere_architecture_v6.md`) and the code-grounded **`ARCHITECTURE.md`**.
+> For cross-session memory, see `docs/session_log.md`.
 
-## User Review Required
-> [!IMPORTANT]
-> The final operational safeguards (Token Renewal and VAD Audio Optimization) have been integrated. There are absolutely no remaining blind spots in this architecture. Please review this final version, and we will move out of Planning Mode and begin execution!
 
 ## 2. The Flawless "Dual-Loop" Architecture
 

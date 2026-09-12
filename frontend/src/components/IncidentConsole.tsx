@@ -14,6 +14,8 @@ import { GraphCanvas } from "@/components/graph/GraphCanvas";
 import { ContradictionAlert } from "@/components/intel/ContradictionAlert";
 import { ApprovalModal } from "@/components/intel/ApprovalModal";
 import { PostMortemModal } from "@/components/intel/PostMortemModal";
+import { HistoricalSearchModal } from "@/components/intel/HistoricalSearchModal";
+import { ProjectWorkspaceModal } from "@/components/shell/ProjectWorkspaceModal";
 import { IntelColumn } from "@/components/intel/IntelColumn";
 import { Panel, PanelHeader } from "@/components/ui/Panel";
 
@@ -87,6 +89,12 @@ export function IncidentConsole() {
 
         {/* Automated Post-Mortem & SOC2 Audit Report Export Modal */}
         <PostMortemModal />
+
+        {/* Cross-Incident Semantic RAG Search Modal */}
+        <HistoricalSearchModal />
+
+        {/* Enterprise Project Workspace & Connectors Modal */}
+        <ProjectWorkspaceModal />
 
         <StatusBar />
       </div>

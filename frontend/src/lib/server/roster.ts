@@ -198,7 +198,14 @@ export async function putEntry(entry: RosterEntry): Promise<RosterEntry> {
 }
 
 export async function getRoster(channel: string): Promise<RosterEntry[]> {
-  return [...channelMap(channel).values()];
+  const now = Date.now();
+  const map = channelMap(channel);
+  for (const [uid, entry] of [...map.entries()]) {
+    if (entry.expiresAt <= now) {
+      map.delete(uid);
+    }
+  }
+  return [...map.values()];
 }
 
 export async function getEntry(

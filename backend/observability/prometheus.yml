@@ -1,0 +1,16 @@
+# Minimal scrape config for EchoSphere's local observability stack.
+#
+# Scrapes the synthetic telemetry generator (`telemetry_sim.py`), which
+# exposes the SAME entities the old fixture dict in `telemetry.py` used to
+# hardcode (redis, postgres, checkout, auth, network, stripe, ingress) as
+# real Prometheus metrics — so the demo incident narrative still works, but
+# `TelemetryService.probe()` now genuinely queries this server over HTTP
+# instead of reading a Python dict in-process.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: echosphere-telemetry-sim
+    static_configs:
+      - targets: ["telemetry-sim:9105"]

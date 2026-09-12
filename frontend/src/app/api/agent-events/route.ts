@@ -54,21 +54,31 @@ export async function POST(request: Request) {
 
   // Verify before parsing. An unauthenticated caller should never reach the
   // JSON parser, let alone the token minter.
+  //
+  // Fail CLOSED when unset, matching the Slow Loop's own `tool_secret()`
+  // policy for the same shape of problem: this is a public-by-necessity
+  // endpoint that mints a fresh RTC token on request, and an unset secret
+  // used to mean "unauthenticated, but keep serving anyway" — silently
+  // exposing exactly the credential-minting action a webhook secret exists
+  // to gate. An operator who genuinely wants this open would have to notice
+  // the every-request warning that used to be the only signal; refusing
+  // outright cannot be missed.
   const expected = serverEnv.agentEventsSecret;
-  if (expected) {
-    const provided =
-      request.headers.get("x-agora-signature") ??
-      request.headers.get("authorization") ??
-      "";
-    if (!safeEqual(provided, expected)) {
-      return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
-    }
-  } else {
-    // Loud, because an unauthenticated public endpoint that mints credentials
-    // is a real exposure and it is easy to forget in a sprint.
-    console.warn(
-      "[/api/agent-events] AGORA_WEBHOOK_SECRET is unset — endpoint is UNAUTHENTICATED.",
+  if (!expected) {
+    console.error(
+      "[/api/agent-events] refusing all requests — AGORA_WEBHOOK_SECRET is not set",
     );
+    return NextResponse.json(
+      { error: "This endpoint is not configured to accept webhook events." },
+      { status: 503 },
+    );
+  }
+  const provided =
+    request.headers.get("x-agora-signature") ??
+    request.headers.get("authorization") ??
+    "";
+  if (!safeEqual(provided, expected)) {
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
   }
 
   let event: AgentEvent;

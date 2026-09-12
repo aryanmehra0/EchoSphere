@@ -173,7 +173,22 @@ export const serverEnv = {
     const v = process.env.AGENT_TOOL_SECRET?.trim();
     return v && v !== "" ? v : null;
   },
+
+  get redisUrl(): string {
+    return optional("REDIS_URL", "redis://127.0.0.1:6379/0");
+  },
+
+  get qdrantUrl(): string {
+    return optional("QDRANT_URL", "http://127.0.0.1:6333");
+  },
 };
+
+// `JWT_VERIFY_SECRET` and `AUTH_GATEWAY_SECRET` (used by `getSessionUser` in
+// `auth.ts` to decide whether a Bearer JWT or an `x-user-profile` header can
+// be trusted) are read directly from `process.env` in that file instead of
+// through `serverEnv` here — this module imports `server-only`, which throws
+// when loaded outside a real Next.js bundler, and `auth.ts` is exercised
+// directly by the plain Node test runner.
 
 /**
  * Report which credentials are present WITHOUT reading their values.

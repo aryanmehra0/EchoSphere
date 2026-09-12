@@ -17,6 +17,7 @@ import {
   FAST_LOOP_SYSTEM_PROMPT,
   NO_TOOLS_ADDENDUM,
   SECRETS_CLAUSE,
+  AGENT_TOOLS,
 } from "../src/lib/server/agent-config.ts";
 
 /**
@@ -297,7 +298,7 @@ describe("the managed Fast Loop matches the official quickstart", () => {
 
       assert.match(p.properties.llm.system_messages[0].content, /NEVER ASSERT CAUSATION/,
                    `Rule 2 missing in ${mode} mode`);
-      assert.equal(p.properties.llm.tools?.length, 5, `tools missing in ${mode} mode`);
+      assert.equal(p.properties.llm.tools?.length, AGENT_TOOLS.length, `tools missing in ${mode} mode`);
     }
   });
 });

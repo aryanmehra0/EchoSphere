@@ -69,7 +69,7 @@ export function TensionMeter({
           );
         })}
       </div>
-      <span className="text-2xs leading-none font-medium tracking-[0.08em] text-ink-4 uppercase">
+      <span className="text-2xs leading-none font-medium tracking-[0.08em] text-ink-4 uppercase whitespace-nowrap">
         Tension
       </span>
     </div>

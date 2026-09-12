@@ -47,7 +47,16 @@ const ROLES: readonly ParticipantRole[] = [
 ];
 
 export function BridgeControls() {
-  const { state, openBridge, closeBridge, micOn, toggleMic, currentUid, currentRole } = useIncident();
+  const {
+    state,
+    openBridge,
+    closeBridge,
+    micOn,
+    toggleMic,
+    currentUid,
+    currentRole,
+    activeProject,
+  } = useIncident();
   const { user } = useAuth();
   const [channel, setChannel] = useState("inc-4417");
   const [selectedRole, setSelectedRole] = useState<ParticipantRole | null>(null);
@@ -57,6 +66,15 @@ export function BridgeControls() {
 
   const idle = state.bridge === "idle";
   const connecting = state.bridge === "connecting";
+
+  // Auto-sync channel with active project's primary incident if idle
+  useEffect(() => {
+    if (!idle) return;
+    if (activeProject?.activeIncidents && activeProject.activeIncidents.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setChannel(activeProject.activeIncidents[0].channel);
+    }
+  }, [activeProject, idle]);
 
   /*
     Multi-user roster awareness:

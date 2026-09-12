@@ -40,6 +40,11 @@ const SLOW_LOOP_ORIGIN =
  * Listed EXPLICITLY rather than proxying `/:path*`, because a catch-all would
  * shadow the console's own `/api/*` routes and its `/_next/*` assets — the
  * token minting and the roster live in Next.js and must NOT be forwarded.
+ *
+ * Kept in step BY HAND with `src/proxy.ts`'s `config.matcher` — that file
+ * attaches `AGENT_TOOL_SECRET` to every request proxied through this list,
+ * and a path added here without a matching entry there is silently
+ * unauthenticated for remote traffic.
  */
 const SLOW_LOOP_PATHS = [
   "/observer/:path*",       // ingest.py + audio_stream.py — the transcript ingress

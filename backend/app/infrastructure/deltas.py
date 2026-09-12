@@ -83,6 +83,14 @@ class DeltaHub:
             }
             self._ring.append(envelope)
 
+        from app.infrastructure import background_tasks, redis_bus
+        if redis_bus.is_enabled():
+            # `background_tasks.spawn`, not a bare `asyncio.create_task` —
+            # asyncio holds only a weak reference to the latter, so with
+            # nothing else holding it the task can be GC'd mid-write,
+            # silently dropping this delta from the Redis mirror.
+            background_tasks.spawn(lambda: redis_bus.xadd("echosphere:deltas", envelope))
+
         dead: list[asyncio.Queue[dict[str, Any]]] = []
         for q in self._subscribers:
             try:

@@ -49,7 +49,12 @@ export type ParticipantRole =
   | "Network Engineer"
   | "Support Engineer"
   | "Observer"
-  | "Echo";
+  | "Echo"
+  | "Datadog APM"
+  | "Prometheus"
+  | "CloudWatch"
+  | "Telemetry Probe"
+  | (string & {});
 
 export type UserPermission =
   | "APPROVE_CRITICAL_ACTIONS"
@@ -127,6 +132,22 @@ export interface Claim {
   speakerUserId?: string;
 }
 
+/** Status of a spoken engineering hypothesis in the elimination matrix. */
+export type HypothesisStatus = "OPEN" | "REFUTED" | "CORROBORATED";
+
+export interface HypothesisMatrixItem {
+  hypothesis: Claim;
+  status: HypothesisStatus;
+  evidenceClaim?: Claim;
+  reason?: string;
+  suggestedProbe?: {
+    entity: string;
+    metric?: string;
+    label: string;
+    provider?: string;
+  };
+}
+
 /**
  * Something the conversation has NOT established — v6 §9.4.
  *
@@ -173,6 +194,93 @@ export interface IncidentLink {
   target: string;
   label: string;
   kind: EdgeKind;
+}
+
+/** Read-only telemetry measurement point returned by active probes. */
+export interface TelemetryReading {
+  entityId: string;
+  entityLabel: string;
+  metricName: string;
+  value: number;
+  unit: string;
+  status: EntityStatus;
+  provider: "Datadog APM" | "Prometheus" | "CloudWatch" | string;
+  timestamp: number;
+  formatted: string;
+  threshold?: number | null;
+  rawPayload?: Record<string, unknown>;
+}
+
+/** Pre-hydrated incident scenario for live demonstration and exploration. */
+export interface Scenario {
+  id: string;
+  name: string;
+  description: string;
+  badge: string;
+  entities: IncidentEntity[];
+  links: IncidentLink[];
+  initialClaims?: Claim[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Enterprise Project Workspace & Observability Connectors                    */
+/* -------------------------------------------------------------------------- */
+
+export type ConnectorProvider =
+  | "prometheus"
+  | "datadog"
+  | "cloudwatch"
+  | "grafana_loki"
+  | "slack";
+
+export type ConnectorStatus =
+  | "CONNECTED"
+  | "CONFIGURED"
+  | "UNCONFIGURED"
+  | "ERROR";
+
+export interface ConnectorConfig {
+  provider: ConnectorProvider;
+  name: string;
+  status: ConnectorStatus;
+  endpoint: string;
+  authMasked?: string;
+  region?: string | null;
+  serviceFilter?: string | null;
+  latencyMs?: number | null;
+  lastTestedAt?: number | null;
+  errorMessage?: string | null;
+}
+
+export interface ProjectMember {
+  userId: string;
+  name: string;
+  email: string;
+  role: ParticipantRole | string;
+  isOnline: boolean;
+  permissions?: UserPermission[] | string[];
+}
+
+export interface IncidentChannelSummary {
+  id: string;
+  title: string;
+  severity: number;
+  status: string;
+  channel: string;
+  startedAt: number;
+}
+
+export interface ProjectWorkspace {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  environment: string;
+  team: ProjectMember[];
+  connectors: Record<string, ConnectorConfig>;
+  activeIncidents: IncidentChannelSummary[];
+  connectedCount?: number;
+  memberCount?: number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -367,6 +475,9 @@ export interface IncidentState {
   phase: IncidentPhase;
   /** Epoch ms the bridge opened; null until the operator joins. */
   startedAt: number | null;
+
+  projectId?: string;
+  projectName?: string;
 
   bridge: BridgeState;
   agent: AgentState;

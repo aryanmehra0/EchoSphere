@@ -293,7 +293,13 @@ describe("§10.2 Blast Radius — trust-zone boundary (v6 §10.1)", () => {
 
   const norm = (p: string) => p.replace(/\\/g, "/");
   const isServer = (p: string) =>
-    /\/src\/lib\/server\//.test(norm(p)) || /\/src\/app\/api\//.test(norm(p));
+    /\/src\/lib\/server\//.test(norm(p)) ||
+    /\/src\/app\/api\//.test(norm(p)) ||
+    // Next.js's Proxy (formerly "Middleware") always runs server/edge-side
+    // and is never bundled into client JS, exactly like a route handler
+    // under app/api — it just doesn't live under either directory this
+    // classifier already knows.
+    /\/src\/proxy\.ts$/.test(norm(p));
 
   const all = walk(SRC).map((f) => ({ f, text: readFileSync(f, "utf8") }));
   const client = all.filter((s) => !isServer(s.f));

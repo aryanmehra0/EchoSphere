@@ -105,6 +105,19 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_snapshots_channel_type
             ON incident_snapshots(channel, record_type);
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS postmortem_archives (
+                archive_id TEXT PRIMARY KEY,
+                channel TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                json_report TEXT NOT NULL,
+                markdown_content TEXT NOT NULL
+            );
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_archives_channel
+            ON postmortem_archives(channel, created_at DESC);
+        """)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -275,6 +288,82 @@ def clear_channel(channel: str) -> None:
         log.info("event_store: cleared SQLite events and snapshots for %s", channel)
     except Exception as exc:
         log.warning("event_store: could not clear SQLite store for %s: %s", channel, exc)
+
+
+def archive_postmortem(channel: str, report: dict[str, Any], markdown: str) -> str:
+    """Persist completed incident postmortem into durable SQLite archive."""
+    archive_id = f"pm-{int(time.time() * 1000)}-{channel}"
+    try:
+        conn = get_connection()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO postmortem_archives (archive_id, channel, created_at, json_report, markdown_content)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (archive_id, channel, int(time.time() * 1000), json.dumps(report), markdown),
+            )
+        log.info("event_store: archived postmortem %s for channel %s", archive_id, channel)
+        return archive_id
+    except Exception as exc:
+        log.warning("event_store: could not archive postmortem for %s: %s", channel, exc)
+        return archive_id
+
+
+def list_postmortem_archives(channel: str | None = None) -> list[dict[str, Any]]:
+    """List historical postmortem summaries."""
+    out: list[dict[str, Any]] = []
+    try:
+        conn = get_connection()
+        if channel:
+            cur = conn.execute(
+                "SELECT archive_id, channel, created_at, json_report FROM postmortem_archives WHERE channel = ? ORDER BY created_at DESC",
+                (channel,),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT archive_id, channel, created_at, json_report FROM postmortem_archives ORDER BY created_at DESC",
+            )
+        for row in cur.fetchall():
+            try:
+                rep = json.loads(row["json_report"])
+                summary = rep.get("summary", {})
+            except Exception:
+                summary = {}
+            out.append({
+                "archiveId": row["archive_id"],
+                "channel": row["channel"],
+                "createdAt": row["created_at"],
+                "title": summary.get("title", f"Incident Postmortem - {row['channel']}"),
+                "severity": summary.get("severity", "SEV-1"),
+                "status": summary.get("status", "RESOLVED"),
+            })
+    except Exception as exc:
+        log.warning("event_store: could not list postmortem archives: %s", exc)
+    return out
+
+
+def get_postmortem_archive(archive_id: str) -> dict[str, Any] | None:
+    """Retrieve full postmortem archive by id."""
+    try:
+        conn = get_connection()
+        cur = conn.execute(
+            "SELECT archive_id, channel, created_at, json_report, markdown_content FROM postmortem_archives WHERE archive_id = ?",
+            (archive_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "archiveId": row["archive_id"],
+            "channel": row["channel"],
+            "createdAt": row["created_at"],
+            "report": json.loads(row["json_report"]),
+            "markdown": row["markdown_content"],
+        }
+    except Exception as exc:
+        log.warning("event_store: could not fetch archive %s: %s", archive_id, exc)
+        return None
 
 
 def close() -> None:

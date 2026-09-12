@@ -14,6 +14,7 @@ from __future__ import annotations
 import unittest
 
 from app.adapters.agora_bridge import BridgeController
+from app.ledger import Ledger
 from app.models import Claim, Unchecked
 from app.utterance import (
     EpistemicViolation,
@@ -141,6 +142,63 @@ class TestRuleThreeInferredNeverSpoken(unittest.TestCase):
             speaker_role="Echo", confidence=0.8,
         )
         self.assertEqual(BridgeController.strip_inferred([inferred]), [])
+
+
+class TestRecap(unittest.TestCase):
+    """
+    `Ledger.recap()` — the context handed to a replacement Fast Loop agent
+    when a new speaker's join forces Agora's fixed `remote_rtc_uids` to be
+    rebuilt from scratch, per this method's own docstring. Had zero test
+    coverage before this.
+    """
+
+    def test_inferred_claims_never_appear_in_the_recap(self):
+        ledger = Ledger(channel="test-recap")
+        ledger.upsert_claim(Claim(
+            id="c1", text="Redis memory is at 80 percent",
+            epistemic_status="OBSERVED", speaker_role="DevOps Lead",
+            confidence=0.9, at=1000,
+        ))
+        ledger.upsert_claim(Claim(
+            id="c2", text="Redis is probably the root cause",
+            epistemic_status="INFERRED", speaker_role="Echo",
+            confidence=0.5, at=2000,
+        ))
+
+        text = ledger.recap()
+        self.assertIn("Redis memory is at 80 percent", text)
+        self.assertNotIn("probably the root cause", text)
+
+    def test_inferred_claims_do_not_crowd_out_older_sourceable_ones(self):
+        """
+        Regression: filtering INFERRED claims used to happen AFTER slicing
+        to `max_claims`, so if several of the most-recent N claims happened
+        to be INFERRED, those slots were wasted — older non-INFERRED claims
+        that would otherwise have fit inside the window were silently
+        dropped from the recap entirely, undermining the exact guarantee
+        `recap()` exists to provide to a rejoining agent.
+        """
+        ledger = Ledger(channel="test-recap-crowding")
+        # One real, sourceable claim, oldest.
+        ledger.upsert_claim(Claim(
+            id="real-1", text="Checkout latency spiked to 900ms",
+            epistemic_status="OBSERVED", speaker_role="DevOps Lead",
+            confidence=0.9, at=1000,
+        ))
+        # Three INFERRED claims, all more recent, filling the rest of a
+        # max_claims=3 window if the filter ran after the slice.
+        for i in range(3):
+            ledger.upsert_claim(Claim(
+                id=f"inferred-{i}", text=f"Echo's own guess {i}",
+                epistemic_status="INFERRED", speaker_role="Echo",
+                confidence=0.4, at=2000 + i,
+            ))
+
+        text = ledger.recap(max_claims=3)
+        self.assertIn(
+            "Checkout latency spiked to 900ms", text,
+            "an older sourceable claim was crowded out by INFERRED claims that never appear anyway",
+        )
 
 
 if __name__ == "__main__":

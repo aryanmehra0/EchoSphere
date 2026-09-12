@@ -87,7 +87,7 @@ export function forgetAgent(channel: string): ActiveAgent | null {
 }
 
 /** Where Zone 3 lives, as HTTP. */
-function slowLoopBase(): string {
+export function slowLoopBase(): string {
   /*
     ── THIS IS SERVER-SIDE, SO IT MUST NOT USE THE PUBLIC URL ────────────────
     `NEXT_PUBLIC_SLOW_LOOP_WS` exists for the BROWSER: once the console is

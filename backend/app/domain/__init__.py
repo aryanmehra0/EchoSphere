@@ -21,6 +21,8 @@ from .models import (
     now_ms,
 )
 
+from .services.telemetry import TelemetryReading, TelemetryService, telemetry_service
+
 __all__ = [
     "Claim",
     "Contradiction",
@@ -34,5 +36,8 @@ __all__ = [
     "Transcript",
     "Unchecked",
     "now_ms",
+    "TelemetryReading",
+    "TelemetryService",
+    "telemetry_service",
 ]
 

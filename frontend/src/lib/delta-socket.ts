@@ -5,10 +5,17 @@ import type { AgoraTranscript } from "./agora-transcript";
 import type { IncidentAction } from "./incident-reducer";
 import type {
   ApprovalRequest,
+  Claim,
+  ConnectorConfig,
+  ConnectorProvider,
+  ConnectorStatus,
+  IncidentChannelSummary,
   IncidentDelta,
   ParticipantRole,
   PostMortemResponse,
+  ProjectWorkspace,
   RosterParticipant,
+  TelemetryReading,
   Transcript,
   UserProfile,
 } from "./types";
@@ -54,6 +61,7 @@ export type SocketStatus =
 
 interface Options {
   url: string;
+  channel?: string;
   /** Every action is dispatched straight into the incident reducer. */
   dispatch: (action: IncidentAction) => void;
   onStatus?: (status: SocketStatus) => void;
@@ -112,15 +120,46 @@ interface WirePayload extends IncidentDelta {
   transcripts?: Transcript[];
 }
 
+function withChannel(url: string, channel: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.set("channel", channel);
+    return u.toString();
+  } catch {
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}channel=${encodeURIComponent(channel)}`;
+  }
+}
+
 export function openDeltaSocket({
   url,
+  channel,
   dispatch,
   onStatus,
   onUnavailable,
 }: Options): DeltaSocket {
+  const socketUrl = channel ? withChannel(url, channel) : url;
   let ws: WebSocket | null = null;
   let lastSeq: number | null = null;
   let attempts = 0;
+  /*
+    ── WHY A GENERATION COUNTER ─────────────────────────────────────────────
+    `ws.close()` (the gap-detection path below, and the handshake-timeout
+    path above) does not synchronously discard messages the browser already
+    queued for that socket — a late `onmessage` for the OLD connection can
+    still fire after `connect()` has already created a NEW one. Both
+    closures share the same `lastSeq` variable, so a stale frame arriving
+    after the new socket already advanced it (via its own SNAPSHOT/DELTA)
+    could overwrite `lastSeq` backward, and — since the reducer's upserts
+    are keyed by id, not guarded by seq — actually re-apply stale data over
+    newer state.
+
+    Every handler attached in `connect()` checks `myGeneration === generation`
+    before doing anything, so a callback from a socket `connect()` has since
+    superseded is a no-op, full stop — not just for `lastSeq`, for the
+    handler's entire body.
+  */
+  let generation = 0;
   let closedByCaller = false;
   /** Fires if the handshake never resolves. Cleared by open, close or retry. */
   let connectTimer: number | null = null;
@@ -154,8 +193,14 @@ export function openDeltaSocket({
 
     status(attempts === 0 ? "connecting" : "reconnecting");
 
+    // This connection's identity. Every handler below closes over this
+    // value (not the mutable `generation` variable directly) and checks it
+    // against the current `generation` before acting — see the field
+    // comment above `generation`'s declaration.
+    const myGeneration = ++generation;
+
     try {
-      ws = new WebSocket(url);
+      ws = new WebSocket(socketUrl);
     } catch {
       scheduleRetry();
       return;
@@ -191,6 +236,7 @@ export function openDeltaSocket({
     }, budget);
 
     ws.onopen = () => {
+      if (myGeneration !== generation) return; // superseded — see `generation` above
       clearConnectTimer();
       attempts = 0;
       status("live");
@@ -199,6 +245,7 @@ export function openDeltaSocket({
     };
 
     ws.onmessage = (event) => {
+      if (myGeneration !== generation) return; // a stale socket's queued message — ignore entirely
       let msg: {
         kind?: string;
         seq?: number;
@@ -221,6 +268,9 @@ export function openDeltaSocket({
       }
 
       if (msg.kind === "SNAPSHOT") {
+        // Unconditional, unlike the DELTA/REPLAY guard below: a snapshot is
+        // the server's authoritative current state regardless of how its
+        // seq compares to whatever this client saw before.
         lastSeq = msg.seq ?? null;
         if (msg.state) {
           // Replace rather than merge: a snapshot is the server's authoritative
@@ -232,6 +282,14 @@ export function openDeltaSocket({
 
       if (msg.kind === "DELTA" || msg.kind === "REPLAY") {
         const seq = msg.seq ?? 0;
+
+        // Monotonic backstop: even with the generation guard above, refuse
+        // to move `lastSeq` backward or re-apply a payload this client has
+        // already moved past. Belt-and-suspenders — the generation guard
+        // should already have caught a stale-socket message, but a
+        // reused/miscounted seq from the SAME socket costs nothing extra
+        // to also refuse here.
+        if (lastSeq !== null && seq <= lastSeq) return;
 
         // Gap detection while connected. A jump means we missed a frame, and
         // the cheapest correct recovery is to reconnect and let the server
@@ -250,6 +308,7 @@ export function openDeltaSocket({
     };
 
     ws.onclose = () => {
+      if (myGeneration !== generation) return; // a newer socket already exists — don't double-schedule a retry
       clearConnectTimer();
       if (closedByCaller) return;
       scheduleRetry();
@@ -314,9 +373,9 @@ export function openDeltaSocket({
  * it is not a secret — it is a localhost URL in development and a public
  * endpoint in deployment.
  */
-export function slowLoopUrl(): string {
+export function slowLoopUrl(channel?: string): string {
   const configured = process.env.NEXT_PUBLIC_SLOW_LOOP_WS?.trim();
-  if (configured) return configured;
+  if (configured) return channel ? withChannel(configured, channel) : configured;
 
   /*
     ── A GUEST'S 127.0.0.1 IS THEIR OWN LAPTOP, NOT THE HOST'S ───────────────
@@ -348,19 +407,21 @@ export function slowLoopUrl(): string {
       hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
     if (!isLocal) {
       const scheme = protocol === "https:" ? "wss:" : "ws:";
-      return `${scheme}//${host}/ws/deltas`;
+      const base = `${scheme}//${host}/ws/deltas`;
+      return channel ? withChannel(base, channel) : base;
     }
   }
 
-  return "ws://127.0.0.1:8000/ws/deltas";
+  const defaultUrl = "ws://127.0.0.1:8000/ws/deltas";
+  return channel ? withChannel(defaultUrl, channel) : defaultUrl;
 }
 
 /** Same approved boundary as the delta socket, expressed as HTTP for ingress. */
-function slowLoopHttpUrl(): string {
+export function slowLoopHttpUrl(): string {
   return slowLoopUrl()
     .replace(/^wss:/, "https:")
     .replace(/^ws:/, "http:")
-    .replace(/\/ws\/deltas$/, "");
+    .replace(/\/ws\/deltas(\?.*)?$/, "");
 }
 
 /** Zone 2 mints only short-lived participant credentials after roster writes. */
@@ -792,5 +853,200 @@ export async function fetchPostMortem(): Promise<PostMortemResponse | null> {
     return null;
   }
 }
+
+/**
+ * Execute an on-demand read-only telemetry probe against the Slow Loop.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function triggerTelemetryProbe(
+  entity: string,
+  metric?: string,
+  targetEntityId?: string,
+): Promise<{ reading: TelemetryReading; claim: Claim } | null> {
+  try {
+    const res = await fetch(`${slowLoopHttpUrl()}/telemetry/probe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        entity,
+        metric: metric || null,
+        target_entity_id: targetEntityId || null,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { reading: TelemetryReading; claim: Claim };
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export interface HistoricalIncidentResult {
+  archiveId: string;
+  channel: string;
+  title: string;
+  summary: string;
+  markdown: string;
+  keyClaims: string[];
+  score: number;
+}
+
+/**
+ * Search historical incident postmortems using semantic vector search.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function searchHistoricalIncidents(
+  query: string,
+  topK: number = 6,
+  scoreThreshold: number = 0.25,
+): Promise<HistoricalIncidentResult[]> {
+  try {
+    const res = await fetch(
+      `${slowLoopHttpUrl()}/incident/search?query=${encodeURIComponent(query)}&top_k=${topK}&score_threshold=${scoreThreshold}`,
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.results || []) as HistoricalIncidentResult[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch all enterprise project workspaces and connector statuses.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function fetchProjects(): Promise<ProjectWorkspace[]> {
+  try {
+    const res = await fetch(`${slowLoopHttpUrl()}/projects`);
+    if (!res.ok) return [];
+    const data = (await res.json()) as { projects?: ProjectWorkspace[] };
+    return data.projects ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch complete workspace details for a specific project.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function fetchProjectDetails(projectId: string): Promise<ProjectWorkspace | null> {
+  try {
+    const res = await fetch(`${slowLoopHttpUrl()}/projects/${encodeURIComponent(projectId)}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { project?: ProjectWorkspace };
+    return data.project ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save or update connector credentials for a project.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function saveConnectorConfig(
+  projectId: string,
+  payload: {
+    provider: ConnectorProvider | string;
+    name?: string;
+    endpoint?: string;
+    secret?: string;
+    apiKey?: string;
+    authHeader?: string;
+    region?: string;
+    serviceFilter?: string;
+  },
+): Promise<ConnectorConfig | null> {
+  try {
+    const res = await fetch(`${slowLoopHttpUrl()}/projects/${encodeURIComponent(projectId)}/connectors`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { connector?: ConnectorConfig };
+    return data.connector ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run active health and latency ping test against a project connector.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function testConnectorConnection(
+  projectId: string,
+  payload: {
+    provider: ConnectorProvider | string;
+    endpoint?: string;
+    secret?: string;
+    region?: string;
+    serviceFilter?: string;
+  },
+): Promise<{
+  status: ConnectorStatus;
+  latencyMs: number;
+  message: string;
+  metricsDiscovered?: number;
+  testedAt?: number;
+}> {
+  try {
+    const res = await fetch(`${slowLoopHttpUrl()}/projects/${encodeURIComponent(projectId)}/connectors/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      return {
+        status: "ERROR",
+        latencyMs: 0,
+        message: `HTTP ${res.status}: Connection test failed`,
+      };
+    }
+    return (await res.json()) as {
+      status: ConnectorStatus;
+      latencyMs: number;
+      message: string;
+      metricsDiscovered?: number;
+      testedAt?: number;
+    };
+  } catch (err) {
+    return {
+      status: "ERROR",
+      latencyMs: 0,
+      message: String(err),
+    };
+  }
+}
+
+/**
+ * Spin up a new incident war room channel for a project.
+ * Zone 1 egress is confined to this module (v6 §10.1).
+ */
+export async function createProjectIncident(
+  projectId: string,
+  payload: {
+    title: string;
+    severity: number;
+    channel: string;
+  },
+): Promise<IncidentChannelSummary | null> {
+  try {
+    const res = await fetch(`${slowLoopHttpUrl()}/projects/${encodeURIComponent(projectId)}/incidents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { incident?: IncidentChannelSummary };
+    return data.incident ?? null;
+  } catch {
+    return null;
+  }
+}
+
 
 

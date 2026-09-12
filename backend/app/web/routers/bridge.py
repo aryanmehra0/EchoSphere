@@ -22,6 +22,40 @@ log = logging.getLogger("echo.bridge.routes")
 router = APIRouter(prefix="/bridge")
 
 
+@router.post("/roster")
+async def bridge_roster(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    Record one participant's role for this bridge, as decided by Zone 2.
+
+    Called server-side by `/api/token` right after it mints a token — never
+    directly by a browser. Zone 2 has already resolved the caller's real,
+    authenticated identity and capped the requested role against it before
+    this call is made; this endpoint just records that decision so
+    `/approval/redeem` has something real to look up by uid instead of
+    trusting whatever role string arrives with the redeem request itself.
+
+    Overwrites any prior entry for the same uid — a participant's role can
+    change (e.g. handing off Incident Commander mid-bridge), and the roster
+    should reflect only their current one.
+    """
+    current = session(body.get("channel"))
+
+    try:
+        uid = int(body.get("uid"))
+    except (TypeError, ValueError):
+        return {"error": "uid is required and must be an integer"}
+
+    role = str(body.get("role") or "")
+    current.roster[uid] = {
+        "role": role,
+        "authorized": bool(body.get("authorized")),
+        "actor_name": body.get("actorName") or body.get("actor_name"),
+        "actor_user_id": body.get("actorUserId") or body.get("actor_user_id"),
+    }
+    log.info("bridge: roster recorded uid=%s role=%r authorized=%s", uid, role, current.roster[uid]["authorized"])
+    return {"ok": True}
+
+
 @router.post("/close-out")
 async def bridge_close_out(body: dict[str, Any]) -> dict[str, Any]:
     """

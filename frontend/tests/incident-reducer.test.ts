@@ -564,3 +564,58 @@ describe("a correction retires the claim it replaces", () => {
     assert.deepEqual(selectEstablished(plain).map((c) => c.id), ["c1"]);
   });
 });
+
+describe("unbounded growth over a long-running incident", () => {
+  /*
+    A Sev-1 bridge routinely outlasts an hour. `transcripts` and `timeline`
+    only ever grow — every other collection is naturally bounded by real
+    incident cardinality, but these two accumulate one entry per utterance/
+    signal for the whole duration. Both must cap at the most recent N with
+    the OLDEST entries evicted first, never the newest.
+  */
+  const MAX = 2000;
+
+  test("the transcript feed caps at the most recent entries, oldest evicted first", () => {
+    const actions: IncidentAction[] = [];
+    for (let i = 0; i < MAX + 50; i += 1) {
+      actions.push({
+        type: "TRANSCRIPT",
+        payload: frame({ messageId: `m-${i}`, text: `utterance ${i}`, isFinal: true, at: i }),
+      });
+    }
+    const state = apply(actions);
+    assert.equal(state.transcripts.length, MAX);
+    // The oldest 50 are gone; the newest one survives.
+    assert.ok(!state.transcripts.some((t) => t.messageId === "m-0"));
+    assert.ok(!state.transcripts.some((t) => t.messageId === "m-49"));
+    assert.ok(state.transcripts.some((t) => t.messageId === "m-50"));
+    assert.ok(state.transcripts.some((t) => t.messageId === `m-${MAX + 49}`));
+  });
+
+  test("the timeline caps at the most recent events via DELTA, oldest evicted first", () => {
+    const timelineEvent = (i: number) => ({
+      id: `t-${i}`, kind: "signal" as const, text: `event ${i}`, actor: "Echo", at: i,
+    });
+    const actions: IncidentAction[] = [];
+    for (let i = 0; i < MAX + 50; i += 1) {
+      actions.push({ type: "DELTA", payload: { timeline: [timelineEvent(i)] } });
+    }
+    const state = apply(actions);
+    assert.equal(state.timeline.length, MAX);
+    assert.ok(!state.timeline.some((e) => e.id === "t-0"));
+    assert.ok(state.timeline.some((e) => e.id === `t-${MAX + 49}`));
+  });
+
+  test("a SNAPSHOT carrying more than the cap is trimmed too", () => {
+    const timelineEvent = (i: number) => ({
+      id: `t-${i}`, kind: "signal" as const, text: `event ${i}`, actor: "Echo", at: i,
+    });
+    const events = Array.from({ length: MAX + 50 }, (_, i) => timelineEvent(i));
+    const state = incidentReducer(initialIncidentState, {
+      type: "SNAPSHOT",
+      payload: { timeline: events },
+    });
+    assert.equal(state.timeline.length, MAX);
+    assert.ok(state.timeline.some((e) => e.id === `t-${MAX + 49}`));
+  });
+});

@@ -39,6 +39,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+[System.Net.WebRequest]::DefaultWebProxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
 $root = $PSScriptRoot
 $backend = Join-Path $root "backend"
 $frontend = Join-Path $root "frontend"
@@ -46,6 +47,17 @@ $python = Join-Path $backend ".venv\Scripts\python.exe"
 $envFile = Join-Path $frontend ".env.local"
 
 $WEB = "http://localhost:3000"
+foreach ($p in @(3000, 3100, 3200)) {
+    try {
+        $req = [System.Net.WebRequest]::Create("http://127.0.0.1:$p/api/health")
+        $req.Timeout = 2000
+        $req.Proxy = $null
+        $resp = $req.GetResponse()
+        $resp.Close()
+        $WEB = "http://127.0.0.1:$p"
+        break
+    } catch {}
+}
 $API = "http://127.0.0.1:8000"
 $CHANNEL = "validate-run"
 

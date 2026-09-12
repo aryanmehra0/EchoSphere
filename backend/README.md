@@ -1,74 +1,108 @@
-# EchoSphere — Zone 3, the Slow Loop
+# EchoSphere — Zone 3: The Privileged Slow Loop
 
-The privileged process (v6 §10.1). Holds the analytical LLM key and, eventually,
-Jira / Slack / PagerDuty. Next.js holds Agora credentials only; that split is
-what makes the Blast Radius claim true by construction.
+The privileged Python / FastAPI service (v6 §10.1). Holds the analytical LLM keys, runs the epistemic intelligence pipeline, manages the Evidence Ledger, coordinates with Redis Streams & Qdrant Vector DB, and drives Echo's proactive voice interventions.
 
-## Run
+Next.js (Zone 2) holds Agora token-minting credentials only; Zone 3 holds all analysis keys and proxy tool integrations. That strict boundary makes the Blast Radius guarantee true by construction.
+
+---
+
+## Quick Start
+
+```powershell
+# From the repository root:
+.\start.ps1 -Tunnel -Reset
+```
+
+Or manually:
 
 ```bash
 cd backend
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt
 
-.venv/Scripts/python -m uvicorn app.main:app --reload --port 8000
-.venv/Scripts/python -m unittest discover -s tests -t .      # 13 tests
+# Run the Slow Loop (port 8000)
+.venv/Scripts/python -m uvicorn app.main:app --port 8000
+
+# Run all 334 unit tests
+.venv/Scripts/python -m unittest discover -s tests -t .
 ```
 
-Credentials are read from `backend/.env`, falling back to
-`frontend/.env.local` — so one filled-in file drives both processes.
+Verify service health:
 
 ```bash
-curl 127.0.0.1:8000/health          # want ready:true
+curl http://127.0.0.1:8000/health
 ```
 
-## What exists
+Expected output: `{"ready": true, "persistence": {"postgres": true, "sqlite_wal": true}, "redis": {"connected": true}, "vectorStore": {"connected": true}}`.
 
-| Module | Role | v6 |
-|---|---|---|
-| `models.py` | The data contract, mirroring `frontend/src/lib/types.ts` | §9.4 |
-| `ledger.py` | Evidence Ledger — one claim table, four epistemic statuses | §6.1, §9.1 |
-| `utterance.py` | **Composes Echo's exact words. Rules 1–2 enforced in code.** | §6.2 |
-| `bridge.py` | Bridge Controller — `/speak`, `/interrupt`, INFERRED filter, 12s floor | §5 |
-| `deltas.py` | Delta Hub — `seq`, HELLO / SNAPSHOT / REPLAY | §9.2, §9.3 |
-| `main.py` | FastAPI surface: ingress, ledger, tool webhook, dashboard socket | §4 |
+---
 
-## The one deviation worth knowing about
+## Directory Structure & DDD Architecture
 
-v6 §5.1 drives Echo's proactive speech with **Custom Instruction Injection** —
-the Slow Loop sends an instruction and the Fast Loop LLM decides what to say.
-Measured on a live channel, that returns HTTP 200 and produces **no speech**.
+```
+backend/
+├── app/
+│   ├── application/
+│   │   └── services/          # Orchestration layer (no FastAPI dependencies)
+│   │       ├── budget.py      # LLM token budget tracking & multi-key rotation
+│   │       ├── extraction.py  # Turn-windowed LLM extraction & PII redaction
+│   │       ├── pipeline.py    # Ingestion pipeline: window -> extract -> ledger -> deltas
+│   │       ├── session.py     # IncidentSession registry (channel-isolated state)
+│   │       └── speech.py      # SpeechCoordinator (enforces cooldown & interruption rules)
+│   │
+│   ├── domain/                # Pure business logic & epistemic governance
+│   │   ├── models.py          # Value objects & dataclasses (Claim, Entity, Task, etc.)
+│   │   ├── ledger.py          # EvidenceLedger aggregate root (merge, dedupe, query)
+│   │   ├── policies/          # Policy gates
+│   │   │   ├── authorization.py   # Two-channel nonce-bound authorization gate
+│   │   │   ├── contradiction.py   # 2-stage contradiction detection (Lexical + Qdrant Cosine)
+│   │   │   ├── degradation.py     # Graceful fallback state machine (v6 §13)
+│   │   │   ├── panel.py           # 3-agent Deliberation Panel (Skeptic vs Seeker + Referee)
+│   │   │   ├── postmortem.py      # Automated Sev-1 postmortem report generator
+│   │   │   ├── privacy.py         # "Off-the-record" consent gate (§10.5)
+│   │   │   ├── proxy.py           # Proxy Action Layer (safe tool execution)
+│   │   │   ├── reconciliation.py  # Canonical entity alias promotion & resolution
+│   │   │   ├── redaction.py       # PII & credential scrubbing before storage
+│   │   │   └── utterance.py       # Rule 1 Anti-Causal sentence validator (EpistemicViolation)
+│   │   └── services/          # Active domain services
+│   │       ├── elimination.py     # Hypothesis Elimination Matrix (falsifies theories with telemetry)
+│   │       ├── projects.py        # Enterprise multi-tenant project & war room manager
+│   │       └── telemetry.py       # Live telemetry synthesis & metric probing
+│   │
+│   ├── infrastructure/        # Adapters & storage backends
+│   │   ├── agora_agent.py     # Agora Conversational AI SDK client & session manager
+│   │   ├── agora_bridge.py    # BridgeController (/speak, /interrupt)
+│   │   ├── config.py          # Environment configuration & credential inspection
+│   │   ├── deltas.py          # DeltaHub (WebSockets, snapshot ring buffer, Redis mirror)
+│   │   ├── event_store.py     # SQLite WAL append-only event store
+│   │   ├── groq_client.py     # Groq LLM client with automatic key rotation
+│   │   ├── redis_bus.py       # Redis 7 client (Streams XADD/XREAD, distributed locks)
+│   │   ├── store.py           # Dual-tier persistence (PostgreSQL 16 on 5434 + SQLite WAL)
+│   │   └── vector_store.py    # Qdrant Vector DB (384-d semantic embeddings, cosine retrieval)
+│   │
+│   └── web/                   # Transport layer (FastAPI routes & middleware)
+│       ├── deps.py            # Process-scoped dependencies (HTTP client, session lookup)
+│       ├── middleware.py      # Tunnel gate (AGENT_TOOL_SECRET / HMAC-SHA256 verification)
+│       └── routers/           # HTTP & WebSocket endpoints
+│           ├── agent.py       # Agora agent lifecycle endpoints
+│           ├── approval.py    # Critical action approval endpoints
+│           ├── bridge.py      # Voice bridge utterance trigger (/bridge/say)
+│           ├── deltas.py      # /ws/deltas WebSocket streaming
+│           ├── ingest.py      # /observer/transcript speech ingestion
+│           ├── ops.py         # /health, /incident/reset, /incident/postmortem
+│           ├── projects.py    # /projects multi-incident API
+│           ├── telemetry.py   # /telemetry/probe live metrics API
+│           └── tools.py       # Agora Cloud Agent tool webhooks (/tools/query_incident_state)
+│
+└── tests/                     # 334 comprehensive unit and integration tests
+```
 
-Agora exposes `POST /agents/{id}/speak`, which drives the TTS module with a
-literal string, and `POST /agents/{id}/interrupt`. Both verified live: 80–87%
-peak audio, interrupt acknowledged in ~433 ms.
+---
 
-**This is an upgrade, not a workaround.** §6.2 concedes that Rules 1–2 are
-"prompt-enforced and could be violated by a creative model". Now the Slow Loop
-composes the literal sentence, so attribution and non-causal phrasing are
-properties of `utterance.py` and its tests. A sentence that lacks a source, or
-asserts causation in the indicative, **cannot be constructed** — `validate()`
-raises before anything reaches the channel.
+## Key Invariants
 
-## The Observer is an adapter, on purpose
+1. **Rule 1 Enforced in Code:** Echo never diagnoses or asserts causation. `backend/app/domain/policies/utterance.py` regex-inspects every sentence composed for speech. Any causal language raises `EpistemicViolation` before reaching the audio channel.
+2. **Deterministic State via Evidence Ledger:** Factual queries from the voice agent never touch an LLM. Agora calls `POST /tools/query_incident_state`, which reads directly from `ledger.query()`.
+3. **Fail-Closed Security Gate:** Requests arriving over public tunnels must present `X-Echo-Tool-Token` matching `AGENT_TOOL_SECRET` or valid HMAC-SHA256 signature.
+4. **Resilient Dual-Tier Storage:** If PostgreSQL is offline, SQLite WAL mode ensures zero data loss. If Redis or Qdrant are offline, the engine falls back to in-memory queues and deterministic cosine similarity.
 
-v6 §4.3 pulls per-UID PCM off the SD-RTN via
-`on_playback_audio_frame_before_mixing`, which needs `agora-python-server-sdk`.
-That package has **no wheel for Python 3.14** — the only interpreter on this
-machine — and fails to build from source.
-
-So the Observer is pluggable and `POST /observer/transcript` is its seam.
-Anything that produces role-attributed text drives the identical downstream
-pipeline, which also makes Rehearsal Rig Tier 2 (§15) trivial.
-
-The agent-UID exclusion that closes **G2** lives at that seam: uid 9000/9001 is
-dropped as the first branch, before anything is allocated.
-
-To enable the real Observer: install Python 3.12, build a second venv, add
-`agora-python-server-sdk`, and set `OBSERVER_MODE=agora`.
-
-## Still to build
-
-`extraction.py` (§14.2 · Groq), `contradiction.py` (§7 two-stage · closes G4),
-`rti.py` (§8 normalized/EWMA/hysteresis · closes G5), `proxy.py` +
-`authorization.py` (§4.5, §10.2 · closes G7), and the real Observer.

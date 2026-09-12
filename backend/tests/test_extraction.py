@@ -14,6 +14,7 @@ import unittest
 
 from app.extraction import (
     resolve_links,
+    ExtractionDropped,
     SchemaError,
     TurnWindow,
     compact,
@@ -209,14 +210,23 @@ class TestExtractCall(unittest.TestCase):
         self.assertEqual(calls["n"], 2, "the repair retry did not fire")
         self.assertEqual(out["claims"], [])
 
-    def test_two_failures_drop_the_window_without_raising(self):
-        # Losing one turn is acceptable; taking the pipeline down is not.
+    def test_two_failures_raise_so_the_caller_can_requeue(self):
+        """
+        This used to return `{k: [] for k in _KEYS}` and swallow the failure
+        here — but the one real caller, `LlmExtractionStep.execute()`, only
+        requeues a window's drained frames inside an `except Exception`
+        block, documented as firing "on any extraction exception". Returning
+        normally skipped that path entirely: the frames were neither
+        processed nor put back, so a window that failed schema validation
+        twice in a row lost that speech silently. It must raise instead, so
+        the caller's own requeue logic — which already exists and is tested
+        — actually runs.
+        """
         async def broken(system, user):
             return "still not json"
 
-        out = run(extract("x", call_llm=broken))
-        self.assertEqual(out["claims"], [])
-        self.assertEqual(out["entities"], [])
+        with self.assertRaises(ExtractionDropped):
+            run(extract("x", call_llm=broken))
 
     def test_pii_is_redacted_BEFORE_the_llm_sees_it(self):
         seen: dict[str, str] = {}

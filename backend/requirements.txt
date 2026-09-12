@@ -45,3 +45,13 @@ agora-agents>=2.3.0
 # database is unreachable, because a laptop with no Docker must still be
 # able to run the bridge.
 asyncpg>=0.29
+
+# Redis Streams backbone (app/infrastructure/redis_bus.py) and Qdrant
+# semantic index (app/infrastructure/vector_store.py). Both OPTIONAL at
+# runtime the same way asyncpg is above — degrade to in-memory/no-op when
+# unreachable. Genuinely required to import the modules that use them
+# though: they were previously only present because this dev environment
+# happened to have them pip-installed already, so a fresh
+# `pip install -r requirements.txt` would import-error on first use.
+redis>=8.0
+qdrant-client>=1.19

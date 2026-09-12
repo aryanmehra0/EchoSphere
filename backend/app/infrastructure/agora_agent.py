@@ -358,6 +358,15 @@ async def start(
         },
     )
     agent = agent.with_stt(stt).with_llm(llm).with_tts(tts_obj)
+    if tools:
+        # Crucial fix: OpenAI vendor class in the Agora SDK strips 'tools'
+        # during to_config(), leaving Agora's Conversational AI engine with
+        # enable_tools: True but an empty tools array. Attaching tools directly
+        # to agent._llm ensures the wire properties include all tool definitions,
+        # parameters schemas, and webhook URLs (query_incident_state, probe_telemetry).
+        if agent._llm is None:
+            agent._llm = {}
+        agent._llm["tools"] = tools
 
     session = agent.create_async_session(
         channel=channel,

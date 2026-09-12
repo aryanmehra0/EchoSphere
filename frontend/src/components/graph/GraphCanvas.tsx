@@ -11,17 +11,26 @@ import {
   type Edge,
   type Node,
 } from "@xyflow/react";
-import { Crosshair, GitBranch, Maximize2 } from "lucide-react";
+import { Crosshair, GitBranch, Maximize2, Layers, ChevronDown, Check } from "lucide-react";
 
 import { useIncident } from "@/lib/incident-store";
 import { cn } from "@/lib/cn";
 import { computeGraphLayout, type NodePosition } from "@/lib/graph-layout";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { TOPOLOGY_SCENARIOS } from "@/lib/topology-scenarios";
 import { EntityNode, type EntityNodeType } from "./EntityNode";
 import { GraphInspector } from "./GraphInspector";
 import { GraphLegend } from "./GraphLegend";
-import type { EdgeKind, EntityStatus } from "@/lib/types";
+import type { EdgeKind, EntityStatus, Scenario } from "@/lib/types";
 
 /**
  * The root-cause knowledge graph.
@@ -55,9 +64,26 @@ const EDGE_STYLE: Record<EdgeKind, { dashed: boolean; width: number }> = {
 };
 
 function Canvas() {
-  const { state, selectedEntityId, setSelectedEntityId } = useIncident();
+  const { state, dispatch, selectedEntityId, setSelectedEntityId } = useIncident();
   const { fitView } = useReactFlow();
   const [manualPositions, setManualPositions] = useState<Record<string, NodePosition>>({});
+  const [activeScenarioId, setActiveScenarioId] = useState<string>("clean");
+
+  const activeScenario = useMemo(
+    () => TOPOLOGY_SCENARIOS.find((s) => s.id === activeScenarioId) ?? TOPOLOGY_SCENARIOS[0],
+    [activeScenarioId],
+  );
+
+  const handleSelectScenario = useCallback(
+    (scenario: Scenario) => {
+      setActiveScenarioId(scenario.id);
+      dispatch({ type: "LOAD_SCENARIO", scenario });
+      if (scenario.entities.length > 0) {
+        window.setTimeout(() => fitView({ padding: 0.12, duration: 420, maxZoom: 1.15 }), 80);
+      }
+    },
+    [dispatch, fitView],
+  );
 
   const contestedEntityIds = useMemo(() => {
     const claimEntityMap = new Map(state.claims.map((c) => [c.id, c.entity]));
@@ -255,6 +281,54 @@ function Canvas() {
           </div>
 
           <div className="pointer-events-auto flex items-center gap-1.5">
+            {/* ── Scenario Selector ─────────────────────────────────────── */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-6 gap-1.5 px-2 font-mono text-[10px]"
+                  title="Switch Pre-hydrated Architecture Topology Scenario"
+                >
+                  <Layers size={11} strokeWidth={2} className="text-ink-4" />
+                  <span className="max-w-[130px] truncate">{activeScenario.name}</span>
+                  <ChevronDown size={10} className="text-ink-4 opacity-70" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-72">
+                <DropdownMenuLabel className="px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-ink-4">
+                  Incident Topology Scenarios
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {TOPOLOGY_SCENARIOS.map((sc) => {
+                  const isSelected = sc.id === activeScenarioId;
+                  return (
+                    <DropdownMenuItem
+                      key={sc.id}
+                      onClick={() => handleSelectScenario(sc)}
+                      className={cn(
+                        "flex flex-col items-start gap-1 p-2 cursor-pointer",
+                        isSelected && "bg-hover/80",
+                      )}
+                    >
+                      <div className="flex w-full items-center justify-between">
+                        <span className="font-semibold text-xs text-ink">{sc.name}</span>
+                        <div className="flex items-center gap-1">
+                          <span className="rounded-[2px] border border-line px-1 py-0.2 font-mono text-[8px] text-ink-3">
+                            {sc.badge}
+                          </span>
+                          {isSelected && <Check size={12} className="text-stable" />}
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-ink-4 leading-tight">
+                        {sc.description}
+                      </p>
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             <GraphLegend />
             <Button
               size="sm"

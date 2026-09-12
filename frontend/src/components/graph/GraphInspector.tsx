@@ -1,16 +1,21 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  Activity,
   AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
+  CheckCircle2,
   Database,
   Globe,
+  Loader2,
   Network,
+  Radio,
   Route,
   Server,
   Users,
+  Wrench,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -18,8 +23,10 @@ import {
 import { useIncident } from "@/lib/incident-store";
 import { cn } from "@/lib/cn";
 import { Dot, statusTone } from "@/components/ui/Signal";
+import { Button } from "@/components/ui/Button";
 import { clockShort, initials, pct } from "@/lib/format";
-import type { EntityKind, EntityStatus } from "@/lib/types";
+import { triggerTelemetryProbe } from "@/lib/delta-socket";
+import type { EntityKind, EntityStatus, TelemetryReading } from "@/lib/types";
 
 const GLYPH: Record<EntityKind, LucideIcon> = {
   service: Server,
@@ -47,7 +54,10 @@ const METRIC_TONE: Record<EntityStatus, string> = {
 };
 
 export function GraphInspector() {
-  const { state, selectedEntityId, setSelectedEntityId } = useIncident();
+  const { state, dispatch, selectedEntityId, setSelectedEntityId } = useIncident();
+  const [isProbing, setIsProbing] = useState(false);
+  const [lastProbe, setLastProbe] = useState<TelemetryReading | null>(null);
+  const [probeNotice, setProbeNotice] = useState<string | null>(null);
 
   // Pressing Escape closes the inspector
   useEffect(() => {
@@ -66,13 +76,21 @@ export function GraphInspector() {
     [state.entities, selectedEntityId],
   );
 
+  // Derive active probe result strictly for the currently selected entity
+  const activeProbe = lastProbe?.entityId === entity?.id ? lastProbe : null;
+
   const entityClaims = useMemo(
     () => (entity ? state.claims.filter((c) => c.entity === entity.id) : []),
     [state.claims, entity],
   );
 
-  const established = useMemo(
-    () => entityClaims.filter((c) => c.epistemicStatus === "OBSERVED" || c.epistemicStatus === "TOOL_RESULT"),
+  const toolResults = useMemo(
+    () => entityClaims.filter((c) => c.epistemicStatus === "TOOL_RESULT"),
+    [entityClaims],
+  );
+
+  const observed = useMemo(
+    () => entityClaims.filter((c) => c.epistemicStatus === "OBSERVED"),
     [entityClaims],
   );
 
@@ -109,6 +127,31 @@ export function GraphInspector() {
     [state.entities],
   );
 
+  const handleRunProbe = async () => {
+    if (!entity || isProbing) return;
+    setIsProbing(true);
+    setProbeNotice("Querying APM...");
+    try {
+      const result = await triggerTelemetryProbe(entity.id, undefined, entity.id);
+      if (result) {
+        setLastProbe(result.reading);
+        if (result.claim) {
+          dispatch({ type: "DELTA", payload: { claims: [result.claim] } });
+        }
+        setProbeNotice("Probe verified & committed to Ledger");
+        setTimeout(() => setProbeNotice(null), 3500);
+      } else {
+        setProbeNotice("Telemetry probe returned no data");
+        setTimeout(() => setProbeNotice(null), 3000);
+      }
+    } catch {
+      setProbeNotice("Telemetry query failed");
+      setTimeout(() => setProbeNotice(null), 3000);
+    } finally {
+      setIsProbing(false);
+    }
+  };
+
   if (!entity) return null;
 
   const Glyph = GLYPH[entity.kind] ?? Server;
@@ -118,7 +161,7 @@ export function GraphInspector() {
   return (
     <div
       className={cn(
-        "pointer-events-auto absolute top-12 right-3 z-20 w-84 max-h-[calc(100%-3.5rem)]",
+        "pointer-events-auto absolute top-12 right-3 z-20 w-88 max-h-[calc(100%-3.5rem)]",
         "flex flex-col overflow-hidden rounded-lg border border-line bg-raised/95 shadow-xl backdrop-blur-md",
         "animate-in fade-in slide-in-from-right-2 duration-150 ease-out",
       )}
@@ -160,14 +203,63 @@ export function GraphInspector() {
 
       {/* ── Scrollable Body ───────────────────────────────────────────────── */}
       <div className="overflow-y-auto divide-y divide-line-faint p-3 space-y-3">
-        {/* Metric / Status readout */}
-        <div className="flex items-center justify-between pt-1">
-          <span className="text-[10px] uppercase tracking-wider text-ink-4 font-mono">
-            Telemetry
-          </span>
-          <span className={cn("font-mono text-xs font-semibold tnum", metricTone)}>
-            {entity.metric || "Normal (no alert)"}
-          </span>
+        {/* ── Telemetry & Active Probe Card ───────────────────────────────── */}
+        <div className="pt-1 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] uppercase tracking-wider text-ink-4 font-mono flex items-center gap-1">
+              <Activity size={10} className="text-ink-4" /> Live Telemetry
+            </span>
+            <span className={cn("font-mono text-xs font-semibold tnum", metricTone)}>
+              {entity.metric || "Normal (no alert)"}
+            </span>
+          </div>
+
+          {/* Active Probe Trigger Button */}
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleRunProbe}
+            disabled={isProbing}
+            className="w-full h-7 gap-1.5 text-xs font-medium justify-center cursor-pointer border-line"
+          >
+            {isProbing ? (
+              <>
+                <Loader2 size={12} className="animate-spin text-ink-3" />
+                <span>Querying Telemetry Provider...</span>
+              </>
+            ) : (
+              <>
+                <Radio size={12} className="text-stable" />
+                <span>Run Telemetry Probe</span>
+              </>
+            )}
+          </Button>
+
+          {/* Probe Status Feedback */}
+          {probeNotice && (
+            <div className="flex items-center gap-1 text-[10px] font-mono text-stable animate-in fade-in">
+              <CheckCircle2 size={10} />
+              <span>{probeNotice}</span>
+            </div>
+          )}
+
+          {/* Real-time Probe Result Card */}
+          {activeProbe && (
+            <div className="rounded border border-stable/40 bg-stable/10 p-2 text-2xs space-y-1 animate-in fade-in slide-in-from-top-1">
+              <div className="flex items-center justify-between text-[9px] font-mono font-semibold text-stable">
+                <span className="flex items-center gap-1">
+                  <CheckCircle2 size={10} />
+                  {activeProbe.provider} Probe Reading
+                </span>
+                <span className="rounded bg-stable/20 px-1 py-0.2">100% CONF</span>
+              </div>
+              <p className="text-[10.5px] leading-snug text-ink">{activeProbe.formatted}</p>
+              <div className="flex items-center justify-between text-[8.5px] font-mono text-ink-4 pt-0.5">
+                <span>Metric: {activeProbe.metricName}</span>
+                <span>{clockShort(activeProbe.timestamp)}</span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Active Contradiction Banner */}
@@ -183,22 +275,45 @@ export function GraphInspector() {
           </div>
         )}
 
-        {/* Epistemic Ledger Attribution */}
-        <div className="pt-2">
-          <div className="flex items-center justify-between mb-1.5">
+        {/* Categorized Claims by Epistemic Status */}
+        <div className="pt-2 space-y-2">
+          <div className="flex items-center justify-between">
             <span className="text-[10px] uppercase tracking-wider text-ink-4 font-mono">
               Attributed Claims ({entityClaims.length})
             </span>
             <span className="text-[9px] text-ink-4 font-mono">
-              {established.length} est · {hypotheses.length} hyp · {inferences.length} inf
+              {toolResults.length} probe · {observed.length} obs · {hypotheses.length} hyp
             </span>
           </div>
 
           {entityClaims.length === 0 ? (
             <p className="text-[10px] text-ink-4 italic">No direct claims attributed yet.</p>
           ) : (
-            <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-              {entityClaims.map((c) => (
+            <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+              {/* Tool Results First (settled factual probes) */}
+              {toolResults.map((c) => (
+                <div
+                  key={c.id}
+                  className="rounded border border-line-faint bg-sunken/80 p-1.5 text-2xs space-y-1"
+                >
+                  <div className="flex items-center justify-between text-[8px] font-mono">
+                    <span className="flex items-center gap-1 text-ink-3">
+                      <Wrench size={9} className="text-ink-4" />
+                      <strong className="text-ink">{c.speakerRole}</strong>
+                    </span>
+                    <span className="rounded bg-overlay px-1 py-0.2 text-[8px] text-stable font-semibold">
+                      TOOL_RESULT
+                    </span>
+                  </div>
+                  <p className="text-[11px] leading-snug text-ink-2">{c.text}</p>
+                  <div className="text-right text-[8.5px] font-mono text-ink-4">
+                    {clockShort(c.at)} · 100% conf
+                  </div>
+                </div>
+              ))}
+
+              {/* Observed human measurements */}
+              {observed.map((c) => (
                 <div
                   key={c.id}
                   className="rounded border border-line-faint bg-sunken/60 p-1.5 text-2xs space-y-1"
@@ -212,6 +327,33 @@ export function GraphInspector() {
                       <span>{c.speakerRole}</span>
                     </span>
                     <span className="tnum">{clockShort(c.at)} · {pct(c.confidence)}</span>
+                  </div>
+                </div>
+              ))}
+
+              {/* Hypotheses */}
+              {hypotheses.map((c) => (
+                <div
+                  key={c.id}
+                  className="rounded border border-warning/30 bg-warning/5 p-1.5 text-2xs space-y-1"
+                >
+                  <p className="text-[11px] leading-snug text-ink-2">{c.text}</p>
+                  <div className="flex items-center justify-between text-[8.5px] font-mono text-ink-4">
+                    <span className="text-warning font-semibold">HYPOTHESIS</span>
+                    <span>{c.speakerRole} · {clockShort(c.at)}</span>
+                  </div>
+                </div>
+              ))}
+
+              {/* Inferences */}
+              {inferences.map((c) => (
+                <div
+                  key={c.id}
+                  className="rounded border border-dashed border-line p-1.5 text-2xs space-y-1"
+                >
+                  <p className="text-[11px] leading-snug text-ink-3 italic">{c.text}</p>
+                  <div className="text-[8.5px] font-mono text-ink-4 text-right">
+                    INFERRED (dashboard only)
                   </div>
                 </div>
               ))}

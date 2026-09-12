@@ -60,6 +60,9 @@ export async function POST(request: Request) {
     }
   }
 
+  // Release the agent entry from the roster so it does not linger as a ghost.
+  await releaseEntry(channel, 9000);
+
   // Forget FIRST, so a failed leave cannot strand the channel with a
   // permanently un-reinvitable agent. Worst case Agora times the orphan out;
   // the alternative is a channel nobody can put an agent back into.

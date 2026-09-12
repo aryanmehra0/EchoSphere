@@ -21,19 +21,17 @@ log = logging.getLogger("echo.approval")
 router = APIRouter()
 
 
-async def get_entry_for(uid: int, claimed_role: str = "") -> dict[str, Any] | None:
+def get_entry_for(current: Any, uid: int) -> dict[str, Any] | None:
     """
-    Roster lookup for the redeeming session.
+    The real roster lookup — a participant's role as recorded server-side by
+    `POST /bridge/roster` at join time (see `bridge.py`), never as claimed by
+    the redeem request itself.
 
-    Validates that the participant is a valid human user in the allocated
-    UID range (1000-8999), and is an authorized role (Incident Commander or DevOps Lead).
+    A uid with no roster entry (never joined through the normal flow, or
+    joined before this session was reset) is simply unauthorized — there is
+    nothing to look up, so nothing to trust.
     """
-    if 1000 <= uid <= 8999:
-        is_auth = claimed_role in ("DevOps Lead", "Incident Commander")
-        return {"uid": uid, "role": claimed_role, "authorized": is_auth}
-    if uid == 1001:
-        return {"uid": uid, "role": "DevOps Lead", "authorized": True}
-    return {"uid": uid, "role": "unknown", "authorized": False}
+    return current.roster.get(uid)
 
 
 @router.post("/approval/verbal")
@@ -64,15 +62,19 @@ async def redeem_approval(body: dict[str, Any]) -> dict[str, Any]:
     current = session()
 
     uid = int(body.get("uid", 0))
-    role = str(body.get("role", ""))
     actor_name = body.get("actorName") or body.get("actor_name")
     actor_user_id = body.get("actorUserId") or body.get("actor_user_id")
 
-    entry = await get_entry_for(uid, role)
+    entry = get_entry_for(current, uid)
+    # The ROLE used for authorization is the one recorded on the roster at
+    # join time — never the `role` field in this request body. A body-supplied
+    # role is not read at all here; trusting it is exactly the hole this
+    # rewrite closes (see `bridge.py`'s /bridge/roster for where the real
+    # value comes from).
+    role = str((entry or {}).get("role") or "")
 
     result = current.proxy.redeem(
         str(body.get("nonce", "")), uid, role,
-        # Authority comes from the ROSTER, not from what the browser claims.
         authorized=bool(entry and entry.get("authorized")),
         actor_name=actor_name,
         actor_user_id=actor_user_id,

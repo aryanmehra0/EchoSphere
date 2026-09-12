@@ -9,7 +9,7 @@
     "spike": "node scripts/s0-bridge-spike.mjs",
     "lint": "eslint src tests --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/incident-reducer.test.ts tests/phase1-evaluation.test.ts tests/s1-identity.test.ts tests/agora-transcript.test.ts tests/active-agents.test.ts tests/agent-tools.test.ts tests/delta-socket.test.ts tests/roster-multiuser.test.ts",
+    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/incident-reducer.test.ts tests/hypothesis-matrix.test.ts tests/phase1-evaluation.test.ts tests/s1-identity.test.ts tests/agora-transcript.test.ts tests/active-agents.test.ts tests/agent-tools.test.ts tests/delta-socket.test.ts tests/roster-multiuser.test.ts",
     "verify": "npm run typecheck && npm run lint && npm run test && npm run build",
     "demo": "node scripts/demo.mjs",
     "payload": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/dump-payload.mjs"
@@ -30,8 +30,9 @@
     "agora-token": "^2.0.5",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "jose": "^6.2.12",
     "lucide-react": "^1.34.0",
-    "next": "16.3.2",
+    "next": "16.3.5",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "server-only": "^0.0.1",
@@ -43,7 +44,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.3.2",
+    "eslint-config-next": "16.3.5",
     "playwright-core": "^1.63.0",
     "tailwindcss": "^4",
     "typescript": "^5"

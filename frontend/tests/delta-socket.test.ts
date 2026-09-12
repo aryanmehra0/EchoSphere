@@ -312,3 +312,91 @@ describe("an unreachable Slow Loop must not invent an incident", () => {
     assert.ok(gateAt > unavailableAt, "the gate belongs inside onUnavailable");
   });
 });
+
+describe("a stale socket cannot corrupt state after a reconnect", { concurrency: 1 }, () => {
+  /*
+    ── THE BUG ──────────────────────────────────────────────────────────────
+    `ws.close()` does not synchronously discard messages the browser already
+    queued for that socket. Before the fix, a late `onmessage` for an OLD
+    connection could still fire after `connect()` had already created a NEW
+    one — both closures shared the same `lastSeq` variable, so a stale frame
+    could overwrite it backward, or get dispatched into the reducer, after
+    the new connection had already moved state forward.
+
+    The fake here fires `onmessage` on demand rather than modeling real
+    queuing delay, which is exactly what makes it able to reproduce "a
+    handler fires after this socket should no longer matter" deterministically.
+  */
+
+  function send(socket: FakeSocket, msg: Record<string, unknown>) {
+    socket.onmessage?.({ data: JSON.stringify(msg) });
+  }
+
+  test("a message from a superseded socket is ignored, not applied", async () => {
+    const dispatched: unknown[] = [];
+    openDeltaSocket({
+      url: "wss://tunnel.example/ws/deltas",
+      dispatch: (a) => dispatched.push(a),
+    });
+
+    const first = opened[0];
+    first.acceptHandshake();
+    send(first, { kind: "SNAPSHOT", seq: 10, state: {} });
+
+    // A gap: the code closes this socket itself and schedules a retry.
+    send(first, { kind: "DELTA", seq: 15, payload: { rti: 0.9 } });
+    assert.equal(first.closeCalls, 1, "a detected gap must close the socket");
+
+    // Let the retry ladder create the next socket.
+    await settle(650);
+    assert.equal(opened.length, 2, "a new socket should have been created");
+    const second = opened[1];
+    second.acceptHandshake();
+    send(second, { kind: "SNAPSHOT", seq: 20, state: {} });
+
+    const dispatchedBeforeStaleMessage = dispatched.length;
+
+    // The OLD socket's `onmessage` is still wired up in this fake (nothing
+    // called `.close = null` on it, matching what a real queued-frame race
+    // looks like) — deliver a late frame on it now.
+    send(first, { kind: "DELTA", seq: 11, payload: { rti: 0.1 } });
+
+    assert.equal(
+      dispatched.length, dispatchedBeforeStaleMessage,
+      "a message from the superseded socket must not reach the reducer at all",
+    );
+
+    // And it must not have perturbed sequence tracking either: a legitimate
+    // next frame on the CURRENT socket, seq 21, must be accepted normally.
+    send(second, { kind: "DELTA", seq: 21, payload: { rti: 0.5 } });
+    assert.equal(second.closeCalls, 0, "the live socket must not see a phantom gap");
+    assert.equal(
+      dispatched.length, dispatchedBeforeStaleMessage + 1,
+      "the legitimate next frame on the live socket must still be applied",
+    );
+  });
+
+  test("a duplicate or already-seen seq on the live socket is not re-applied", async () => {
+    const dispatched: unknown[] = [];
+    openDeltaSocket({
+      url: "wss://tunnel.example/ws/deltas",
+      dispatch: (a) => dispatched.push(a),
+    });
+
+    const socket = opened[0];
+    socket.acceptHandshake();
+    send(socket, { kind: "SNAPSHOT", seq: 5, state: {} });
+    send(socket, { kind: "DELTA", seq: 6, payload: { rti: 0.7 } });
+
+    const countAfterFirstDelta = dispatched.length;
+
+    // The exact same seq arrives again (a duplicate, not a gap).
+    send(socket, { kind: "DELTA", seq: 6, payload: { rti: 0.2 } });
+
+    assert.equal(socket.closeCalls, 0, "a repeat of the last-seen seq is not a gap");
+    assert.equal(
+      dispatched.length, countAfterFirstDelta,
+      "a duplicate/stale seq on an otherwise-live socket must not be re-applied",
+    );
+  });
+});

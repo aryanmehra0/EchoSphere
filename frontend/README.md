@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# EchoSphere — Zone 1 & Zone 2: Real-Time Incident Command Console
 
-## Getting Started
+The frontend console for EchoSphere, built with **Next.js 16 (Turbopack)** and **React 19**.
 
-First, run the development server:
+## Architecture & Trust Zones
+
+- **Zone 1 (Browser Client)** (`src/components/**`, `src/hooks/**`):
+  - Consumes the single source of truth: `incidentReducer` (`src/lib/incident-reducer.ts`).
+  - Connects to the Slow Loop via WebSocket `/ws/deltas` (`src/lib/delta-socket.ts`) with HELLO / SNAPSHOT / REPLAY recovery.
+  - Interactive knowledge graph powered by `@xyflow/react` (React Flow) with customized entity nodes and collision-free edge routing.
+  - Mission-control design system in `src/app/globals.css` using **IBM Plex Mono** & **IBM Plex Sans**.
+  - Audio waveform visualization via Web Audio API `AnalyserNode` in `src/hooks/useVoiceEnvelope.ts`.
+  - Never sees or imports Agora credentials (enforced by compiler & tests).
+
+- **Zone 2 (Next.js Server / API Routes)** (`src/lib/server/**`, `src/app/api/**`):
+  - Marked `import "server-only";` — any leakage to client code causes a build failure.
+  - Mints short-TTL Agora RTC/RTM tokens with strict role authorization (`src/lib/server/agora-tokens.ts`).
+  - Maintains the human participant roster and agent exclusion set (`src/lib/server/roster.ts`).
+  - Configures the Fast Loop agent prompts, epistemic rules, and VAD parameters (`src/lib/server/agent-config.ts`).
+  - Proxies requests to the Python Slow Loop (:8000) so browser traffic is same-origin.
+
+---
+
+## Commands
 
 ```bash
+# Install dependencies
+npm install
+
+# Run the Rehearsal Rig verification gate (typecheck -> lint -> tests -> build)
+npm run verify
+
+# Run unit and integration tests (172 tests)
+npm test
+
+# Start Next.js development server (Turbopack on port 3100)
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+
+# Run live conversation check
+npm run demo converse
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Environment Variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Configured in `frontend/.env.local`:
 
-## Learn More
+```ini
+AGORA_APP_ID=...
+AGORA_APP_CERTIFICATE=...
+AGORA_CUSTOMER_ID=...
+AGORA_CUSTOMER_SECRET=...
+GROQ_API_KEY=...
+TTS_VENDOR=elevenlabs          # or sarvam
+ELEVENLABS_API_KEY=...
+AGENT_TOOL_BASE_URL=https://...trycloudflare.com
+AGENT_TOOL_SECRET=...
+```
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.

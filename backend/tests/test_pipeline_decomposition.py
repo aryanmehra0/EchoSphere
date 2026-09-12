@@ -21,6 +21,7 @@ from app.models import Transcript
 from app.pipeline.context import PipelineContext
 from app.pipeline.runner import PipelineRunner
 from app.pipeline.steps.drain import WindowDrainStep
+from app.extraction import ExtractionDropped
 from app.pipeline.steps.extract import LlmExtractionStep
 from app.pipeline.steps.ingest import LedgerIngestionStep
 from app.pipeline.steps.publish import PrimaryDeltaPublishStep
@@ -91,6 +92,45 @@ class TestPipelineSteps(unittest.IsolatedAsyncioTestCase):
         self.assertIn("m1", self.session.window._seen)
         self.assertEqual(len(self.session.window.frames), 1)
         self.assertEqual(self.session.window.frames[0].message_id, "m1")
+        self.assertFalse(ctx.flushed)
+        self.assertEqual(len(ctx.frames), 0)
+
+    async def test_extract_step_requeues_frames_when_extraction_is_dropped(self) -> None:
+        """
+        Regression: `extract()` used to swallow two consecutive schema
+        failures internally and return an empty result instead of raising,
+        which meant this exact requeue path never ran for that failure mode
+        — the window's speech was neither processed nor put back. `extract()`
+        now raises `ExtractionDropped` on that path; this pins that the step
+        requeues on it exactly as it does for any other extraction failure.
+        """
+        frame = Transcript(
+            message_id="m2",
+            uid=1001,
+            role="DevOps Lead",
+            text="Redis memory looks fine",
+            is_final=True,
+            at=1000,
+        )
+        self.session.window.add(frame)
+        drained = self.session.window.drain()
+
+        ctx = PipelineContext(session=self.session, speech=self.speech)
+        ctx.flushed = True
+        ctx.frames = drained
+        ctx.raw_text = "[DevOps Lead] Redis memory looks fine"
+
+        step = LlmExtractionStep()
+
+        with patch(
+            "app.pipeline.steps.extract.extract",
+            side_effect=ExtractionDropped("dropped a window after two schema failures"),
+        ):
+            await step.execute(ctx)
+
+        self.assertIn("m2", self.session.window._seen)
+        self.assertEqual(len(self.session.window.frames), 1)
+        self.assertEqual(self.session.window.frames[0].message_id, "m2")
         self.assertFalse(ctx.flushed)
         self.assertEqual(len(ctx.frames), 0)
 
